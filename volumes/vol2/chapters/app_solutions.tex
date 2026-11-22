@@ -1,0 +1,1110 @@
+% !TeX root = ../main.tex
+\ctexset{
+  chapter={
+    name={附录\ ,},
+    number=\Alph{chapter},
+    aftername={\hfill{\fontsize{38}{38}\selectfont\sffamily\bfseries\color{tealMist}\thechapter}\par\vspace{-4mm}}
+  }
+}
+\renewcommand{\chaptermark}[1]{\markboth{附录 \thechapter\quad #1}{}}
+
+\chapter[全卷 48 道分层习题完整精解]{全卷 48 道分层习题完整精解}
+\label{app:solutions}
+
+\chapEpigraph{如果你想学会游泳，就必须下水；如果你想成为解题高手，就必须去解题。}{乔治·波利亚（George P\'olya），《怎样解题》}
+
+\begin{chapIntro}{本附录使用建议}
+本附录给出第 1--6 章全部 48 道分层习题的完整解答：
+\begin{itemize}
+  \item \textbf{A 层（概念辨析与反例查错）}：先给出明确正误判定，再给出最小显式反例或故障根因与修复代码；
+  \item \textbf{B 层（小例手算与数值直觉）}：保留精确分数与四位小数，全部中间算术均已由 Python 脚本交叉核验；
+  \item \textbf{C 层（实用推导与性质证明）}：给出零跳步的完整证明，并标注其在后续卷次（搜索、决策树、VAE、大模型对齐）的直接落点；
+  \item \textbf{D 层（编程实战与可自检实验）}：给出纯 NumPy 核心实现逻辑、固定随机种子 \texttt{2026} 下的实测参考输出与断言自检说明。
+\end{itemize}
+建议先合上附录独立作答与编码，再逐项对照推演细节与数值断言。
+\end{chapIntro}
+
+% =========================================================================
+\section{第 1 章习题精解（1.1--1.8）}
+% =========================================================================
+
+\subsection*{习题 1.1\quad 独立、互斥与条件独立辨析}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} 若 $A \cap B = \varnothing$，则 $\Prob(A \cap B) = 0$；但已知 $\Prob(A) > 0$ 且 $\Prob(B) > 0$，故 $\Prob(A)\Prob(B) > 0 \neq \Prob(A \cap B)$。事实上，正概率的互斥事件恰恰是\textbf{极度负相关}的（$A$ 发生即保证 $B$ 绝不发生）。\textbf{最小反例}：抛一枚均匀硬币，$A = \{\text{正面}\}$，$B = \{\text{反面}\}$，$\Prob(A)=\Prob(B)=0.5$，但 $\Prob(A\cap B)=0 \neq 0.25$。
+  \item \textbf{错误。} 边际独立不能推出条件独立（典型机制为汇合结构 / Explaining Away）。\textbf{最小反例}：设 $X, Y \stackrel{\text{i.i.d.}}{\sim} \mathrm{Bernoulli}(0.5)$，令 $Z = X \oplus Y$（异或，或令 $Z = X + Y$）。显然 $X \indep Y$；但一旦给定 $Z = 1$，只要知道 $X = 1$ 就必然确定 $Y = 0$，即 $\Prob(Y=0 \mid X=1, Z=1) = 1 \neq \Prob(Y=0 \mid Z=1) = 0.5$，故 $X \not\indep Y \mid Z$。
+  \item \textbf{错误。} 概率密度函数 $p_X(x)$ 只需满足非负性 $p_X(x) \ge 0$ 与总积分为 $1$（$\int_{-\infty}^{+\infty} p_X(x)\,dx = 1$），单点高度完全可以大于 $1$。\textbf{最小反例}：均匀分布 $X \sim \mathrm{Uniform}(0, 0.5)$，在 $x \in [0, 0.5]$ 上 $p_X(x) = 2 > 1$。
+  \item \textbf{正确。} 期望的线性性 $\E[X + Y] = \E[X] + \E[Y]$ 直接来源于求和/积分运算的线性性，\textbf{完全不要求} $X$ 与 $Y$ 独立或不相关，只要 $\E[|X|] < \infty$ 且 $\E[|Y|] < \infty$ 即恒成立。
+\end{enumerate}
+
+\subsection*{习题 1.2\quad 协方差为零与线性相关性陷阱}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{验证 $\Cov(X, Y) = 0$ 但 $X \not\indep Y$}：随机变量 $X$ 等概率取 $\{-2, 0, 2\}$，对应的 $Y = |X|$ 分别取 $\{2, 0, 2\}$，积 $XY$ 分别取 $\{-4, 0, 4\}$。因此：
+  \[
+    \E[X] = \frac{-2 + 0 + 2}{3} = 0, \qquad
+    \E[Y] = \frac{2 + 0 + 2}{3} = \frac{4}{3}, \qquad
+    \E[XY] = \frac{-4 + 0 + 4}{3} = 0.
+  \]
+  于是 $\Cov(X, Y) = \E[XY] - \E[X]\E[Y] = 0 - 0\cdot \frac{4}{3} = 0$。然而，$Y$ 是 $X$ 的确定性非线性函数，显然不独立：例如 $\Prob(X = 0, Y = 2) = 0$，但 $\Prob(X = 0)\Prob(Y = 2) = \frac{1}{3} \cdot \frac{2}{3} = \frac{2}{9} \neq 0$。
+  \item \textbf{为何 $\Var(X+Y) = \Var(X) + \Var(Y)$ 不能推出独立}：因为一般恒等式 $\Var(X+Y) = \Var(X) + \Var(Y) + 2\Cov(X, Y)$ 表明，方差可加性等价于 $\Cov(X, Y) = 0$（线性不相关），而非独立。直接沿用上例验证：
+  \begin{align*}
+    \Var(X) &= \frac{(-2)^2 + 0^2 + 2^2}{3} = \frac{8}{3}, \qquad
+    \Var(Y) = \E[Y^2] - (\E[Y])^2 = \frac{8}{3} - \frac{16}{9} = \frac{8}{9}, \\
+    X + Y &\in \{0, 0, 4\} \implies \E[X+Y] = \frac{4}{3},\quad
+    \Var(X+Y) = \frac{0^2 + 0^2 + 4^2}{3} - \frac{16}{9} = \frac{32}{9} = \frac{8}{3} + \frac{8}{9}.
+  \end{align*}
+  尽管 $\Var(X+Y) = \Var(X) + \Var(Y)$ 精确成立，$X$ 与 $Y$ 仍强依赖。
+\end{enumerate}
+
+\subsection*{习题 1.3\quad 两厂芯片溯源与检测后验}
+记 $H_A, H_B$ 为芯片来自 A、B 厂，$E$ 为“芯片是次品”，$A$ 为“检测仪报警”。已知 $\Prob(H_A)=0.70$、$\Prob(H_B)=0.30$、$\Prob(E\mid H_A)=0.01$、$\Prob(E\mid H_B)=0.04$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 由全概率公式，随机一颗芯片为次品的总概率为：
+  \[
+    \Prob(E) = \Prob(H_A)\Prob(E\mid H_A) + \Prob(H_B)\Prob(E\mid H_B)
+             = 0.70 \times 0.01 + 0.30 \times 0.04 = 0.007 + 0.012 = 0.019.
+  \]
+  由 Bayes 定理，次品来自 B 厂的后验概率为：
+  \[
+    \Prob(H_B \mid E) = \frac{\Prob(H_B)\Prob(E\mid H_B)}{\Prob(E)}
+                      = \frac{0.012}{0.019} = \frac{12}{19} \approx 0.6316 \;(63.16\%).
+  \]
+  \item 已知 $\Prob(A\mid E)=0.95$、$\Prob(A\mid \neg E)=0.02$，且由 (1) 得 $\Prob(E)=0.019$、$\Prob(\neg E)=0.981$。再次使用全概率公式求触发报警的总概率：
+  \[
+    \Prob(A) = \Prob(A\mid E)\Prob(E) + \Prob(A\mid \neg E)\Prob(\neg E)
+             = 0.95 \times 0.019 + 0.02 \times 0.981 = 0.01805 + 0.01962 = 0.03767.
+  \]
+  报警芯片确实为次品的后验概率为：
+  \[
+    \Prob(E \mid A) = \frac{0.01805}{0.03767} = \frac{1805}{3767} \approx 0.4792 \;(47.92\%).
+  \]
+  注意：尽管检测仪灵敏度高达 $95\%$、误报率仅 $2\%$，但由于芯片整体次品基率仅 $1.9\%$，报警芯片中仍有超过一半是良品（假阳性），这是基率效应的典型体现。
+\end{enumerate}
+
+\subsection*{习题 1.4\quad 草地湿润中的 Explaining Away 精确手算}
+因为 $R \indep S$，四组联合概率 $\Prob(R=r, S=s, W=1) = \Prob(R=r)\Prob(S=s)\Prob(W=1\mid R=r, S=s)$ 分别为：
+\begin{align*}
+  \Prob(R=1, S=1, W=1) &= 0.2 \times 0.1 \times 0.99 = 0.0198, \\
+  \Prob(R=1, S=0, W=1) &= 0.2 \times 0.9 \times 0.80 = 0.1440, \\
+  \Prob(R=0, S=1, W=1) &= 0.8 \times 0.1 \times 0.90 = 0.0720, \\
+  \Prob(R=0, S=0, W=1) &= 0.8 \times 0.9 \times 0.00 = 0.0000.
+\end{align*}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 总概率 $\Prob(W=1) = 0.0198 + 0.1440 + 0.0720 + 0 = 0.2358 = \frac{1179}{5000}$。因此仅观测到草地湿润时，洒水器开启的后验概率为：
+  \[
+    \Prob(S=1 \mid W=1) = \frac{0.0198 + 0.0720}{0.2358} = \frac{0.0918}{0.2358} = \frac{51}{131} \approx 0.3893 \;(38.93\%).
+  \]
+  \item 进一步确认昨晚下过雨（$R=1$）后，在 $R=1, W=1$ 条件下的总权重为 $0.0198 + 0.1440 = 0.1638$，故：
+  \[
+    \Prob(S=1 \mid W=1, R=1) = \frac{0.0198}{0.0198 + 0.1440} = \frac{0.0198}{0.1638} = \frac{11}{91} \approx 0.1209 \;(12.09\%).
+  \]
+  \item \textbf{变化方向与物理含义}：$\Prob(S=1)=10.00\% \xrightarrow{\text{观测 }W=1} 38.93\% \xrightarrow{\text{再观测 }R=1} 12.09\%$。看到草地湿润大幅抬高了“洒水器开了”的怀疑度；但一旦得知昨晚下过雨，“下雨”已经充分解释了草地湿润，因而将洒水器开启的后验概率压回至接近先验水平——这就是贝叶斯网络汇合结构（Collider）中的\textbf{辩解效应（Explaining Away）}。
+\end{enumerate}
+
+\subsection*{习题 1.5\quad 全方差定律（Law of Total Variance）证明}
+\begin{proof}
+由方差定义 $\Var(X) = \E[X^2] - (\E[X])^2$，并在等式右侧同时加上和减去 $\E\bigl[(\E[X \mid Y])^2\bigr]$：
+\[
+  \Var(X) = \Bigl(\E[X^2] - \E\bigl[(\E[X \mid Y])^2\bigr]\Bigr)
+          + \Bigl(\E\bigl[(\E[X \mid Y])^2\bigr] - (\E[X])^2\Bigr).
+\]
+分别化简两项：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 对第一项，由全期望定律有 $\E[X^2] = \E\bigl[\E[X^2 \mid Y]\bigr]$，再由期望线性性合并：
+  \[
+    \E[X^2] - \E\bigl[(\E[X \mid Y])^2\bigr]
+    = \E\Bigl[\E[X^2 \mid Y] - (\E[X \mid Y])^2\Bigr]
+    = \E\bigl[\Var(X \mid Y)\bigr],
+  \]
+  其中利用了条件方差展开 $\Var(X \mid Y) = \E[(X - \E[X\mid Y])^2 \mid Y] = \E[X^2 \mid Y] - (\E[X\mid Y])^2$。
+  \item 对第二项，记随机变量 $U := \E[X \mid Y]$，由全期望定律得 $\E[U] = \E[\E[X \mid Y]] = \E[X]$，因此：
+  \[
+    \E\bigl[(\E[X \mid Y])^2\bigr] - (\E[X])^2 = \E[U^2] - (\E[U])^2 = \Var(U) = \Var\bigl(\E[X \mid Y]\bigr).
+  \]
+\end{enumerate}
+将两项相加即得 $\Var(X) = \E[\Var(X \mid Y)] + \Var(\E[X \mid Y])$。
+\end{proof}
+\textbf{直观解释}：若将 $Y$ 视为类别/分组标签，则 $\E[\Var(X \mid Y)]$ 度量\textbf{类内平均残差方差}（知道 $Y$ 之后仍无法消除的剩余随机性），$\Var(\E[X \mid Y])$ 度量\textbf{类间条件均值的方差}（能被 $Y$ 解释掉的那部分变化量）；总方差恰好等于二者之和。
+
+\subsection*{习题 1.6\quad Log-Odds 形式下的朴素贝叶斯线性分类器本质}
+\begin{proof}
+由 Bayes 定理与条件独立假设 \eqref{eq:ch1-naive-bayes}，两类后验概率之比消去了相同的证据分母 $\Prob(x)$：
+\[
+  \frac{\Prob(y=1 \mid x)}{\Prob(y=0 \mid x)}
+  = \frac{\Prob(y=1)\prod_{j=1}^d \Prob(x_j \mid y=1)}{\Prob(y=0)\prod_{j=1}^d \Prob(x_j \mid y=0)}
+  = \frac{\pi}{1 - \pi} \prod_{j=1}^d \frac{p_j^{x_j}(1 - p_j)^{1 - x_j}}{q_j^{x_j}(1 - q_j)^{1 - x_j}}.
+\]
+两边取自然对数，并将含 $x_j$ 的项与不含 $x_j$ 的常数项分离：
+\begin{align*}
+  \log \frac{\Prob(y=1 \mid x)}{\Prob(y=0 \mid x)}
+  &= \log \frac{\pi}{1 - \pi}
+     + \sum_{j=1}^d \Bigl[x_j \log \frac{p_j}{q_j} + (1 - x_j)\log \frac{1 - p_j}{1 - q_j}\Bigr] \\
+  &= \sum_{j=1}^d x_j \log \frac{p_j(1 - q_j)}{q_j(1 - p_j)}
+     + \Bigl(\log \frac{\pi}{1 - \pi} + \sum_{j=1}^d \log \frac{1 - p_j}{1 - q_j}\Bigr)
+   = w^T x + b.
+\end{align*}
+其中权重向量 $w \in \R^d$ 与偏置 $b \in \R$ 的显式表达式为：
+\[
+  w_j = \log \frac{p_j(1 - q_j)}{q_j(1 - p_j)} \quad (j=1,\dots,d), \qquad
+  b = \log \frac{\pi}{1 - \pi} + \sum_{j=1}^d \log \frac{1 - p_j}{1 - q_j}.
+\]
+由此立得 $\Prob(y=1 \mid x) = \sigma(w^T x + b)$，说明二值朴素贝叶斯（生成式模型）与第 6 章的逻辑回归（判别式模型）共享完全相同的线性对数几率决策边界，区别仅在于前者通过估计联合分布间接推出 $(w, b)$，后者直接极小化交叉熵拟合 $(w, b)$。
+\end{proof}
+
+\subsection*{习题 1.7\quad 高维对数空间朴素贝叶斯与 Laplace 平滑实验}
+\textbf{核心纯 NumPy 实现逻辑}：将特征矩阵 $X \in \{0,1\}^{N\times d}$ 的对数联合概率写成矩阵乘法 $X \log P^T + (1 - X)\log(1 - P)^T + \log\pi$，再用 Log-Sum-Exp 归一化避免 $d=4000$ 维连乘下溢：
+\begin{lstlisting}[language=Python]
+def fit_nb(X, y, alpha=1.0):
+    pi = np.array([np.mean(y == 0), np.mean(y == 1)])
+    p = np.vstack([
+        (X[y == c].sum(axis=0) + alpha) / (np.sum(y == c) + 2.0 * alpha)
+        for c in (0, 1)
+    ])
+    return pi, p
+
+def predict_proba_log(X, pi, p):
+    lj = np.log(pi)[None, :] + X @ np.log(p).T + (1.0 - X) @ np.log(1.0 - p).T
+    m = np.max(lj, axis=1, keepdims=True)
+    log_z = m + np.log(np.sum(np.exp(lj - m), axis=1, keepdims=True))
+    return np.exp(lj - log_z)
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item \textbf{直接概率连乘}：在 $d=4000$ 维下，每条样本约含 200 个出现词与 3800 个未出现词，连乘量级约 $0.05^{200} \cdot 0.95^{3800} \approx 10^{-345}$，低于 IEEE 754 float64 最小正数（$\approx 2.2 \times 10^{-308}$），实测 $95.0\%$ 的测试样本两类分子同时下溢为 \texttt{0.0}，无法计算后验。
+  \item \textbf{$\alpha=0$（无平滑）}：实测训练集存在未见词（$\hat{p}_{jc}=0$），对数空间触发 $\log 0 = -\infty$（28 处 \texttt{-inf}），在 $0 \cdot (-\infty)$ 运算中产生大量 \texttt{NaN}。
+  \item \textbf{$\alpha=1.0$（Laplace 平滑 + 对数空间）}：零 \texttt{NaN}，测试集准确率达 \textbf{95.25\%}（$>90\%$），所有样本后验概率和与 $1$ 的最大偏差为 $5.68 \times 10^{-14} < 10^{-12}$，全部自检断言通过。
+\end{itemize}
+
+\subsection*{习题 1.8\quad 蒙特卡洛验证 Explaining Away 与条件协方差}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+rng = np.random.default_rng(2026)
+N = 200_000
+R = (rng.random(N) < 0.2).astype(int)
+S = (rng.random(N) < 0.1).astype(int)
+pw = np.where((R == 1) & (S == 1), 0.99,
+     np.where((R == 1) & (S == 0), 0.80,
+     np.where((R == 0) & (S == 1), 0.90, 0.00)))
+W = (rng.random(N) < pw).astype(int)
+corr_marg = np.corrcoef(R, S)[0, 1]
+ps_w = S[W == 1].mean()
+ps_wr = S[(W == 1) & (R == 1)].mean()
+corr_cond = np.corrcoef(R[W == 1], S[W == 1])[0, 1]
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item 边际相关系数 $\widehat{\mathrm{Corr}}(R, S) = +0.00321$（$|r| < 0.01$，确认边际独立）；
+  \item $\hat{\Prob}(S=1 \mid W=1) = 0.38885$（与理论值 $51/131 \approx 0.38931$ 偏差 $0.00047 < 0.005$）；
+  \item $\hat{\Prob}(S=1 \mid W=1, R=1) = 0.12341$（与理论值 $11/91 \approx 0.12088$ 偏差 $0.00253 < 0.005$）；
+  \item 条件相关系数 $\widehat{\mathrm{Corr}}(R, S \mid W=1) = -0.82621$（理论精确值为 $-0.83037$，稳稳落入 $[-0.86, -0.80]$），定量证明观测共同结果会诱发强烈的条件负相关。
+\end{itemize}
+
+% =========================================================================
+\section{第 2 章习题精解（2.1--2.8）}
+% =========================================================================
+
+\subsection*{习题 2.1\quad 核心分布与多元高斯概念辨析}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} 两个边际分布皆为标准正态，不保证联合分布为二维高斯。\textbf{经典反例}：设 $X_1 \sim \mathcal{N}(0, 1)$，独立取对称符号 $S \in \{-1, +1\}$（等概率 $0.5$），令 $X_2 = S X_1$。显然 $X_2$ 边际分布亦为 $\mathcal{N}(0, 1)$，但 $(X_1, X_2)$ 的概率质量全部集中在两条对角线 $x_2 = \pm x_1$ 上，且 $X_1 + X_2$ 在 $0$ 点具有 $0.5$ 的离散点质量，绝非正态分布。
+  \item \textbf{正确。} 对 $X \sim \mathrm{Pois}(\lambda)$，由幂级数展开直接验证 $\E[X] = \lambda$ 且 $\E[X(X-1)] = \lambda^2$，故 $\Var(X) = \E[X(X-1)] + \E[X] - (\E[X])^2 = \lambda^2 + \lambda - \lambda^2 = \lambda = \E[X]$。
+  \item \textbf{正确。} 对\textbf{联合高斯}向量，零协方差即意味着协方差矩阵为对角阵 $\Sigma = \diag(\sigma_1^2, \sigma_2^2)$，联合密度函数精确分解为两个一维高斯密度的乘积 $p(x_1, x_2) = p(x_1)p(x_2)$，故 $X_1 \indep X_2$。（注意：离开“联合高斯”前提该结论失效，如习题 1.2。）
+  \item \textbf{错误。} 由多元高斯条件分布定理（定理 \ref{thm:ch2-cond-mvg}），条件协方差矩阵为 Schur 补 $\Sigma_{1\mid 2} = \Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21}$，其表达式\textbf{完全不依赖于观测值 $x_2$}，仅由先验协方差结构决定（且恒满足 $\Sigma_{1\mid 2} \preceq \Sigma_{11}$）。
+\end{enumerate}
+
+\subsection*{习题 2.2\quad 非法协方差阵与欧氏 vs 马氏距离反直觉查错}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{两种方法识破非法协方差阵 $\Sigma = \begin{psmallmatrix} 1.0 & 1.2 \\ 1.2 & 1.0 \end{psmallmatrix}$}：
+  \begin{itemize}
+    \item \textbf{特征值法}：特征多项式 $(1-\lambda)^2 - 1.2^2 = 0$，解得 $\lambda_1 = 2.2 > 0$、$\lambda_2 = -0.2 < 0$（同时 $\det\Sigma = -0.44 < 0$），故 $\Sigma$ 不是半正定矩阵（例如取 $v = (1,-1)^T$ 得 $v^T\Sigma v = -0.4 < 0$），违背协方差矩阵必满足 $\Sigma \succeq 0$ 的充要条件。
+    \item \textbf{相关系数法}：由定义 $\rho_{12} = \frac{\Sigma_{12}}{\sqrt{\Sigma_{11}\Sigma_{22}}} = \frac{1.2}{\sqrt{1.0\times 1.0}} = 1.2 > 1$，违背 Cauchy--Schwarz 不等式 $|\rho_{12}| \le 1$。
+  \end{itemize}
+  \item \textbf{欧氏距离 vs 马氏距离对比}：对 $\mathcal{N}(0, \diag(16, 1))$，各轴标准差分别为 $\sigma_1 = 4, \sigma_2 = 1$，$\det\Sigma = 16$：
+  \begin{itemize}
+    \item 点 $a = (4, 0)^T$：欧氏距离 $\|a\|_2 = 4$；马氏距离 $d_M(a, 0) = \sqrt{4^2/16 + 0^2/1} = 1$；概率密度 $p(a) = \frac{1}{2\pi\cdot 4}e^{-1/2} = \frac{e^{-0.5}}{8\pi} \approx 0.02413$。
+    \item 点 $b = (0, 2)^T$：欧氏距离 $\|b\|_2 = 2$；马氏距离 $d_M(b, 0) = \sqrt{0^2/16 + 2^2/1} = 2$；概率密度 $p(b) = \frac{1}{2\pi\cdot 4}e^{-2} = \frac{e^{-2}}{8\pi} \approx 0.005385$。
+  \end{itemize}
+  \textbf{原理解释}：虽然 $\|b\|_2 = 2 < \|a\|_2 = 4$，但第 1 维自然波动幅度很大（$\sigma_1=4$），$a$ 仅偏离 $1$ 个标准差；第 2 维非常紧凑（$\sigma_2=1$），$b$ 已偏离 $2$ 个标准差，导致密度比 $p(a)/p(b) = e^{1.5} \approx 4.482$。马氏距离按各主轴方差自动归一化，因此才是高斯密度等高线的真实几何尺子。
+\end{enumerate}
+
+\subsection*{习题 2.3\quad 二项评测概率与 Beta 先验手算}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item $S_5 \sim \mathrm{Bin}(5, 0.8)$：
+  \[
+    \E[S_5] = np = 5 \times 0.8 = 4.0, \qquad
+    \Var(S_5) = np(1-p) = 5 \times 0.8 \times 0.2 = 0.8.
+  \]
+  至少答对 4 题的精确概率为：
+  \begin{align*}
+    \Prob(S_5 \ge 4) &= \Prob(S_5 = 4) + \Prob(S_5 = 5)
+    = \binom{5}{4}(0.8)^4(0.2)^1 + \binom{5}{5}(0.8)^5 \\
+    &= 5 \times 0.4096 \times 0.2 + 0.32768 = 0.4096 + 0.32768 = 0.73728 = \frac{2304}{3125}.
+  \end{align*}
+  \item $X \sim \mathrm{Beta}(3, 2)$（$\alpha = 3, \beta = 2$）：
+  \begin{itemize}
+    \item \textbf{归一化常数}：$B(3, 2) = \frac{\Gamma(3)\Gamma(2)}{\Gamma(5)} = \frac{2!\cdot 1!}{4!} = \frac{2}{24} = \frac{1}{12}$。
+    \item \textbf{密度函数}：$p(x) = \frac{1}{B(3,2)} x^{3-1}(1-x)^{2-1} = 12x^2(1 - x),\; x \in [0, 1]$（其余处为 $0$）。
+    \item \textbf{均值与方差}：$\E[X] = \frac{\alpha}{\alpha+\beta} = \frac{3}{5} = 0.6$；$\Var(X) = \frac{\alpha\beta}{(\alpha+\beta)^2(\alpha+\beta+1)} = \frac{6}{25\times 6} = \frac{1}{25} = 0.04$。
+    \item \textbf{众数}：令 $p'(x) = 12(2x - 3x^2) = 12x(2 - 3x) = 0$，在 $(0,1)$ 内唯一极大值点为 $x^* = \frac{\alpha-1}{\alpha+\beta-2} = \frac{2}{3} \approx 0.6667$。
+    \item \textbf{先验伪计数解释}：与均匀先验 $\mathrm{Beta}(1, 1)$ 相比，$\mathrm{Beta}(3, 2)$ 相当于在看到真实数据前，额外注入了 $\alpha - 1 = 2$ 次正面伪计数与 $\beta - 1 = 1$ 次反面伪计数（共 $3$ 次伪观测，也常以总等效样本量 $\alpha+\beta=5$ 刻画先验强度）。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 2.4\quad 2D 多元高斯椭球主轴与条件分布精确手算}
+已知 $\mu = \begin{pmatrix} 0 \\ 1 \end{pmatrix}$，$\Sigma = \begin{pmatrix} 5 & 2 \\ 2 & 2 \end{pmatrix}$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{特征分解与等密度椭圆半轴}：特征方程为
+  \[
+    \det(\Sigma - \lambda I) = (5 - \lambda)(2 - \lambda) - 4 = \lambda^2 - 7\lambda + 6 = (\lambda - 6)(\lambda - 1) = 0,
+  \]
+  解得特征值 $\lambda_1 = 6,\; \lambda_2 = 1$。
+  \begin{itemize}
+    \item 对 $\lambda_1 = 6$：$(\Sigma - 6I)u_1 = \begin{psmallmatrix} -1 & 2 \\ 2 & -4 \end{psmallmatrix}u_1 = 0$，得单位特征向量 $u_1 = \frac{1}{\sqrt{5}}\begin{pmatrix} 2 \\ 1 \end{pmatrix}$；
+    \item 对 $\lambda_2 = 1$：$(\Sigma - I)u_2 = \begin{psmallmatrix} 4 & 2 \\ 2 & 1 \end{psmallmatrix}u_2 = 0$，得单位特征向量 $u_2 = \frac{1}{\sqrt{5}}\begin{pmatrix} -1 \\ 2 \end{pmatrix}$（满足 $u_1^T u_2 = 0$）。
+  \end{itemize}
+  等密度椭圆 $d_M^2(x, \mu) = 1$ 的长半轴长为 $\sqrt{\lambda_1} = \sqrt{6} \approx 2.4495$（沿 $u_1$ 方向），短半轴长为 $\sqrt{\lambda_2} = 1$（沿 $u_2$ 方向）。
+  \item \textbf{平方马氏距离}：$\det\Sigma = 5\times 2 - 2^2 = 6$，故 $\Sigma^{-1} = \frac{1}{6}\begin{pmatrix} 2 & -2 \\ -2 & 5 \end{pmatrix}$。对 $x = (2, 3)^T$，偏差向量 $\delta = x - \mu = (2, 2)^T$，于是：
+  \[
+    d_M^2(x, \mu) = \delta^T \Sigma^{-1} \delta
+    = \frac{1}{6}\begin{pmatrix} 2 & 2 \end{pmatrix}
+      \begin{pmatrix} 2 & -2 \\ -2 & 5 \end{pmatrix}
+      \begin{pmatrix} 2 \\ 2 \end{pmatrix}
+    = \frac{1}{6}\begin{pmatrix} 2 & 2 \end{pmatrix}\begin{pmatrix} 0 \\ 6 \end{pmatrix}
+    = \frac{12}{6} = 2.
+  \]
+  （亦可在特征基下核验：$u_1^T\delta = \frac{6}{\sqrt{5}},\; u_2^T\delta = \frac{2}{\sqrt{5}}$，故 $d_M^2 = \frac{36/5}{6} + \frac{4/5}{1} = \frac{6}{5} + \frac{4}{5} = 2$。）
+  \item \textbf{条件分布 $X_1 \mid (X_2 = 3)$}：由定理 \ref{thm:ch2-cond-mvg}，
+  \[
+    \mu_{1\mid 2} = \mu_1 + \frac{\Sigma_{12}}{\Sigma_{22}}(3 - \mu_2) = 0 + \frac{2}{2}(3 - 1) = 2, \qquad
+    \sigma_{1\mid 2}^2 = \Sigma_{11} - \frac{\Sigma_{12}^2}{\Sigma_{22}} = 5 - \frac{2^2}{2} = 3.
+  \]
+  故 $X_1 \mid (X_2 = 3) \sim \mathcal{N}(2, 3)$。观测 $X_2$ 将 $X_1$ 的方差从 $5$ 降至 $3$，方差缩减比例为 $\frac{5 - 3}{5} = 40\%$（恰好等于相关系数平方 $\rho_{12}^2 = \frac{4}{10} = 0.4$）。
+\end{enumerate}
+
+\subsection*{习题 2.5\quad 独立高斯之和与样本均值的 $1/\sqrt{n}$ 标准误}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 因 $X_1 \sim \mathcal{N}(\mu_1, \Sigma_1)$ 与 $X_2 \sim \mathcal{N}(\mu_2, \Sigma_2)$ 相互独立，其联合密度等于边际密度之积，直接合并指数项即可见拼接向量 $U := \begin{pmatrix} X_1 \\ X_2 \end{pmatrix} \in \R^{2d}$ 服从联合高斯分布：
+  \[
+    U = \begin{pmatrix} X_1 \\ X_2 \end{pmatrix}
+    \sim \mathcal{N}\!\left(\begin{pmatrix} \mu_1 \\ \mu_2 \end{pmatrix},\;
+         \begin{pmatrix} \Sigma_1 & 0 \\ 0 & \Sigma_2 \end{pmatrix}\right).
+  \]
+  选取线性变换矩阵 $A = \begin{pmatrix} I_d & I_d \end{pmatrix} \in \R^{d \times 2d}$，则 $X_1 + X_2 = A U$。由多元高斯仿射封闭性定理（定理 \ref{thm:ch2-affine}），立得：
+  \[
+    X_1 + X_2 \sim \mathcal{N}\!\left(A\begin{pmatrix} \mu_1 \\ \mu_2 \end{pmatrix},\;
+      A\begin{pmatrix} \Sigma_1 & 0 \\ 0 & \Sigma_2 \end{pmatrix}A^T\right)
+    = \mathcal{N}(\mu_1 + \mu_2,\; \Sigma_1 + \Sigma_2).
+  \]
+  \item 对 $n$ 个 i.i.d.\ 样本 $X_1, \dots, X_n \sim \mathcal{N}(\mu, \sigma^2)$，由 (1) 数学归纳法可知 $\sum_{i=1}^n X_i \sim \mathcal{N}(n\mu, n\sigma^2)$；再施加标量线性变换 $\frac{1}{n}$，得：
+  \[
+    \bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i \sim \mathcal{N}\!\left(\mu,\; \frac{\sigma^2}{n}\right).
+  \]
+  样本均值的标准误为 $\mathrm{SE}(\bar{X}_n) = \frac{\sigma}{\sqrt{n}}$。要令标准误减半（$\frac{\sigma}{\sqrt{n'}} = \frac{1}{2}\frac{\sigma}{\sqrt{n}}$），必须满足 $\sqrt{n'} = 2\sqrt{n} \iff n' = 4n$，这就是统计学与蒙特卡洛中“精度翻倍需 $4$ 倍样本量”的根源。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 2.6\quad 白化等价性与高维高斯薄球壳现象}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 由实对称正定矩阵谱分解 $\Sigma = Q\Lambda Q^T$，取唯一对称正定平方根逆 $\Sigma^{-1/2} = Q\Lambda^{-1/2}Q^T$，满足 $(\Sigma^{-1/2})^T = \Sigma^{-1/2}$ 且 $\Sigma^{-1/2}\Sigma\Sigma^{-1/2} = I_d$。对 $Z = \Sigma^{-1/2}(X - \mu)$ 应用仿射封闭性定理（定理 \ref{thm:ch2-affine}）：
+  \[
+    \E[Z] = \Sigma^{-1/2}(\mu - \mu) = 0, \qquad
+    \Cov(Z) = \Sigma^{-1/2}\Sigma (\Sigma^{-1/2})^T = I_d,
+  \]
+  故 $Z \sim \mathcal{N}(0, I_d)$，各分量 $Z_1, \dots, Z_d \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, 1)$。进一步展开平方马氏距离：
+  \[
+    d_M^2(X, \mu) = (X - \mu)^T \Sigma^{-1} (X - \mu)
+    = (X - \mu)^T \Sigma^{-1/2}\Sigma^{-1/2} (X - \mu)
+    = Z^T Z = \|Z\|_2^2 = \sum_{i=1}^d Z_i^2.
+  \]
+  \item 对每个标准正态分量 $Z_i \sim \mathcal{N}(0, 1)$，有 $\E[Z_i^2] = \Var(Z_i) = 1$ 且 $\E[Z_i^4] = 3$，从而
+  \[
+    \Var(Z_i^2) = \E[Z_i^4] - (\E[Z_i^2])^2 = 3 - 1^2 = 2.
+  \]
+  因为 $Z_1, \dots, Z_d$ 相互独立，由期望线性性与独立方差可加性得：
+  \[
+    \E\bigl[d_M^2(X, \mu)\bigr] = \sum_{i=1}^d \E[Z_i^2] = d, \qquad
+    \Var\bigl(d_M^2(X, \mu)\bigr) = \sum_{i=1}^d \Var(Z_i^2) = 2d.
+  \]
+  \item \textbf{高维薄球壳直觉}：当 $d = 1{,}000$ 时，平方马氏半径的均值为 $1000$，标准差仅为 $\sqrt{2d} \approx 44.72$（相对波动仅 $4.5\%$），对应马氏半径 $d_M(X, \mu) \approx \sqrt{d} \approx 31.62$，且相对厚度随 $O(1/\sqrt{d})$ 趋近于零！虽然密度函数在原点 $\mu$ 处最高，但高维球壳体积以 $r^{d-1}$ 爆炸式增长，密度衰减与体积膨胀的乘积在 $r \approx \sqrt{d}$ 处形成极窄尖峰——这就是高维高斯“中心空心、质量全在薄球壳”的几何真相（也是第 5 卷 VAE 隐空间先验匹配的核心直觉）。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 2.7\quad 3D 高斯 Cholesky 采样、白化还原与多元条件切片验证}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+rng = np.random.default_rng(2026)
+mu = np.array([1.0, -1.0, 2.0])
+Sigma = np.array([[4.0, 1.2, -0.8], [1.2, 2.0, 0.6], [-0.8, 0.6, 1.5]])
+L = np.linalg.cholesky(Sigma)
+X = mu + rng.normal(size=(200_000, 3)) @ L.T
+W = np.linalg.solve(L, (X - mu).T).T
+dm2 = np.sum(W ** 2, axis=1)
+# Conditional X1 | (X2=0.0, X3=2.5) via Schur complement
+S12, S22 = Sigma[0:1, 1:3], Sigma[1:3, 1:3]
+mu_cond = float(mu[0] + (S12 @ np.linalg.solve(S22, np.array([1.0, 0.5]))).item())
+var_cond = float(Sigma[0, 0] - (S12 @ np.linalg.solve(S22, S12.T)).item())
+mask = (np.abs(X[:, 1] - 0.0) < 0.15) & (np.abs(X[:, 2] - 2.5) < 0.15)
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item 经验均值最大绝对误差 $0.00358$，经验协方差最大绝对误差 $0.01032 < 0.03$；
+  \item 白化样本 $W$ 经验协方差与 $I_3$ 最大绝对误差 $0.00512 < 0.03$；平方马氏距离样本均值 $2.9976$（理论 $d=3$，落入 $[2.95, 3.05]$）、方差 $5.9849$（理论 $2d=6$，落入 $[5.85, 6.15]$）；
+  \item 理论条件参数精确值为 $\mu_{1\mid 2,3} = \frac{47}{33} \approx 1.4242$、$\sigma_{1\mid 2,3}^2 = \frac{373}{165} \approx 2.2606$；切片内共落入 $1{,}289$ 条样本，经验均值 $1.3256$（偏差 $0.0986 < 0.15$）、经验方差 $2.1718$（偏差 $0.0888 < 0.15$），全部断言通过。
+\end{itemize}
+
+\subsection*{习题 2.8\quad 欧氏距离 vs 马氏距离的隐蔽异常检测实战}
+\textbf{核心纯 NumPy 实现逻辑}（严格禁止 \texttt{np.linalg.inv}，仅用 Cholesky + 三角求解）：
+\begin{lstlisting}[language=Python]
+rng = np.random.default_rng(2026)
+Sigma = np.array([[4.0, 1.8], [1.8, 1.0]])
+L = np.linalg.cholesky(Sigma)
+X_norm = rng.normal(size=(2000, 2)) @ L.T
+eigvals, eigvecs = np.linalg.eigh(Sigma)
+u_min = eigvecs[:, 0]
+signs = np.where(np.arange(20) % 2 == 0, 1.0, -1.0)
+X_anom = signs[:, None] * 1.8 * u_min[None, :] + rng.normal(0, 0.05, size=(20, 2))
+X_all = np.vstack([X_norm, X_anom])
+d_euc = np.linalg.norm(X_all, axis=1)
+Y = np.linalg.solve(L, X_all.T)
+d_mah = np.sqrt(np.sum(Y ** 2, axis=0))
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item $\Sigma$ 特征值为 $\lambda_{\min} \approx 0.15693$、$\lambda_{\max} \approx 4.84307$（正常长轴标准差 $\sqrt{\lambda_{\max}} \approx 2.2007$）；
+  \item 沿短轴 $1.8\,u_{\min}$ 注入的隐蔽异常点欧氏距离仅约 $1.8$，淹没在正常云内部，故欧氏距离 Recall@25 为 \textbf{0/20}（$0\%$）；
+  \item 其理论马氏距离高达 $1.8 / \sqrt{\lambda_{\min}} \approx 4.5439$，远超正常点 $99.9\%$ 轮廓，故马氏距离 Recall@25 精准命中 \textbf{20/20}（$100\%$）。
+\end{itemize}
+
+% =========================================================================
+\section{第 3 章习题精解（3.1--3.8）}
+% =========================================================================
+
+\subsection*{习题 3.1\quad 极限、浓度不等式与采样核心概念辨析}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} Markov 不等式严格要求随机变量\textbf{几乎必然非负（$X \ge 0$）}，否则负值会把 $\E[X]$ 拉低甚至导致右边远小于真实尾概率。\textbf{最小反例}：设 $\Prob(X = 1) = 0.8$、$\Prob(X = -3) = 0.2$，则 $\E[X] = 0.8 - 0.6 = 0.2 > 0$；取 $a = 1$ 时，左侧 $\Prob(X \ge 1) = 0.8$，但右侧 $\E[X]/a = 0.2 < 0.8$，不等式反号！
+  \item \textbf{正确。} 函数 $\varphi_1(x) = \ln x$ 在 $(0, +\infty)$ 上满足 $\varphi_1''(x) = -1/x^2 < 0$（严格凹），$\varphi_2(x) = 1/x$ 满足 $\varphi_2''(x) = 2/x^3 > 0$（严格凸）。因 $X > 0$ 且不几乎必然为常数，由严格 Jensen 不等式立得 $\E[\ln X] < \ln\E[X]$ 且 $\E[1/X] > 1/\E[X]$。
+  \item \textbf{错误。} 经典中心极限定理（CLT）要求单样本具有\textbf{有限方差（$0 < \sigma^2 < \infty$）}。\textbf{经典反例}：标准 Cauchy 分布 $X_i \stackrel{\text{i.i.d.}}{\sim} \mathrm{Cauchy}(0, 1)$（密度 $p(x) = \frac{1}{\pi(1+x^2)}$），其均值与方差均不存在；无论 $n$ 多大，样本均值 $\bar{X}_n$ 的精确分布始终仍是 $\mathrm{Cauchy}(0, 1)$，永不趋近正态。
+  \item \textbf{正确。} 重要性采样依赖恒等式 $\int p(x)f(x)\,dx = \int q(x)\frac{p(x)f(x)}{q(x)}\,dx$，仅在支集覆盖条件 $\{x: p(x)f(x)\neq 0\} \subseteq \{x: q(x)>0\}$ 下成立。若在某个正概率区域 $S$ 上 $q(x) = 0$ 而 $p(x)f(x) \neq 0$，采样点永远落不进 $S$，估计量收敛到截断积分 $\int_{S^c} p(x)f(x)\,dx$，存在无法通过增大 $M$ 消除的系统偏差。
+\end{enumerate}
+
+\subsection*{习题 3.2\quad 重要性采样“无偏但方差无穷”反例}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 目标密度 $p(x) = \frac{1}{2\sqrt{2\pi}}\exp(-x^2/8)$，提议密度 $q(x) = \frac{1}{\sqrt{2\pi}}\exp(-x^2/2)$，故权重为：
+  \[
+    w(x) = \frac{p(x)}{q(x)} = \frac{1}{2}\exp\!\left(\frac{3}{8}x^2\right).
+  \]
+  直接验证期望：
+  \[
+    \E_{X\sim q}[w(X)] = \int_{-\infty}^{+\infty} q(x)\frac{p(x)}{q(x)}\,dx = \int_{-\infty}^{+\infty} p(x)\,dx = 1,
+  \]
+  因此对常数函数 $f(x) = 1$ 严格无偏。
+  \item 计算权重二阶矩：
+  \[
+    \E_{X\sim q}\bigl[w(X)^2\bigr]
+    = \int_{-\infty}^{+\infty} \frac{p(x)^2}{q(x)}\,dx
+    = \int_{-\infty}^{+\infty} \frac{\frac{1}{8\pi}e^{-x^2/4}}{\frac{1}{\sqrt{2\pi}}e^{-x^2/2}}\,dx
+    = \frac{1}{4\sqrt{2\pi}} \int_{-\infty}^{+\infty} \exp\!\left(+\frac{x^2}{4}\right)dx = +\infty.
+  \]
+  因为被积函数在 $|x| \to \infty$ 时呈超指数发散，故 $\Var_q(w(X)) = \E_q[w(X)^2] - 1 = +\infty$。
+  \item \textbf{尾部设计原则}：为保证 $\E_q[w^2] = \int p(x)\frac{p(x)}{q(x)}\,dx < \infty$，在尾部区域 $|x|\to\infty$ 必须避免权重 $p(x)/q(x)$ 失控增长；工程上应保证提议分布 $q$ 的尾部\textbf{至少与目标 $p$ 一样厚}（例如对正态目标选更大方差的高斯或重尾 Student-$t$ 分布），使 $w(x)$ 有界或缓增。
+\end{enumerate}
+
+\subsection*{习题 3.3\quad 三阶梯浓度不等式正面交锋}
+已知 $n = 100$，$\mu = \E[\bar{X}_{100}] = 0.5$，$\Var(\bar{X}_{100}) = 0.0025$，且 $X_i \in [0, 1]$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{Markov 不等式（单侧）}：因 $\bar{X}_{100} \ge 0$，
+  \[
+    \Prob(\bar{X}_{100} \ge 0.65) \le \frac{\E[\bar{X}_{100}]}{0.65} = \frac{0.5}{0.65} = \frac{10}{13} \approx 0.7692.
+  \]
+  \item \textbf{Chebyshev 不等式（双侧）}：取 $\varepsilon = 0.15$，
+  \[
+    \Prob(|\bar{X}_{100} - 0.5| \ge 0.15) \le \frac{\Var(\bar{X}_{100})}{0.15^2} = \frac{0.0025}{0.0225} = \frac{1}{9} \approx 0.1111.
+  \]
+  \item \textbf{Hoeffding 不等式}：因每个变量范围 $b_i - a_i = 1$，指数项 $2n\varepsilon^2 = 2 \times 100 \times 0.15^2 = 4.5$：
+  \begin{align*}
+    \text{单侧：}\quad &\Prob(\bar{X}_{100} \ge 0.65) \le e^{-4.5} \approx 0.0111, \\
+    \text{双侧：}\quad &\Prob(|\bar{X}_{100} - 0.5| \ge 0.15) \le 2e^{-4.5} \approx 0.0222.
+  \end{align*}
+\end{enumerate}
+\textbf{松紧对比}：单侧上界从 Markov 的 $0.7692$ 骤降至 Hoeffding 的 $0.0111$（精确二项尾概率约为 $0.00176$）；双侧上界从 Chebyshev 的 $0.1111$ 压低 5 倍至 Hoeffding 的 $0.0222$，体现“利用的信息越多（仅均值 $\to$ 均值+方差 $\to$ 独立+有界），浓度界越紧”的三阶梯跃迁。
+
+\subsection*{习题 3.4\quad AI 评测测试集规模设计：Hoeffding vs CLT}
+给定允许误差 $\varepsilon = 0.02$（$\varepsilon^2 = 0.0004$）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{Hoeffding 最小样本量}：令 $2\exp(-2n\varepsilon^2) \le \delta$，解得 $n \ge \frac{1}{2\varepsilon^2}\ln\frac{2}{\delta} = 1250\ln\frac{2}{\delta}$：
+  \begin{itemize}
+    \item $95\%$ 置信度（$\delta = 0.05$）：$n \ge 1250 \ln 40 \approx 1250 \times 3.68888 = 4611.10 \implies n_{\min} = \mathbf{4{,}612}$；
+    \item $99\%$ 置信度（$\delta = 0.01$）：$n \ge 1250 \ln 200 \approx 1250 \times 5.29832 = 6622.90 \implies n_{\min} = \mathbf{6{,}623}$。
+  \end{itemize}
+  \item \textbf{CLT 渐近 $95\%$ 样本量（$p \approx 0.90$）}：由 $1.96\sqrt{\frac{p(1-p)}{n}} \le 0.02$ 解得：
+  \[
+    n_{\mathrm{CLT}} \ge \frac{1.96^2 \times 0.90 \times 0.10}{0.02^2}
+    = \frac{3.8416 \times 0.09}{0.0004} = 864.36 \implies n_{\mathrm{CLT}} = \mathbf{865}.
+  \]
+  \item \textbf{相差逾 5 倍的两大原因}：(i) \textbf{方差信息}：Hoeffding 在最坏方差 $p(1-p) \le 0.25$（$p=0.5$）下做无分布保守估计，而 $p=0.90$ 的真实方差 $0.09$ 不到最坏情形的一半；(ii) \textbf{保证强度}：Hoeffding 提供对\textbf{任意有限 $n$} 严格成立的非渐近硬保证（包含额外的松弛系数），而 CLT 依赖 $n\to\infty$ 的渐近正态近似，紧得多但在极小样本或极端概率（如 $p=0.999$）下会失真。
+\end{enumerate}
+
+\subsection*{习题 3.5\quad Softplus 凸性与加权算术-几何平均不等式}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 对 $f(x) = \ln(1 + e^x)$ 求一阶与二阶导数：
+  \[
+    f'(x) = \frac{e^x}{1 + e^x} = \frac{1}{1 + e^{-x}} = \sigma(x), \qquad
+    f''(x) = \sigma'(x) = \sigma(x)\bigl(1 - \sigma(x)\bigr).
+  \]
+  对任意 $x \in \R$ 均有 $\sigma(x) \in (0, 1)$，故 $f''(x) > 0$ 处处成立，$f$ 在 $\R$ 上\textbf{严格凸}。直接应用 Jensen 不等式（定理 \ref{thm:ch3-jensen}），即得对任意有限期望随机变量 $X$ 恒有 $\E[\ln(1 + e^X)] \ge \ln(1 + e^{\E[X]})$。
+  \item 构造取值于 $\{a_1, \dots, a_k\}$ 的离散随机变量 $X$，使其概率质量函数为 $\Prob(X = a_i) = w_i$（合法因 $w_i \ge 0$ 且 $\sum_{i=1}^k w_i = 1$）。对严格凹函数 $\varphi(t) = \ln t$（$t > 0$）应用 Jensen 不等式 $\E[\ln X] \le \ln(\E[X])$：
+  \[
+    \sum_{i=1}^k w_i \ln a_i \le \ln\!\left(\sum_{i=1}^k w_i a_i\right)
+    \iff \ln\!\left(\prod_{i=1}^k a_i^{w_i}\right) \le \ln\!\left(\sum_{i=1}^k w_i a_i\right).
+  \]
+  两边施加严格递增的指数函数 $\exp(\cdot)$，立得加权 AM--GM 不等式 $\prod_{i=1}^k a_i^{w_i} \le \sum_{i=1}^k w_i a_i$。因 $\ln t$ 严格凹，\textbf{等号成立的充要条件}是 $X$ 几乎必然为常数，即所有具有正权重（$w_i > 0$）的 $a_i$ 全都相等。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 3.6\quad 重要性采样的理论最优提议分布与“零方差悖论”}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 当 $q$ 覆盖 $p$ 支集时，$\E_q[Y] = \int q(x) f(x)\frac{p(x)}{q(x)}\,dx = \int f(x)p(x)\,dx = I$。由方差展开公式：
+  \[
+    \Var_q(Y) = \E_q[Y^2] - (\E_q[Y])^2 = \E_q\!\left[\frac{f(X)^2 p(X)^2}{q(X)^2}\right] - I^2.
+  \]
+  \item 对凸函数 $\varphi(y) = y^2$ 应用 Jensen 不等式，立得 $\E_q[Y^2] \ge (\E_q[Y])^2 = I^2$，即 $\Var_q(Y) \ge 0$。当取 $q^*(x) = \frac{f(x)p(x)}{I}$ 时（显然 $q^*(x) > 0$ 且 $\int q^*(x)\,dx = 1$，为合法密度），对任意采样点 $X \sim q^*$ 均有
+  \[
+    Y = f(X)\frac{p(X)}{q^*(X)} = f(X)\frac{p(X)}{f(X)p(X)/I} \equiv I\quad (\text{常数}),
+  \]
+  故 $\Var_{q^*}(Y) = \Var(I) = 0$。反之，若 $\Var_q(Y) = 0$，则 $f(X)p(X)/q(X)$ 几乎处处等于常数 $I$，必有 $q(x) = f(x)p(x)/I$ 几乎处处成立。
+  \item \textbf{“零方差悖论”与工程指导原则}：构造 $q^*(x)$ 恰好需要知道归一化分母 $I = \int f(t)p(t)\,dt$——而 $I$ 正是我们费尽心思想要估计的未知积分！尽管无法直接采样 $q^*$，它却指明了黄金设计原则：\textbf{好的提议分布 $q(x)$ 应当尽量与 $|f(x)|p(x)$ 的形状成正比}，把采样预算集中在被积函数与目标密度乘积最大的区域（而非仅盯着 $p(x)$ 最大的区域），这正是习题 3.8 中把正态中心平移到 $4$ 的原因。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 3.7\quad 浓度不等式实测对比与右偏分布 CLT 演化实验}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+rng = np.random.default_rng(2026)
+for n in [20, 60, 100, 200, 300]:
+    means = rng.binomial(n, 0.5, size=20_000) / n
+    emp = np.mean(np.abs(means - 0.5) >= 0.1)
+    cheb = min(1.0, 0.25 / (n * 0.01))
+    hoeff = 2.0 * np.exp(-2.0 * n * 0.01)
+for n in [1, 5, 30, 100]:
+    z = np.sqrt(n) * (rng.exponential(1.0, size=(20_000, n)).mean(axis=1) - 1.0)
+    skew, cov95 = np.mean(z ** 3), np.mean(np.abs(z) <= 1.96)
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item \textbf{浓度上界对比}：在 $n = 20, 60, 100, 200, 300$ 时，Chebyshev 上界依次为 $1.00000$、$0.41667$、$0.25000$、$0.12500$、$\mathbf{0.08333}$；Hoeffding 上界依次为 $1.34064$、$0.60239$、$0.27067$、$0.03663$、$\mathbf{0.00496}$；实测尾概率依次为 $0.26135$、$0.09330$、$0.03435$、$0.00360$、$\mathbf{0.00040}$（$n=300$ 落入 $[0.0001, 0.0010]$，且 $n\ge 200$ 后 Hoeffding 指数级胜出）。
+  \item \textbf{右偏 $\mathrm{Exp}(1)$ 的 CLT 演化}：随 $n = 1, 5, 30, 100$ 增大，样本偏度依次为 $1.8253$、$0.9472$、$0.3186$、$0.2652$（沿理论 $2/\sqrt{n}$ 快速趋零），$[-1.96, 1.96]$ 覆盖率依次为 $0.9480$、$0.9554$、$0.9536$、$0.9507$，稳定收敛于 $0.950 \pm 0.005$。
+\end{itemize}
+
+\subsection*{习题 3.8\quad 罕见尾事件重要性采样与权重塌缩 ESS 诊断}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+# (1) P(Z > 4) with q = N(4, 1): w(z) = p(z)/q(z) = exp(-4z + 8)
+z_is = rng.normal(4.0, 1.0, size=20_000)
+p_is = np.mean((z_is > 4.0) * np.exp(-4.0 * z_is + 8.0))
+# (2) E_{N(0, 4)}[X^2] with q = N(0, q_std^2) and ESS/M
+x = rng.normal(0.0, q_std, size=10_000)
+log_w = (-0.5*(x/2.0)**2 - np.log(2.0)) - (-0.5*(x/q_std)**2 - np.log(q_std))
+w = np.exp(log_w)
+est, ess_ratio = np.mean(w * x**2), (w.sum()**2) / (len(w) * np.sum(w**2))
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}，50 次独立重复）}：
+\begin{itemize}
+  \item \textbf{罕见尾事件}（真值 $3.1671\times 10^{-5}$）：朴素 MC 有 $46\%$ 的轮次直接输出 $0$（均值 $4.00\times 10^{-5}$，标准差高达 $4.29\times 10^{-5} > 3\times 10^{-5}$）；平移提议 $q = \mathcal{N}(4, 1)$ 的 50 轮均值为 $3.1710 \times 10^{-5}$，单轮标准差仅 $5.14\times 10^{-7} < 7\times 10^{-7}$，平均相对误差仅 \textbf{1.31\%}（方差缩减约 7000 倍！）。
+  \item \textbf{ESS 权重塌缩诊断}（真值 $4.0$）：厚尾提议 $q_2 = \mathcal{N}(0, 3^2)$ 均值为 $4.0052$、标准差仅 $0.0293 < 0.05$、平均 $\mathrm{ESS}/M = \mathbf{0.8314} > 0.75$；瘦尾提议 $q_1 = \mathcal{N}(0, 1)$ 均值偏低且剧烈抖动（$3.7059 \pm 2.2287$，标准差 $> 0.5$），平均 $\mathrm{ESS}/M$ 塌缩至 \textbf{0.1190}（$< 0.25$），直观验证了习题 3.2 的无穷方差灾难。
+\end{itemize}
+
+% =========================================================================
+\section{第 4 章习题精解（4.1--4.8）}
+% =========================================================================
+
+\subsection*{习题 4.1\quad 信息论核心概念辨析}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} KL 散度不满足对称性，也不满足三角不等式，因此不是数学意义上的距离度量。\textbf{反例}：由习题 4.2(1)，对 $P=(0.9,0.1)$ 与 $Q=(0.5,0.5)$，有 $\DKL(P\|Q)\approx 0.3681 \neq \DKL(Q\|P)\approx 0.5108$；取 $R=(0.7,0.3)$，还可验证 $\DKL(P\|Q) > \DKL(P\|R) + \DKL(R\|Q)$ 亦可发生（例如取更极端的 $P=(0.99,0.01), R=(0.5,0.5), Q=(0.01,0.99)$ 时 $\DKL(P\|Q)\approx 4.50 > \DKL(P\|R)+\DKL(R\|Q)\approx 0.64 + 1.61 = 2.25$）。
+  \item \textbf{正确。} 离散分布满足 $0 \le p(x) \le 1 \implies -\log p(x) \ge 0$，故 Shannon 熵恒非负；但连续密度 $p(x)$ 可大于 $1$，令 $-\ln p(x) < 0$。\textbf{实例}：均匀分布 $X \sim \mathrm{Uniform}(0, a)$ 的微分熵 $h(X) = \ln a$，当 $a = 0.5$ 时 $h(X) = -\ln 2 \approx -0.6931 < 0$（对高斯 $\mathcal{N}(0, \sigma^2)$，$h(X) = \frac{1}{2}\ln(2\pi e\sigma^2)$，当 $\sigma$ 足够小时亦为负）。
+  \item \textbf{错误。} $H(Y \mid X) = \sum_{x} P(X=x) H(Y \mid X=x) \le H(Y)$ 仅在\textbf{对所有 $x$ 取平均后}成立，并不保证每一个具体取值 $X = x_0$ 处的逐点条件熵都更小。\textbf{最小反例}：设 $P(X=0,Y=0)=0.90,\; P(X=0,Y=1)=0,\; P(X=1,Y=0)=0.05,\; P(X=1,Y=1)=0.05$。此时边缘分布 $P(Y=1)=0.05$，边缘熵 $H(Y) = H_2(0.05) \approx 0.2864\;\text{bit}$；但一旦观测到罕见值 $X = 1$，条件分布为 $P(Y\mid X=1) = (0.5, 0.5)$，逐点条件熵飙升至 $H(Y \mid X=1) = 1.0\;\text{bit} > H(Y)$。
+  \item \textbf{正确。} 由换底公式 $\log_2 p = \frac{\ln p}{\ln 2}$，有 $\bar{H}_{\mathrm{bit}} = \frac{\bar{H}_{\mathrm{nat}}}{\ln 2}$，于是：
+  \[
+    2^{\bar{H}_{\mathrm{bit}}} = \exp\!\bigl(\bar{H}_{\mathrm{bit}}\cdot \ln 2\bigr)
+    = \exp\!\bigl(\bar{H}_{\mathrm{nat}}\bigr) = \mathrm{PPL}.
+  \]
+  困惑度本质上是预测概率几何平均的倒数 $\bigl(\prod_{t=1}^T q(w_t\mid w_{<t})\bigr)^{-1/T}$，与所用对数底完全无关。
+\end{enumerate}
+
+\subsection*{习题 4.2\quad KL 散度非对称与支集爆炸反例}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 取 $P = (0.9, 0.1)$ 与 $Q = (0.5, 0.5)$，使用自然对数 $\ln$：
+  \begin{align*}
+    \DKL(P\|Q) &= 0.9\ln\frac{0.9}{0.5} + 0.1\ln\frac{0.1}{0.5}
+                = 0.9\ln 1.8 - 0.1\ln 5 \approx 0.52901 - 0.16094 = \mathbf{0.3681}\;\text{nat}, \\
+    \DKL(Q\|P) &= 0.5\ln\frac{0.5}{0.9} + 0.5\ln\frac{0.5}{0.1}
+                = 0.5\ln\frac{25}{9} = \ln\frac{5}{3} \approx \mathbf{0.5108}\;\text{nat}.
+  \end{align*}
+  两者不等的直觉原因：$\DKL(P\|Q)$ 以 $P$ 为权重，把 $90\%$ 权重压在 $x=0$（比值仅 $1.8$），只在 $x=1$ 处赋予 $10\%$ 权重；而 $\DKL(Q\|P)$ 以均匀分布 $Q$ 为权重，在 $x=1$ 处以 $50\%$ 的高权重遭遇 $5$ 倍概率低估（$\ln 5$），因而惩罚更重。
+  \item \textbf{有限 vs 无穷的反例}：取 $P = (1, 0)$ 与 $Q = (0.5, 0.5)$（约定 $0\ln 0 = 0$）。则：
+  \[
+    \DKL(P\|Q) = 1\cdot\ln\frac{1}{0.5} + 0 = \ln 2 \approx 0.6931 < \infty,
+    \qquad
+    \DKL(Q\|P) = 0.5\ln\frac{0.5}{1} + 0.5\ln\frac{0.5}{0} = +\infty.
+  \]
+  \textbf{物理含义}：在正向散度 $\DKL(P\|Q)$ 中，凡是 $P(x) > 0$ 的地方必须保证 $Q(x) > 0$ 否则惩罚爆炸（\textbf{零回避 / Mode-Covering}，这里 $Q$ 覆盖了 $P$ 的全部支集所以有限）；而在反向散度 $\DKL(Q\|P)$ 中，凡是 $P(x) = 0$ 的地方必须强迫 $Q(x) = 0$（\textbf{零强制 / Mode-Seeking}），本例中 $P(1)=0$ 但 $Q(1)=0.5>0$，故反向 KL 立刻发散到 $+\infty$。
+\end{enumerate}
+
+\subsection*{习题 4.3\quad $2\times 2$ 联合分布全套信息量手算}
+由联合分布表立得两个边际分布：
+\[
+  P_X(0) = \tfrac{1}{2} + 0 = \tfrac{1}{2},\quad P_X(1) = \tfrac{1}{4} + \tfrac{1}{4} = \tfrac{1}{2}; \qquad
+  P_Y(0) = \tfrac{1}{2} + \tfrac{1}{4} = \tfrac{3}{4},\quad P_Y(1) = 0 + \tfrac{1}{4} = \tfrac{1}{4}.
+\]
+逐项以 $\log_2$（单位 bit）手算（记 $0\log_2 0 = 0$）：
+\begin{align*}
+  H(X) &= -\frac{1}{2}\log_2\frac{1}{2} - \frac{1}{2}\log_2\frac{1}{2} = \mathbf{1.0000}\;\text{bit}, \\
+  H(Y) &= -\frac{3}{4}\log_2\frac{3}{4} - \frac{1}{4}\log_2\frac{1}{4}
+        = 2 - \frac{3}{4}\log_2 3 \approx \mathbf{0.8113}\;\text{bit}, \\
+  H(X, Y) &= -\frac{1}{2}\log_2\frac{1}{2} - 0 - \frac{1}{4}\log_2\frac{1}{4} - \frac{1}{4}\log_2\frac{1}{4}
+           = \frac{1}{2} + \frac{1}{2} + \frac{1}{2} = \frac{3}{2} = \mathbf{1.5000}\;\text{bit}.
+\end{align*}
+直接由条件分布算条件熵：给定 $X=0$ 时 $Y$ 必然为 $0$（$H(Y\mid X=0)=0$）；给定 $X=1$ 时 $P(Y\mid X=1)=(\frac{1}{2}, \frac{1}{2})$（$H(Y\mid X=1)=1$），故：
+\[
+  H(Y \mid X) = \frac{1}{2}\cdot 0 + \frac{1}{2}\cdot 1 = \frac{1}{2} = \mathbf{0.5000}\;\text{bit}.
+\]
+给定 $Y=0$ 时 $P(X\mid Y=0)=(\frac{2}{3}, \frac{1}{3})$；给定 $Y=1$ 时 $X$ 必然为 $1$（$H(X\mid Y=1)=0$），故：
+\[
+  H(X \mid Y) = \frac{3}{4}\!\left(-\frac{2}{3}\log_2\frac{2}{3} - \frac{1}{3}\log_2\frac{1}{3}\right) + \frac{1}{4}\cdot 0
+              = \frac{3}{4}\log_2 3 - \frac{1}{2} \approx \mathbf{0.6887}\;\text{bit}.
+\]
+互信息：
+\[
+  I(X; Y) = H(Y) - H(Y \mid X) = \left(2 - \frac{3}{4}\log_2 3\right) - \frac{1}{2}
+          = \frac{3}{2} - \frac{3}{4}\log_2 3 \approx \mathbf{0.3113}\;\text{bit}.
+\]
+\textbf{核验链式法则与对称性}：
+\begin{itemize}
+  \item $H(X) + H(Y\mid X) = 1 + 0.5 = 1.5 = H(X, Y)$，且 $H(Y) + H(X\mid Y) = (2 - \frac{3}{4}\log_2 3) + (\frac{3}{4}\log_2 3 - \frac{1}{2}) = 1.5 = H(X, Y)$；
+  \item $H(X) - H(X\mid Y) = 1 - (\frac{3}{4}\log_2 3 - \frac{1}{2}) = \frac{3}{2} - \frac{3}{4}\log_2 3 = H(Y) - H(Y\mid X) = I(X; Y)$。
+\end{itemize}
+
+\subsection*{习题 4.4\quad 语言模型困惑度与一维高斯 KL 手算}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 4 个词的条件概率分别为 $2^{-1},\; 2^{-2},\; 2^{-3},\; 2^{-1}$，对应自信息（bit）依次为 $1, 2, 3, 1$：
+  \begin{align*}
+    \bar{H}_{\mathrm{bit}} &= \frac{1 + 2 + 3 + 1}{4} = \frac{7}{4} = \mathbf{1.7500}\;\text{bit}, \\
+    \bar{H}_{\mathrm{nat}} &= \frac{7}{4}\ln 2 \approx 1.75 \times 0.69315 = \mathbf{1.2130}\;\text{nat}, \\
+    \mathrm{PPL} &= 2^{7/4} = e^{\bar{H}_{\mathrm{nat}}} \approx \mathbf{3.3636}.
+  \end{align*}
+  \item 代入一维高斯 KL 闭式公式（命题 \ref{prop:ch4-gaussian-kl}）$\DKL(\mathcal{N}(\mu_1,\sigma_1^2)\|\mathcal{N}(\mu_2,\sigma_2^2)) = \ln\frac{\sigma_2}{\sigma_1} + \frac{\sigma_1^2 + (\mu_1-\mu_2)^2}{2\sigma_2^2} - \frac{1}{2}$：
+  \begin{align*}
+    \DKL\bigl(\mathcal{N}(1, 2^2) \,\|\, \mathcal{N}(0, 1)\bigr)
+    &= \ln\frac{1}{2} + \frac{4 + 1^2}{2\times 1} - \frac{1}{2}
+     = 2 - \ln 2 \approx \mathbf{1.3069}\;\text{nat}, \\
+    \DKL\bigl(\mathcal{N}(0, 1) \,\|\, \mathcal{N}(1, 2^2)\bigr)
+    &= \ln\frac{2}{1} + \frac{1 + (-1)^2}{2\times 4} - \frac{1}{2}
+     = \ln 2 - \frac{1}{4} \approx \mathbf{0.4431}\;\text{nat}.
+  \end{align*}
+  \textbf{代价不对称解读}：用窄分布 $\mathcal{N}(0,1)$ 逼近宽分布 $\mathcal{N}(1, 2^2)$（前式）会漏掉宽分布尾部质量，二次惩罚除以窄方差 $2\sigma_2^2=2$ 被急剧放大（$1.3069$）；反过来用宽分布去罩住窄分布（后式），尾部已被充分覆盖，代价不到前者的三分之一（$0.4431$）。
+\end{enumerate}
+
+\subsection*{习题 4.5\quad 单高斯正向 KL 极小化的精确矩匹配定理}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 将正向 KL 散度拆成负微分熵与交叉熵之和：
+  \[
+    \DKL\bigl(P \,\|\, \mathcal{N}(\mu, \sigma^2)\bigr)
+    = -h(P) + \E_{X\sim P}\bigl[-\ln q_{\mu,\sigma^2}(X)\bigr].
+  \]
+  因为 $-h(P)$ 与 $(\mu, \sigma^2)$ 无关，极小化正向 KL 等价于极小化交叉熵 $J(\mu, \sigma^2)$：
+  \begin{align*}
+    J(\mu, \sigma^2)
+    &= \E_{X\sim P}\!\left[\frac{1}{2}\ln(2\pi\sigma^2) + \frac{(X - \mu)^2}{2\sigma^2}\right] \\
+    &= \frac{1}{2}\ln(2\pi\sigma^2) + \frac{\E_P[(X - \mu_P + \mu_P - \mu)^2]}{2\sigma^2} \\
+    &= \frac{1}{2}\ln(2\pi\sigma^2) + \frac{\sigma_P^2 + (\mu_P - \mu)^2}{2\sigma^2},
+  \end{align*}
+  其中交叉项 $2(\mu_P - \mu)\E_P[X - \mu_P] = 0$ 精确消去。
+  \item 先对 $\mu$ 求偏导：
+  \[
+    \frac{\partial J}{\partial \mu} = -\frac{\mu_P - \mu}{\sigma^2} = 0 \implies \mu^* = \mu_P.
+  \]
+  事实上，对任意固定的 $\sigma^2 > 0$，$(\mu_P - \mu)^2 \ge 0$ 均在 $\mu^* = \mu_P$ 处唯一取到全局最小 $0$。将 $\mu = \mu_P$ 代回并记 $v := \sigma^2 > 0$，目标函数化为一元函数 $g(v) = \frac{1}{2}\ln(2\pi v) + \frac{\sigma_P^2}{2v}$：
+  \[
+    g'(v) = \frac{1}{2v} - \frac{\sigma_P^2}{2v^2} = \frac{v - \sigma_P^2}{2v^2}.
+  \]
+  在 $(0, \sigma_P^2)$ 上 $g'(v) < 0$ 严格递减，在 $(\sigma_P^2, +\infty)$ 上 $g'(v) > 0$ 严格递增，故 $v^* = (\sigma^*)^2 = \sigma_P^2$ 为唯一全局极小值点。证毕。
+  \item 对双峰混合 $P = 0.5\mathcal{N}(-2, 0.6^2) + 0.5\mathcal{N}(2, 0.6^2)$，由全期望与二阶矩可加性立得：
+  \begin{align*}
+    \mu_{\mathrm{fwd}} &= \E_P[X] = 0.5(-2) + 0.5(2) = \mathbf{0}, \\
+    \sigma_{\mathrm{fwd}}^2 &= \E_P[X^2] - \mu_{\mathrm{fwd}}^2
+     = 0.5\bigl(0.6^2 + (-2)^2\bigr) + 0.5\bigl(0.6^2 + 2^2\bigr) = 0.36 + 4 = \mathbf{4.36},
+  \end{align*}
+  故 $\sigma_{\mathrm{fwd}} = \sqrt{4.36} \approx \mathbf{2.0881}$。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.6\quad 对称且有界的 Jensen--Shannon 散度}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 混合分布 $M = \frac{1}{2}(P + Q)$ 关于 $P, Q$ 对称，交换 $P, Q$ 仅交换两项顺序，故 $\mathrm{JSD}(P\|Q) = \mathrm{JSD}(Q\|P)$。由 Gibbs 不等式，$\DKL(P\|M) \ge 0$ 且 $\DKL(Q\|M) \ge 0$，故 $\mathrm{JSD}(P\|Q) \ge 0$。等号成立当且仅当 $\DKL(P\|M) = 0$ 且 $\DKL(Q\|M) = 0$，即 $P = M$ 且 $Q = M$，等价于 $P = Q$。
+  \item 由全概率公式，$X$ 的边际分布恰好为 $P_X(x) = \frac{1}{2}P(x) + \frac{1}{2}Q(x) = M(x)$。条件熵为 $H(X \mid Z) = \frac{1}{2}H(X\mid Z=0) + \frac{1}{2}H(X\mid Z=1) = \frac{1}{2}H(P) + \frac{1}{2}H(Q)$。因此互信息满足：
+  \begin{align*}
+    I(X; Z) &= H(X) - H(X \mid Z) = H(M) - \frac{1}{2}H(P) - \frac{1}{2}H(Q) \\
+    &= -\sum_x \frac{P(x)+Q(x)}{2}\ln M(x) + \frac{1}{2}\sum_x P(x)\ln P(x) + \frac{1}{2}\sum_x Q(x)\ln Q(x) \\
+    &= \frac{1}{2}\sum_x P(x)\ln\frac{P(x)}{M(x)} + \frac{1}{2}\sum_x Q(x)\ln\frac{Q(x)}{M(x)}
+     = \mathrm{JSD}(P \,\|\, Q).
+  \end{align*}
+  （连续情形将求和替换为积分完全同构。）
+  \item 利用互信息对称性与离散熵非负性 $H(Z \mid X) \ge 0$：
+  \[
+    \mathrm{JSD}(P \,\|\, Q) = I(X; Z) = H(Z) - H(Z \mid X) \le H(Z) = \ln 2 \quad (\text{或 } 1\;\text{bit}).
+  \]
+  即使 $P, Q$ 支集完全不相交，仍有 $M(x) \ge \frac{1}{2}P(x)$ 且 $M(x) \ge \frac{1}{2}Q(x)$，此时由 $X$ 可 100\% 判别 $Z$（$H(Z\mid X)=0$），$\mathrm{JSD}(P\|Q)$ 精确达到上界 $\ln 2$ 而绝不发散。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.7\quad 安全信息论工具箱与决策树根节点信息增益选特征}
+\textbf{核心纯 NumPy 实现逻辑}（用布尔掩码 \texttt{p > 0} 安全规避 $0\log 0$ 产生 \texttt{NaN}）：
+\begin{lstlisting}[language=Python]
+def entropy(p, base=2.0):
+    p = np.asarray(p, dtype=float)
+    m = p > 0
+    return float(-np.sum(p[m] * np.log(p[m])) / np.log(base))
+
+def kl_div(p, q, base=2.0):
+    p, q = np.asarray(p, dtype=float), np.asarray(q, dtype=float)
+    m = p > 0
+    if np.any(q[m] <= 0):
+        return np.inf
+    return float(np.sum(p[m] * np.log(p[m] / q[m])) / np.log(base))
+
+def info_gain_bits(y, feat):
+    hy = entropy([np.mean(y == 0), np.mean(y == 1)], base=2.0)
+    hy_f = sum(
+        np.mean(feat == v) * entropy([np.mean(y[feat == v] == 0),
+                                      np.mean(y[feat == v] == 1)], base=2.0)
+        for v in (0, 1) if np.any(feat == v)
+    )
+    return hy - hy_f
+\end{lstlisting}
+\textbf{验证输出与断言自检}：
+\begin{itemize}
+  \item 第 (1) 问：100 对含零离散分布恒等式最大误差 $< 10^{-15} < 10^{-12}$，最小 KL 值 $\ge -10^{-15}$，零 \texttt{NaN}。
+  \item 第 (2) 问：$H(y) = H_2(4/8) = 1.0000\;\text{bit}$；各特征精确经验信息增益：
+  \begin{itemize}
+    \item $F_1$（$F_1=1$ 中 3 正 1 负，$F_1=0$ 中 1 正 3 负）：$\mathrm{IG}(y, F_1) = 1 - H_2(0.75) = \mathbf{0.1887}\;\text{bit}$；
+    \item $F_2$（$F_2=1, 0$ 中各 2 正 2 负，与标签完全独立）：$\mathrm{IG}(y, F_2) = 1 - 1 = \mathbf{0.0000}\;\text{bit}$；
+    \item $F_3$（$F_3=1$ 中 4 正 1 负，$F_3=0$ 中 0 正 3 负）：$\mathrm{IG}(y, F_3) = 1 - \frac{5}{8}H_2(0.8) - \frac{3}{8}\cdot 0 = \mathbf{0.5488}\;\text{bit}$。
+  \end{itemize}
+  故决策树根节点最优分裂特征为 $\mathbf{F_3}$。
+\end{itemize}
+
+\subsection*{习题 4.8\quad 双峰分布正向 vs 反向 KL 数值寻优复现}
+\textbf{核心纯 NumPy 实现逻辑}（在网格上直接评估精确高斯密度 $q(x;\mu,\sigma)$ 并用黎曼求和近似积分）：
+\begin{lstlisting}[language=Python]
+x = np.linspace(-6.0, 6.0, 601)
+dx = x[1] - x[0]
+npdf = lambda z, m, s: np.exp(-0.5*((z - m)/s)**2) / (np.sqrt(2*np.pi)*s)
+p = 0.5 * npdf(x, -2.0, 0.6) + 0.5 * npdf(x, 2.0, 0.6)
+p /= np.sum(p) * dx
+for m in np.linspace(-2.5, 2.5, 101):
+    for s in np.linspace(0.3, 2.8, 101):
+        q = npdf(x, m, s)
+        fwd = float(np.sum(p * np.log((p + 1e-15) / (q + 1e-15))) * dx)
+        rev = float(np.sum(q * np.log((q + 1e-15) / (p + 1e-15))) * dx)
+\end{lstlisting}
+\textbf{验证输出与断言自检}：
+\begin{itemize}
+  \item \textbf{正向 KL 网格最优}：$\mu_{\mathrm{fwd}} = 0.000,\; \sigma_{\mathrm{fwd}} = 2.100$（与习题 4.5 精确解 $\sqrt{4.36}\approx 2.088$ 最邻近的步长 $0.025$ 格点），对应 $\DKL(P\|Q) = \mathbf{0.5552}$、$\DKL(Q\|P) = \mathbf{1.1806}$；
+  \item \textbf{反向 KL 网格最优}：$\mu_{\mathrm{rev}} = -2.000$（由对称性 $+2.000$ 同样最优）、$\sigma_{\mathrm{rev}} = 0.600$，精准锁死单个峰，对应 $\DKL(Q\|P) = \mathbf{0.6919} \approx \ln 2$、而正向散度飙升至 $\DKL(P\|Q) = \mathbf{10.3062} > 9.5$。与表 \ref{tab:ch4-kl-bimodal} 及全部自检标准高度吻合。
+\end{itemize}
+
+% =========================================================================
+\section{第 5 章习题精解（5.1--5.8）}
+% =========================================================================
+
+\subsection*{习题 5.1\quad 统计估计与置信区间判断正误并纠错}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} 由偏差-方差分解（定理 \ref{thm:ch5-mse-decomp}），$\mathrm{MSE}(\hat{\theta}) = \Bias(\hat{\theta})^2 + \Var(\hat{\theta})$。无偏仅令第一项为 $0$，但若方差过大，总 MSE 反而劣于引入微小偏差换取大幅方差缩减的收缩估计量。\textbf{具体反例}：正态样本方差估计（见习题 5.7，$n=5,\;\sigma^2=4$），无偏 $S^2$ 的 $\mathrm{MSE}=8.0$，而有偏 MLE $\hat{\sigma}_n^2$ 的 $\mathrm{MSE}=5.76$、收缩估计 $\tilde{\sigma}^2$ 的 $\mathrm{MSE}=5.333$，均显著低于无偏估计量；另见习题 5.5 的均值收缩定理。
+  \item \textbf{错误。} MLE 只具有\textbf{渐近无偏性}，有限样本下经常存在偏差。\textbf{两个经典反例}：(i) 正态总体方差的 MLE $\hat{\sigma}_n^2 = \frac{1}{n}\sum (X_i - \bar{X})^2$ 满足 $\E[\hat{\sigma}_n^2] = \frac{n-1}{n}\sigma^2 < \sigma^2$（系统性低估）；(ii) $\mathrm{Uniform}(0, \theta)$ 的 MLE $\hat{\theta}_{\mathrm{MLE}} = \max_i X_i$ 满足 $\E[\hat{\theta}_{\mathrm{MLE}}] = \frac{n}{n+1}\theta < \theta$（见习题 5.3(b)）。
+  \item \textbf{错误。} 在 $n = 180$ 条验证样本上，$85\%$ 附近的单点准确率标准误约为 $\sqrt{0.85\times 0.15 / 180} \approx 2.66\%$，95\% 置信区间宽度约 $\pm 5.2\%$。两模型 $1.0\%$ 的差距（仅差约 2 道题）完全落在随机抽样波动区间内，必须使用配对 Bootstrap（如习题 5.8）或 McNemar 检验核查差值置信区间是否排除 $0$，绝不能仅凭点估计差 1 个百分点下结论。
+\end{enumerate}
+
+\subsection*{习题 5.2\quad Bootstrap 失效反例诊断}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{3 次全正面 $\{1, 1, 1\}$ 上的 Bootstrap 坍缩}：由于原始经验分布 $\hat{F}_n$ 在 $x=1$ 处赋予了 $100\%$ 概率质量，无论运行多少轮有放回重采样，每一批 $B = 5{,}000$ 份重采样样本全都是 $\{1, 1, 1\}$，样本均值恒等于 $1.0$。因此百分位 Bootstrap 得到的 95\% 置信区间退化为单点区间 $\mathbf{[1.0, 1.0]}$（宽度为 $0$）！这严重违背常识——仅抛 3 次硬币根本不足以 95\% 确信这枚硬币绝不会出现反面。\\
+  \textbf{Beta(2, 2) 先验的化解机制}：引入温和的对称先验 $p \sim \mathrm{Beta}(2, 2)$ 后，吸收 3 次全正面得到光滑后验 $p \mid \mathcal{D} \sim \mathrm{Beta}(5, 2)$，其 MAP 估计回拉至 $\frac{5-1}{5+2-2} = 0.80$、后验均值 $\frac{5}{7} \approx 0.7143$，且后验密度在 $(0, 1)$ 上保留了合理的尾部不确定性，彻底避免零样本支集塌缩。
+  \item \textbf{均匀分布最大值 $T = \max_i X_i$ 的 Bootstrap 失效}：设原样本最大值为 $M_n = \max_{1\le i\le n} X_i$。由于任何有放回重采样都只能从 $\{X_1, \dots, X_n\}$ 中抽取元素，重采样最大值 $M_n^*$ 满足两个病态性质：(i) 恒有 $M_n^* \le M_n$，永远无法越过样本上界去探索 $(M_n, \theta]$；(ii) $M_n^*$ 恰好等于原最大值 $M_n$ 的概率为“至少抽中一次 $M_n$”的概率：
+  \[
+    \Prob^*(M_n^* = M_n) = 1 - \left(1 - \frac{1}{n}\right)^n \xrightarrow{n\to\infty} 1 - e^{-1} \approx 63.21\%!
+  \]
+  而真实抽样分布 $M_n/\theta$ 是连续分布，命中单点 $\theta$ 的概率为 $0$。Bootstrap 在端点处出现了 $63.2\%$ 的离散点质量，无法逼近真实边界极值分布，导致置信区间系统性失效。
+\end{enumerate}
+
+\subsection*{习题 5.3\quad 指数分布与均匀分布的 MLE 手算}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{指数分布 $\mathrm{Exp}(\lambda)$ 的 MLE}：对数似然函数为
+  \[
+    \ell(\lambda) = \sum_{i=1}^n \ln\bigl(\lambda e^{-\lambda x_i}\bigr) = n\ln\lambda - \lambda\sum_{i=1}^n x_i.
+  \]
+  令一阶导数为零：$\ell'(\lambda) = \frac{n}{\lambda} - \sum_{i=1}^n x_i = 0 \implies \hat{\lambda}_{\mathrm{MLE}} = \frac{n}{\sum_{i=1}^n x_i} = \frac{1}{\bar{x}}$。又 $\ell''(\lambda) = -\frac{n}{\lambda^2} < 0$，故为唯一全局极大值点。\\
+  当 $n=4$、观测为 $\{1, 2, 3, 2\}$ 时，$\bar{x} = \frac{1+2+3+2}{4} = 2.0$，故 $\hat{\lambda}_{\mathrm{MLE}} = \frac{1}{2} = \mathbf{0.5}$。
+  \item \textbf{均匀分布 $\mathrm{Uniform}(0, \theta)$ 的 MLE}：联合似然函数为
+  \[
+    L(\theta) = \prod_{i=1}^n \frac{1}{\theta}\mathbf{1}_{[0,\theta]}(x_i)
+              = \frac{1}{\theta^n}\mathbf{1}_{\{\theta \ge \max_i x_i\}}.
+  \]
+  \textbf{为何不能令 $\ell'(\theta) = 0$}：当 $\theta < M_n := \max_i x_i$ 时 $L(\theta) = 0$；当 $\theta \ge M_n$ 时，$L(\theta) = \theta^{-n}$ 是严格单调递减函数，其导数 $\ell'(\theta) = -n/\theta$ 处处严格为负、永不为零，极大值落在参数定义域的\textbf{边界点}（支集随待估参数 $\theta$ 变化，违反经典微积分内点极值条件），因此直接得：
+  \[
+    \hat{\theta}_{\mathrm{MLE}} = M_n = \max_{1\le i\le n} X_i.
+  \]
+  由给定密度 $f_{M_n}(t) = \frac{n t^{n-1}}{\theta^n}$（$0 \le t \le \theta$）计算期望：
+  \[
+    \E[\hat{\theta}_{\mathrm{MLE}}] = \int_0^\theta t\cdot\frac{n t^{n-1}}{\theta^n}\,dt
+    = \frac{n}{\theta^n}\left[\frac{t^{n+1}}{n+1}\right]_0^\theta = \frac{n}{n+1}\theta.
+  \]
+  当 $n = 3$ 时，$\E[\hat{\theta}_{\mathrm{MLE}}] = \mathbf{\frac{3}{4}\theta}$，偏差为 $\Bias(\hat{\theta}_{\mathrm{MLE}}) = \frac{3}{4}\theta - \theta = \mathbf{-\frac{1}{4}\theta}$（系统性低估真值 $25\%$）。
+\end{enumerate}
+
+\subsection*{习题 5.4\quad Beta-Bernoulli 共轭的顺序更新性质}
+已知先验 $p \sim \mathrm{Beta}(\alpha_0, \beta_0) = \mathrm{Beta}(2, 8)$。
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{第一批数据后}（$n_1 = 10$ 次曝光，$k_1 = 4$ 次点击，$n_1 - k_1 = 6$ 次未点击）：
+  \begin{itemize}
+    \item 后验分布：$p \mid \mathcal{D}_1 \sim \mathrm{Beta}(2 + 4,\; 8 + 6) = \mathbf{\mathrm{Beta}(6, 14)}$；
+    \item $\hat{p}_{\mathrm{MLE}}^{(1)} = \frac{4}{10} = \mathbf{0.4000}$；
+    \item $\hat{p}_{\mathrm{MAP}}^{(1)} = \frac{6 - 1}{6 + 14 - 2} = \frac{5}{18} \approx \mathbf{0.2778}$；
+    \item 全贝叶斯后验均值：$\E[p \mid \mathcal{D}_1] = \frac{6}{6 + 14} = \frac{6}{20} = \mathbf{0.3000}$。
+  \end{itemize}
+  \item \textbf{顺序更新等价性验证}：
+  \begin{itemize}
+    \item \emph{分两批顺序更新}：以 $\mathrm{Beta}(6, 14)$ 为新先验，吸收第二批 $n_2 = 90$ 次曝光中的 $k_2 = 26$ 次点击与 $64$ 次未点击，得后验 $\mathrm{Beta}(6 + 26,\; 14 + 64) = \mathbf{\mathrm{Beta}(32, 78)}$；
+    \item \emph{一次性合并更新}：以原始先验 $\mathrm{Beta}(2, 8)$ 吸收全部 $n = 100$ 次曝光中的 $k = 30$ 次点击与 $70$ 次未点击，得后验 $\mathrm{Beta}(2 + 30,\; 8 + 70) = \mathbf{\mathrm{Beta}(32, 78)}$，两者\textbf{完全一致}（充分统计量与共轭闭包的直接体现）。
+  \end{itemize}
+  在 $n = 100$ 时：$\hat{p}_{\mathrm{MLE}}^{(2)} = \frac{30}{100} = \mathbf{0.3000}$，$\hat{p}_{\mathrm{MAP}}^{(2)} = \frac{32 - 1}{32 + 78 - 2} = \frac{31}{108} \approx \mathbf{0.2870}$，后验均值 $\frac{32}{110} \approx \mathbf{0.2909}$。\\
+  \textbf{MLE 与 MAP 差距变化}：$n=10$ 时 $|\text{MLE} - \text{MAP}| = 0.4000 - 0.2778 = \mathbf{0.1222}$；$n=100$ 时迅速缩窄近 10 倍至 $0.3000 - 0.2870 = \mathbf{0.0130}$。说明数据稀缺时先验强力纠偏，而随样本量增大，似然逐渐主导后验，MAP 向 MLE 收敛。
+\end{enumerate}
+
+\subsection*{习题 5.5\quad 收缩估计量以微偏换低 MSE（正则化前奏）}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 已知 $\E[\bar{X}] = \mu$、$\Var(\bar{X}) = \sigma^2/n$。对 $\hat{\mu}_\alpha = \alpha \bar{X}$：
+  \[
+    \Bias(\hat{\mu}_\alpha) = \E[\alpha\bar{X}] - \mu = (\alpha - 1)\mu, \qquad
+    \Var(\hat{\mu}_\alpha) = \alpha^2 \Var(\bar{X}) = \alpha^2 \frac{\sigma^2}{n}.
+  \]
+  由均方误差分解定理（定理 \ref{thm:ch5-mse-decomp}）：
+  \[
+    \mathrm{MSE}(\hat{\mu}_\alpha) = \Bias(\hat{\mu}_\alpha)^2 + \Var(\hat{\mu}_\alpha)
+    = (\alpha - 1)^2 \mu^2 + \alpha^2 \frac{\sigma^2}{n}.
+  \]
+  \item $f(\alpha) := \mathrm{MSE}(\hat{\mu}_\alpha)$ 是关于 $\alpha$ 的二次函数，二次项系数 $\mu^2 + \sigma^2/n > 0$（开口严格向上）。令一阶导数为零：
+  \[
+    f'(\alpha) = 2(\alpha - 1)\mu^2 + 2\alpha\frac{\sigma^2}{n} = 0
+    \implies \alpha^* = \frac{\mu^2}{\mu^2 + \sigma^2/n} = \frac{n\mu^2}{n\mu^2 + \sigma^2}.
+  \]
+  因 $\sigma^2 > 0$ 且 $\mu \neq 0$，显然严格有 $0 < \alpha^* < 1$。又因 $\alpha = 1$ 对应无偏估计 $\bar{X}$ 且 $\alpha^* \neq 1$ 是严格凸二次函数的唯一全局极小点，必严格满足：
+  \[
+    \mathrm{MSE}(\hat{\mu}_{\alpha^*}) = \frac{\mu^2 \cdot \sigma^2/n}{\mu^2 + \sigma^2/n}
+    = \alpha^* \cdot \frac{\sigma^2}{n} < \frac{\sigma^2}{n} = \mathrm{MSE}(\bar{X}).
+  \]
+  \item \textbf{与高斯先验 MAP 的联系}：对比式 \eqref{eq:ch5-gauss-conj}，当置零均值先验 $\mu \sim \mathcal{N}(0, \tau^2)$ 时，MAP 估计恰好是线性收缩 $\hat{\mu}_{\mathrm{MAP}} = \frac{n}{n + \sigma^2/\tau^2}\bar{X}$；其收缩因子 $\frac{n\tau^2}{n\tau^2 + \sigma^2}$ 与上述最优因子 $\frac{n\mu^2}{n\mu^2 + \sigma^2}$ 形式完全一致（先验方差 $\tau^2$ 正是对未知真值信号强度 $\mu^2$ 的替代）。这揭示了 $L_2$ 正则化（岭回归）提升泛化的本质：主动接受微小向零偏差，换取更大幅度的方差下降。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 5.6\quad 泊松-伽马共轭与多元高斯均值 MAP 推导}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{泊松-伽马共轭}：合并先验与 $n$ 条独立泊松观测的似然，仅保留含 $\lambda$ 的因子：
+  \begin{align*}
+    p(\lambda \mid x_1, \dots, x_n)
+    &\propto p(\lambda)\prod_{i=1}^n p(x_i; \lambda)
+     \propto \Bigl(\lambda^{\alpha - 1} e^{-\beta\lambda}\Bigr)
+             \prod_{i=1}^n \Bigl(e^{-\lambda}\lambda^{x_i}\Bigr) \\
+    &= \lambda^{\bigl(\alpha + \sum_{i=1}^n x_i\bigr) - 1} \exp\!\bigl(-(\beta + n)\lambda\bigr).
+  \end{align*}
+  对照 Gamma 密度核 $\lambda^{\alpha'-1}e^{-\beta'\lambda}$，立得后验仍为 Gamma 分布：
+  \[
+    \lambda \mid \mathcal{D} \;\sim\; \mathrm{Gamma}\!\left(\alpha',\; \beta'\right), \qquad
+    \alpha' = \alpha + \sum_{i=1}^n x_i,\quad \beta' = \beta + n.
+  \]
+  由此后验均值为 $\E[\lambda \mid \mathcal{D}] = \frac{\alpha'}{\beta'} = \frac{\alpha + \sum_{i=1}^n x_i}{\beta + n}$；对对数后验 $(\alpha' - 1)\ln\lambda - \beta'\lambda$ 求导置零，当 $\alpha' = \alpha + \sum x_i > 1$ 时唯一 MAP 为 $\hat{\lambda}_{\mathrm{MAP}} = \frac{\alpha + \sum_{i=1}^n x_i - 1}{\beta + n}$。
+  \item \textbf{多元高斯均值 MAP}：写出对数后验并忽略与 $\mu$ 无关的归一化常数：
+  \[
+    \ln p(\mu \mid \mathcal{D})
+    = -\frac{1}{2\sigma^2}\sum_{i=1}^n \|x_i - \mu\|_2^2 - \frac{1}{2\tau^2}\|\mu\|_2^2 + \mathrm{const}.
+  \]
+  对向量 $\mu \in \R^d$ 求梯度并令其为零（注意 Hessian 为 $-(\frac{n}{\sigma^2} + \frac{1}{\tau^2})I_d \prec 0$，保证唯一全局极大）：
+  \[
+    \nabla_\mu \ln p(\mu \mid \mathcal{D})
+    = \frac{1}{\sigma^2}\sum_{i=1}^n (x_i - \mu) - \frac{1}{\tau^2}\mu = 0
+    \implies \left(\frac{n}{\sigma^2} + \frac{1}{\tau^2}\right)\mu = \frac{n}{\sigma^2}\bar{x},
+  \]
+  两边同乘 $\sigma^2$ 并整理即得 $\hat{\mu}_{\mathrm{MAP}} = \frac{n}{n + \sigma^2/\tau^2}\bar{x}$。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 5.7\quad 蒙特卡洛实测三种方差估计量的偏差与 MSE}
+\textbf{理论推导速核}：因 $SS := \sum_{i=1}^n (X_i - \bar{X})^2$ 满足 $SS/\sigma^2 \sim \chi^2_{n-1}$（自由度 $n-1=4$，均值 $4$，方差 $8$），对一般形式 $c\cdot SS$ 有 $\E = 16c,\; \Var = 128c^2$，代入 $c \in \{1/4, 1/5, 1/6\}$ 立得精确理论 MSE：$\mathrm{MSE}(S^2)=8.000$、$\mathrm{MSE}(\hat{\sigma}_n^2)=144/25=5.760$、$\mathrm{MSE}(\tilde{\sigma}^2)=16/3\approx 5.333$。\\
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+rng = np.random.default_rng(2026)
+X = rng.normal(0.0, 2.0, size=(20_000, 5))
+ss = np.sum((X - X.mean(axis=1, keepdims=True)) ** 2, axis=1)
+s_unb, s_mle, s_shr = ss / 4.0, ss / 5.0, ss / 6.0
+for name, est in [("S^2", s_unb), ("MLE", s_mle), ("Shrink", s_shr)]:
+    print(name, est.mean(), est.mean() - 4.0, np.mean((est - 4.0) ** 2))
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}）}：
+\begin{itemize}
+  \item 无偏 $S^2$（$/4$）：均值 $3.9855$（误差 $0.0145 < 0.08$），偏差 $-0.0145$，经验 MSE $= \mathbf{7.9151}$（理论 $8.000$）；
+  \item MLE $\hat{\sigma}_n^2$（$/5$）：均值 $3.1884$（距 $3.2$ 误差 $0.0116 < 0.08$），偏差 $-0.8116$，经验 MSE $= \mathbf{5.7242}$（理论 $5.760$）；
+  \item 收缩版 $\tilde{\sigma}^2$（$/6$）：均值 $2.6570$（理论 $2.6667$），偏差 $-1.3430$，经验 MSE $= \mathbf{5.3214}$（理论 $5.333$）。
+\end{itemize}
+严格满足 $\mathrm{MSE}(\tilde{\sigma}^2) < \mathrm{MSE}(\hat{\sigma}_n^2) < \mathrm{MSE}(S^2)$，全部断言通过。
+
+\subsection*{习题 5.8\quad 实现配对 Bootstrap 比较两个分类器}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+def paired_bootstrap(both_ok, only_a, only_b, both_bad, B=10_000, seed=2026):
+    rng = np.random.default_rng(seed)
+    hits_a = np.array([1]*both_ok + [1]*only_a + [0]*only_b + [0]*both_bad)
+    hits_b = np.array([1]*both_ok + [0]*only_a + [1]*only_b + [0]*both_bad)
+    idx = rng.integers(0, len(hits_a), size=(B, len(hits_a)))
+    diffs = (hits_b[idx].mean(axis=1) - hits_a[idx].mean(axis=1)) * 100.0
+    lo, hi = np.percentile(diffs, [2.5, 97.5])
+    return float(lo), float(hi), float(np.mean(diffs > 0))
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}，$B=10{,}000$）}：
+\begin{itemize}
+  \item \textbf{情形 (a) 微弱差异}（点估计 $\Delta = +1.11\%$）：配对 95\% CI 为 $\mathbf{[-1.67\%, +3.89\%]}$，跨越 $0$，且 $\Prob^*(\Delta > 0) = 0.7278$，统计上\textbf{不能}宣称模型 B 显著优于模型 A；
+  \item \textbf{情形 (b) 显著差异}（点估计 $\Delta = +6.67\%$）：配对 95\% CI 为 $\mathbf{[+2.78\%, +11.11\%]}$，下界严格大于 $0$，且 $\Prob^*(\Delta > 0) = \mathbf{0.9989} > 0.99$，可确认模型 B 具有统计显著优势。
+\end{itemize}
+
+% =========================================================================
+\section{第 6 章习题精解（6.1--6.8）}
+% =========================================================================
+
+\subsection*{习题 6.1\quad 逻辑回归与评测工程判断正误并纠错}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} 工程与理论中通常\textbf{不惩罚偏置项 $b$}。原因是偏置项仅控制整体输出基线（例如回归中的目标均值 $\bar{y}$，或分类中的类别先验对数几率），不增加模型随特征变化的复杂度；若惩罚 $b$，在目标值整体平移（如房价从万元改千元）或类别极度不平衡时，会把模型基准强行拉向 $0$，破坏平移不变性并引入无谓的系统偏差。
+  \item \textbf{错误。} 当训练数据完全线性可分时，存在某个方向 $u$ 使全部样本满足 $(2y_i - 1)x_i^T u > 0$。沿射线 $w(t) = t u$（$t \to +\infty$），不加正则的交叉熵损失严格单调趋近于 $0$ 但永不可达（$\inf_w \mathcal{L}(w) = 0$，无有限极小值点），因此梯度下降会使 $\|w\|_2 \to +\infty$ 发生\textbf{权重发散}而非收敛到有限最优解！加入任意微小 $L_2$ 正则项（$\lambda > 0$）才能使目标严格强凸并保证唯一有限最优解。
+  \item \textbf{错误。} 在仅有 1\% 欺诈交易的极度不平衡数据上，一个什么都不学、永远预测“正常交易（$\hat{y}\equiv 0$）”的废柴模型就能拿到 \textbf{99.0\% 的准确率}，而它对真正欺诈的召回率 Recall $= 0\%$、$F_1 = 0$，毫无商用价值。必须结合 Precision、Recall、$F_1$ 或 PR-AUC/ROC-AUC 综合评估。
+\end{enumerate}
+
+\subsection*{习题 6.2\quad Softmax 数值溢出与数据泄漏双排查}
+\begin{enumerate}[label=(\roman*), leftmargin=1.8em]
+  \item \textbf{Softmax 与交叉熵的数值崩盘}：
+  \begin{itemize}
+    \item \textbf{崩盘场景}：只要某条样本的 logit 较大（如 float64 下 $z_{ik} > 710$），\texttt{np.exp(Z)} 立刻上溢为 \texttt{inf}，进而 \texttt{inf / inf} 变为 \texttt{NaN}；反之，若预测正确类的概率 $\hat{p}_{i, y_i}$ 因极端错分下溢为 \texttt{0.0}，随后 \texttt{np.log(0.0)} 产生 \texttt{-inf} 甚至 \texttt{NaN}，直接炸毁训练梯度。
+    \item \textbf{修复写法}（利用平移不变性与 Log-Sum-Exp 直接在 log 空间算交叉熵）：
+  \end{itemize}
+\begin{lstlisting}[language=Python]
+Z_shift = Z - np.max(Z, axis=1, keepdims=True)
+lse = np.max(Z, axis=1) + np.log(np.sum(np.exp(Z_shift), axis=1))
+loss = float(np.mean(lse - Z[np.arange(len(y)), y]))
+P = np.exp(Z_shift) / np.sum(np.exp(Z_shift), axis=1, keepdims=True)
+\end{lstlisting}
+  \item \textbf{全量预处理与特征选择导致的数据泄漏}：
+  \begin{itemize}
+    \item \textbf{幻觉场景}：先在全量 \texttt{X\_all} 上计算均值/标准差并利用全量标签 \texttt{y\_all} 挑选 Top-20 相关特征，等价于让模型在训练前偷看了测试集分布与标签！在高维小样本下，即使所有特征全是纯随机噪声，被挑出的 20 维特征也会与测试标签存在虚假相关，制造高达 $80\%$ 以上的虚假高准确率幻觉（见习题 6.8(a)）。
+    \item \textbf{修复写法}（严格\textbf{先切分，再仅用训练集拟合标准化参数与特征索引}）：
+  \end{itemize}
+\begin{lstlisting}[language=Python]
+# 1. Split first
+X_tr_raw, y_tr = X_all[tr_idx], y_all[tr_idx]
+X_te_raw, y_te = X_all[te_idx], y_all[te_idx]
+# 2. Fit scaler & feature selector ONLY on training fold
+mu, sd = X_tr_raw.mean(axis=0), X_tr_raw.std(axis=0) + 1e-8
+X_tr_std, X_te_std = (X_tr_raw - mu) / sd, (X_te_raw - mu) / sd
+corrs_tr = np.abs(X_tr_std.T @ (y_tr - y_tr.mean()))
+top20 = np.argsort(corrs_tr)[-20:]
+X_tr_final, X_te_final = X_tr_std[:, top20], X_te_std[:, top20]
+\end{lstlisting}
+\end{enumerate}
+
+\subsection*{习题 6.3\quad 逻辑回归一步梯度更新与远点拖拽验算}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{单步梯度下降精确手算}：已知 $x=(1, -2)^T,\; y=1,\; w_0=(0,0)^T,\; b_0=0,\; \lambda=0.2,\; \eta=0.5$。
+  \begin{itemize}
+    \item 初始前向：$z_0 = x^T w_0 + b_0 = \mathbf{0}$，$\hat{p}_0 = \sigma(0) = \mathbf{0.5}$；
+    \item 带正则 BCE 损失：$\mathcal{L}(w_0, b_0) = \ln(1 + e^0) - 1\cdot 0 + \frac{0.2}{2}\|0\|_2^2 = \mathbf{\ln 2 \approx 0.6931}$；
+    \item 梯度计算（不惩罚偏置 $b$）：
+    \[
+      \nabla_w \mathcal{L} = (\hat{p}_0 - y)x + \lambda w_0 = (-0.5)\begin{pmatrix} 1 \\ -2 \end{pmatrix} + 0 = \begin{pmatrix} \mathbf{-0.5} \\ \mathbf{1.0} \end{pmatrix}, \qquad
+      \frac{\partial \mathcal{L}}{\partial b} = \hat{p}_0 - y = \mathbf{-0.5};
+    \]
+    \item 一步更新（$\eta = 0.5$）：
+    \[
+      w_1 = w_0 - 0.5\begin{pmatrix} -0.5 \\ 1.0 \end{pmatrix} = \begin{pmatrix} \mathbf{0.25} \\ \mathbf{-0.50} \end{pmatrix}, \qquad
+      b_1 = 0 - 0.5(-0.5) = \mathbf{0.25};
+    \]
+    \item 更新后预测：$z_1 = x^T w_1 + b_1 = 1(0.25) + (-2)(-0.50) + 0.25 = \mathbf{1.50}$，新预测概率 $\hat{p}_1 = \sigma(1.50) = \frac{1}{1 + e^{-1.5}} \approx \mathbf{0.8176}$（朝真实标签 $y=1$ 大幅推进）。
+  \end{itemize}
+  \item \textbf{7 点最小二乘远点拖拽精确验算}：数据点为 $(-2,0), (-1,0), (0,0), (1,1), (2,1), (3,1), (30,1)$，$n=7$。
+  \begin{align*}
+    \sum_{i=1}^7 x_i &= -2 - 1 + 0 + 1 + 2 + 3 + 30 = 33 \implies \bar{x} = \mathbf{\frac{33}{7}}, \\
+    \sum_{i=1}^7 y_i &= 0 + 0 + 0 + 1 + 1 + 1 + 1 = 4 \implies \bar{y} = \mathbf{\frac{4}{7}}.
+  \end{align*}
+  利用平方和分解 $\sum x_i^2 = 4 + 1 + 0 + 1 + 4 + 9 + 900 = 919$ 与 $\sum x_i y_i = 1 + 2 + 3 + 30 = 36$：
+  \begin{align*}
+    S_{xx} &= \sum_{i=1}^7 (x_i - \bar{x})^2 = \sum x_i^2 - n\bar{x}^2
+            = 919 - 7\cdot\frac{1089}{49} = \frac{6433 - 1089}{7} = \mathbf{\frac{5344}{7}}, \\
+    S_{xy} &= \sum_{i=1}^7 (x_i - \bar{x})(y_i - \bar{y}) = \sum x_i y_i - n\bar{x}\bar{y}
+            = 36 - 7\cdot\frac{33}{7}\cdot\frac{4}{7} = \frac{252 - 132}{7} = \mathbf{\frac{120}{7}}.
+  \end{align*}
+  由此斜率与截距精确为：
+  \[
+    w = \frac{S_{xy}}{S_{xx}} = \frac{120}{5344} = \mathbf{\frac{15}{668}}, \qquad
+    b = \bar{y} - w\bar{x} = \frac{4}{7} - \frac{15}{668}\cdot\frac{33}{7}
+      = \frac{2672 - 495}{7\times 668} = \frac{2177}{7\times 668} = \mathbf{\frac{311}{668}}.
+  \]
+  令 $w x_1^* + b = \frac{1}{2} = \frac{334}{668}$，解得 $\frac{15}{668}x_1^* = \frac{23}{668} \implies x_1^* = \mathbf{\frac{23}{15} \approx 1.5333}$，导致正类点 $(1, 1)$ 被右移后的阈值边界错误判负！
+\end{enumerate}
+
+\subsection*{习题 6.4\quad 不平衡混淆矩阵指标手算与阈值权衡}
+已知总样本 $N = 200$，正类 $P = 20$，负类 $N_- = 180$。
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item 当 $\mathrm{TP}=16,\; \mathrm{FP}=4,\; \mathrm{FN}=4,\; \mathrm{TN}=176$ 时：
+  \begin{align*}
+    \mathrm{Accuracy} &= \frac{16 + 176}{200} = \mathbf{96.00\%}, &
+    \mathrm{Precision} &= \frac{16}{16 + 4} = \mathbf{80.00\%}, \\
+    \mathrm{Recall} &= \frac{16}{16 + 4} = \mathbf{80.00\%}, &
+    \mathrm{FPR} &= \frac{4}{4 + 176} = \frac{1}{45} \approx \mathbf{2.22\%}, \\
+    F_1 &= \frac{2\times 0.80\times 0.80}{0.80 + 0.80} = \mathbf{0.8000}.
+  \end{align*}
+  \item \textbf{对比偷懒基线（$\hat{y}\equiv 0$）}：$\mathrm{TP}=\mathrm{FP}=0,\; \mathrm{FN}=20,\; \mathrm{TN}=180$，其 $\mathrm{Accuracy} = 180/200 = \mathbf{90.00\%}$（看似只低 6 个百分点），但 $\mathrm{Recall} = 0\%$、$F_1 = \mathbf{0.0000}$，彻底暴露准确率在不平衡场景下的钝化失真。
+  \item \textbf{调低阈值后}（$\mathrm{TP}=19,\; \mathrm{FP}=19,\; \mathrm{FN}=1,\; \mathrm{TN}=161$）：
+  \[
+    \mathrm{Precision} = \frac{19}{38} = \mathbf{50.00\%}, \qquad
+    \mathrm{Recall} = \frac{19}{20} = \mathbf{95.00\%}, \qquad
+    F_1 = \frac{2\times 0.50\times 0.95}{0.50 + 0.95} = \frac{19}{29} \approx \mathbf{0.6552}.
+  \]
+  \textbf{场景决策原则}：(i) \textbf{癌症初筛}中漏诊（FN）的代价是危及生命，误报（FP）仅需复查确认，应\textbf{调低阈值}优先拉高 Recall（如选 $95\%$ 召回方案）；(ii) \textbf{自动封号系统}中误封正常用户（FP）严重损害口碑与客诉成本，应\textbf{调高阈值}优先守住高 Precision（如 $80\%$ 甚至 $95\%+$ 精确率，可疑边缘账号转人工复审）。
+\end{enumerate}
+
+\subsection*{习题 6.5\quad Softmax 平移不变性、交叉熵梯度与 $K=2$ 退化证明}
+\begin{proof}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{平移不变性}：对任意常数 $c \in \R$ 与任意类别 $k \in \{1,\dots,K\}$：
+  \[
+    \mathrm{softmax}(z + c\mathbf{1})_k
+    = \frac{e^{z_k + c}}{\sum_{m=1}^K e^{z_m + c}}
+    = \frac{e^c e^{z_k}}{e^c \sum_{m=1}^K e^{z_m}}
+    = \frac{e^{z_k}}{\sum_{m=1}^K e^{z_m}} = \mathrm{softmax}(z)_k.
+  \]
+  取 $c = -\max_m z_m$ 即得到数值稳定的 Log-Sum-Exp 与防上溢 Softmax。
+  \item \textbf{交叉熵梯度}：因 one-hot 标签满足 $\sum_{k=1}^K y_k = 1$，将损失函数化简为：
+  \[
+    \ell(z, y) = -\sum_{k=1}^K y_k \ln\frac{e^{z_k}}{\sum_{c=1}^K e^{z_c}}
+    = \left(\sum_{k=1}^K y_k\right)\ln\!\left(\sum_{c=1}^K e^{z_c}\right) - \sum_{k=1}^K y_k z_k
+    = \ln\!\left(\sum_{c=1}^K e^{z_c}\right) - \sum_{k=1}^K y_k z_k.
+  \]
+  对任意 $z_j$ 直接求偏导，立得极为优雅的“预测减标签”形式：
+  \[
+    \frac{\partial \ell}{\partial z_j}
+    = \frac{e^{z_j}}{\sum_{c=1}^K e^{z_c}} - y_j = \hat{p}_j - y_j.
+  \]
+  \item \textbf{$K=2$ 精确退化为二元逻辑回归}：设二分类（类别 $0, 1$）的 Softmax 参数为 $(w_0, b_0)$ 与 $(w_1, b_1)$，由 (a) 的平移不变性，将两个 logit 同时减去 $w_0^T x + b_0$，并记 $w := w_1 - w_0,\; b := b_1 - b_0$，则类别 $1$ 的后验概率为：
+  \[
+    \hat{p}_1 = \frac{e^{w_1^T x + b_1}}{e^{w_0^T x + b_0} + e^{w_1^T x + b_1}}
+              = \frac{e^{(w_1-w_0)^T x + (b_1-b_0)}}{1 + e^{(w_1-w_0)^T x + (b_1-b_0)}}
+              = \frac{1}{1 + e^{-(w^T x + b)}} = \sigma(w^T x + b),
+  \]
+  相应地 $\hat{p}_0 = 1 - \hat{p}_1$，且多分类交叉熵精确化为二元 BCE 损失。
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 6.6\quad Sigmoid + MSE 非凸区间与逻辑回归 Hessian 安全学习率上界}
+\begin{proof}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item 记 $p = \sigma(z) \in (0, 1)$，利用 $p' = p(1 - p)$，对 $\ell_{\mathrm{MSE}}(z) = \frac{1}{2}(p - 1)^2$ 连续求导：
+  \begin{align*}
+    \ell'_{\mathrm{MSE}}(z) &= (p - 1)p' = -p(1 - p)^2, \\
+    \ell''_{\mathrm{MSE}}(z) &= -\bigl[p'(1 - p)^2 + p\cdot 2(1 - p)(-p')\bigr]
+    = -p'(1 - p)\bigl[(1 - p) - 2p\bigr] \\
+    &= p(1 - p)^2(3p - 1).
+  \end{align*}
+  因为 $p(1 - p)^2 > 0$ 处处恒正，$\ell''_{\mathrm{MSE}}(z)$ 的符号完全由 $(3p - 1)$ 决定：
+  \[
+    \ell''_{\mathrm{MSE}}(z) < 0 \iff 3p - 1 < 0 \iff p = \frac{1}{1 + e^{-z}} < \frac{1}{3}
+    \iff e^{-z} > 2 \iff z < -\ln 2.
+  \]
+  由此证得当 $y = 1$ 且模型严重错判（$z < -\ln 2 \approx -0.6931$）时，Sigmoid + MSE 损失处于严格凹区且梯度趋近于零，产生梯度消失与非凸平台。
+  \item 对带 $L_2$ 正则的无偏置逻辑回归 $\mathcal{L}(w) = \frac{1}{N}\sum_{i=1}^N [\ln(1+e^{x_i^T w}) - y_i x_i^T w] + \frac{\lambda}{2}\|w\|_2^2$，其梯度为 $\nabla \mathcal{L}(w) = \frac{1}{N}\sum_{i=1}^N (\hat{p}_i - y_i)x_i + \lambda w$，Hessian 矩阵为：
+  \[
+    H(w) = \frac{1}{N}\sum_{i=1}^N \hat{p}_i(1 - \hat{p}_i)\,x_i x_i^T + \lambda I_d.
+  \]
+  任取单位向量 $v \in \R^d$（$\|v\|_2 = 1$），计算二次型 $v^T H(w) v$：
+  \[
+    v^T H(w) v = \frac{1}{N}\sum_{i=1}^N \hat{p}_i(1 - \hat{p}_i)(x_i^T v)^2 + \lambda.
+  \]
+  由基本不等式 $0 < \hat{p}_i(1 - \hat{p}_i) \le \frac{1}{4}$（当 $\hat{p}_i = 1/2$ 取等）与第 1 卷 Rayleigh 商上界 $\sum_{i=1}^N (x_i^T v)^2 = v^T (X^T X) v \le \lambda_{\max}(X^T X)$：
+  \[
+    \lambda \;\le\; v^T H(w) v \;\le\; \frac{1}{4N}v^T (X^T X) v + \lambda \;\le\; \frac{1}{4N}\lambda_{\max}(X^T X) + \lambda.
+  \]
+  因 $v$ 任意，即得矩阵不等式 $\lambda I_d \preceq H(w) \preceq L I_d$，其中全局平滑常数为 $L := \frac{1}{4N}\lambda_{\max}(X^T X) + \lambda$。由第 1 卷第 6 章 $L$-平滑凸函数梯度下降收敛定理，保证全批量梯度下降单调下降并稳定收敛的安全学习率上界为：
+  \[
+    0 < \eta < \eta_{\max} = \frac{2}{L} = \frac{2}{\frac{1}{4N}\lambda_{\max}(X^T X) + \lambda}
+    \quad \Bigl(\text{工程推荐保守步长 }\eta \le \frac{1}{L}\Bigr).
+  \]
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 6.7\quad 纯 NumPy 多分类 Softmax 回归 + Log-Sum-Exp + 有限差分梯度校验}
+\textbf{核心纯 NumPy 实现逻辑}：
+\begin{lstlisting}[language=Python]
+def logsumexp(Z, axis=-1):
+    m = np.max(Z, axis=axis, keepdims=True)
+    return np.squeeze(m + np.log(np.sum(np.exp(Z - m), axis=axis, keepdims=True)), axis=axis)
+
+def softmax(Z):
+    e = np.exp(Z - np.max(Z, axis=-1, keepdims=True))
+    return e / np.sum(e, axis=-1, keepdims=True)
+
+def loss_and_grad(theta, X, y, K, lam):
+    n, d = X.shape
+    W, b = theta[:d*K].reshape(d, K), theta[d*K:]
+    Z = X @ W + b
+    loss = float(np.mean(logsumexp(Z, axis=1) - Z[np.arange(n), y]) + 0.5*lam*np.sum(W*W))
+    P = softmax(Z)
+    P[np.arange(n), y] -= 1.0
+    return loss, np.concatenate([((X.T @ P) / n + lam * W).ravel(), P.mean(axis=0)])
+\end{lstlisting}
+\textbf{验证输出与断言自检（\texttt{default\_rng(2026)}，$\lambda = 0.05$，800 轮 GD，$\eta = 0.25$）}：
+\begin{itemize}
+  \item \textbf{有限差分梯度校验}（$\epsilon = 10^{-5}$）：整体参数 $(W, b)$ 相对误差 $= \mathbf{1.76 \times 10^{-11}} < 10^{-9}$；
+  \item \textbf{极端 logits 稳定性测试}：\texttt{[1000.0, 1001.0, 999.0]} 下 \texttt{softmax} 输出 \texttt{[0.2447, 0.6652, 0.0900]}（和与 $1.0$ 误差 $< 10^{-15}$），\texttt{logsumexp} 输出 $1001.4076$，零 \texttt{NaN}/\texttt{inf}；
+  \item \textbf{验证集分类准确率}：在 90 条分层验证集上精确命中 \textbf{92.22\%}（$83/90 > 90\%$），全部断言通过。
+\end{itemize}
+
+\subsection*{习题 6.8\quad 复现数据泄漏灾难并手写 ROC-AUC 阈值扫描}
+\textbf{核心纯 NumPy ROC-AUC 梯形积分实现逻辑}：
+\begin{lstlisting}[language=Python]
+order = np.argsort(-scores)
+y_s = y_va[order]
+tps, fps = np.cumsum(y_s == 1), np.cumsum(y_s == 0)
+tpr = np.concatenate([[0.0], tps / tps[-1]])
+fpr = np.concatenate([[0.0], fps / fps[-1]])
+roc_auc = float(np.sum((fpr[1:] - fpr[:-1]) * (tpr[1:] + tpr[:-1]) * 0.5))
+\end{lstlisting}
+\textbf{验证输出与断言自检}：
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{纯噪声数据泄漏灾难}（$N=60, D=500$，50 次重复，真实 Bayes 上界 $50\%$）：泄漏版平均测试准确率高达 \textbf{80.40\%}（$>75\%$），干净版平均测试准确率回落至 \textbf{49.50\%}（落入 $[45\%, 55\%]$），无可辩驳地证明“测试前全量选特征”凭空伪造了 30 个百分点的幻觉性能。
+\par\pagebreak[4]
+  \item \textbf{30 维逻辑回归（$\lambda = 0.10$）验证集 ROC-AUC 与阈值权衡实测}：验证集精确 $\mathrm{ROC\text{-}AUC} = \mathbf{0.9160}$（落入 $[0.90, 0.95]$）；各阈值下的 Precision、Recall 与 $F_1$ 实测如下表所示（$\tau=0.5$ 时精确命中 $\mathrm{Acc}=85.00\%,\; F_1=0.8439$，而 $\tau=0.4$ 处 $F_1$ 略高至 $0.8482$）：
+\end{enumerate}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+分类阈值 $\tau$ & Accuracy & Precision & Recall & $F_1$ 分数 \\
+\midrule
+$0.2$ & $70.00\%$ & $62.94\%$ & $98.90\%$ & $0.7692$ \\
+$0.3$ & $80.56\%$ & $72.95\%$ & $97.80\%$ & $0.8357$ \\
+$0.4$ & $83.89\%$ & $81.00\%$ & $89.01\%$ & $\mathbf{0.8482}$ \\
+$0.5$ & $\mathbf{85.00\%}$ & $89.02\%$ & $80.22\%$ & $0.8439$ \\
+$0.6$ & $80.56\%$ & $90.00\%$ & $69.23\%$ & $0.7826$ \\
+$0.7$ & $74.44\%$ & $\mathbf{92.45\%}$ & $53.85\%$ & $0.6806$ \\
+$0.8$ & $67.22\%$ & $92.11\%$ & $38.46\%$ & $0.5426$ \\
+\bottomrule
+\end{tabular}
+\end{center}

@@ -1,0 +1,119 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME V};
+
+  % Bespoke fine-art geometric Transformer Attention Web & Diffusion Wave motif (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.56, transform shape]
+    % Faint architectural attention arcs connecting token nodes
+    \foreach \i/\x in {1/-2.2, 2/-1.1, 3/0.0, 4/1.1, 5/2.2} {
+      \node[circle, fill=teal, opacity=0.45, inner sep=2.2pt] (b\i) at (\x, -1.2) {};
+      \node[circle, fill=navy, opacity=0.50, inner sep=2.2pt] (t\i) at (\x, 1.2) {};
+    }
+    % Weighted self-attention lines
+    \draw[teal, opacity=0.14, line width=0.6pt] (b1) -- (t2) (b1) -- (t3) (b2) -- (t4) (b3) -- (t1) (b4) -- (t2) (b5) -- (t3);
+    \draw[gold, opacity=0.58, line width=1.25pt] (b1) to[out=70,in=-110] (t4);
+    \draw[gold, opacity=0.45, line width=1.0pt] (b2) to[out=75,in=-105] (t3);
+    \draw[ochre, opacity=0.48, line width=1.1pt] (b4) to[out=105,in=-75] (t2);
+    \draw[teal, opacity=0.42, line width=0.95pt] (b3) to[out=85,in=-95] (t5);
+    \draw[teal, opacity=0.35, line width=0.85pt] (b5) to[out=100,in=-80] (t4);
+    % Residual highway arc on the right
+    \draw[navy, opacity=0.30, line width=0.9pt, dashed] (2.45, -1.2) to[out=35, in=-35] (2.45, 1.2);
+    % Subtle computational graph / reverse-mode halo rings
+    \draw[teal, opacity=0.15, line width=0.7pt] (0, 0) ellipse (2.65cm and 0.65cm);
+    \draw[gold, opacity=0.22, line width=0.6pt] (0, 0) circle (1.45cm);
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 5 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{25}{33}\selectfont\sffamily\bfseries\color{ink}深度学习、自动微分与现代架构}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}从反向模式自动微分与训练动力学，走向 Transformer、预训练与扩散生成}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 Stanford CS231n / CS224n / CS336 $\cdot$ UC Berkeley CS182 $\cdot$ CMU 11-785 $\cdot$ 南大《深度学习》}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  borderline west={2.6pt}{0pt}{tealDark},
+  arc=2mm,
+  boxrule=0.5pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位：彻底拆开现代深度学习的黑箱，从零构造核心引擎}\par\vspace{1.2mm}
+\small
+告别“调库炼丹”的模糊直觉，本卷用第一性原理与极简可验证代码，将现代神经网络从最底层的微积分计算图一路搭到当代大模型与扩散生成架构：
+\begin{itemize}
+  \item \textbf{自动微分与训练动力学}：亲手编写反向模式自动微分引擎（VJP）并与 PyTorch 精度互验；严格推导 Kaiming 初始化方差守恒、BatchNorm/LayerNorm/RMSNorm 差异与 AdamW 解耦权重衰减。
+  \item \textbf{视觉与序列归纳偏置}：剖析 2D 卷积的平移等变与 \texttt{im2col} 矩阵本质、ResNet 残差梯度高速公路的数学证明，以及 RNN/LSTM 门控对长程依赖的化解。
+  \item \textbf{注意力机制与迷你 GPT}：证明 $\sqrt{d_k}$ 缩放与 RoPE 旋转位置编码的相对位置性质，完整手写因果自注意力、KV Cache 复杂度分析与可运行迷你 GPT 实测。
+  \item \textbf{自监督预训练与深度生成}：打通 BPE、InfoNCE 互信息下界与 Chinchilla 缩放定律；从第 4 卷 EM 的 ELBO 无缝推导出 VAE 重参数化、DDPM 扩散去噪与流匹配（Flow Matching）。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 5 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心理论、完整证明与实测实验} \\
+\midrule
+序\quad 章 & 本卷坐标与八校考点覆盖对照 & 从经典机器学习迈入深层表征、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 多层感知机与反向模式自动微分 & ReLU 分段线性折叠、计算图与 VJP、60 行手写引擎、PyTorch 互验与非线性分类 \\
+第 2 章 & 深层训练动力学：初始化与优化 & 梯度消失/爆炸、Kaiming 方差证明、BN/LN/RMSNorm、AdamW 与 20 层梯度实测 \\
+第 3 章 & 卷积、残差网络与循环序列建模 & 2D 卷积等变性、ResNet 梯度高速公路证明、RNN/LSTM 门控与 24 层深度实测 \\
+第 4 章 & 注意力机制与 Transformer 架构 & $\sqrt{d_k}$ 缩放证明、多头因果注意力、RoPE、KV Cache 与迷你 GPT 序列实测 \\
+第 5 章 & 自监督预训练、对比学习与缩放律 & BPE 分词、BERT/GPT、InfoNCE 互信息下界证明、Chinchilla 缩放律与对比实测 \\
+第 6 章 & 深度生成：VAE、扩散与流匹配 & 重参数化 VAE、DDPM 前向/后验严格推导、分数匹配、流匹配与 2D 扩散实测 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol5\_experiments.py} 与实测数据随本卷提供。上一卷：第 4 卷；下一卷：第 6 卷《强化学习、大模型后训练与 AI 系统》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_mlp_autodiff}
+\include{chapters/ch02_train_dynamics}
+\include{chapters/ch03_cnn_resnet_rnn}
+\include{chapters/ch04_attention_transformer}
+\include{chapters/ch05_pretrain_scaling}
+\include{chapters/ch06_vae_diffusion_flow}
+
+% ==================== Appendix: Complete Solutions ====================
+\appendix
+\ctexset{chapter={name={附录\ ,}, number=\Alph{chapter}}}
+\renewcommand{\chapWatermarkNum}{\thechapter}
+\include{chapters/app_solutions}
+
+\end{document}

@@ -1,0 +1,625 @@
+\chapter[拉格朗日对偶、KKT 与近端梯度]{拉格朗日对偶、KKT 条件与近端梯度}\label{ch:v4-duality}
+
+\chapEpigraph{我所提出的方法既不需要几何作图，也不需要机械推理，只需要按统一而有规律的代数演算即可。}{Joseph-Louis Lagrange（《分析力学》，1788）}
+
+\begin{chapIntro}{本章导读：当无约束的光滑世界撞上“围墙”与“尖角”}
+在第 1 章中，我们所有的定理都隐含着两个理想假设：变量 $x$ 可以在整个 $\R^d$ 自由奔跑（无约束），且目标函数处处光滑可微（存在 $L$-光滑梯度）。然而走进经典机器学习的真实战场，这两条假设立刻同时被打破：
+\begin{itemize}
+  \item \textbf{第一堵墙：不等式约束}。第 4 章的支持向量机（SVM）要求每一个样本满足间隔不等式 $y_i(w^\top x_i + b) \ge 1$；概率建模要求权重落入单纯形 $p_i \ge 0,\; \sum_i p_i = 1$。在可行域边界上，$\nabla f(x^*) = 0$ 通常不再成立！
+  \item \textbf{第二道坎：不可微尖角}。为了从高维冗余特征中自动筛选出真正重要的少数变量，Lasso 回归加入了 $\ell_1$ 惩罚项 $\lambda\norm{w}_1 = \lambda\sum_j |w_j|$。它在任何坐标 $w_j = 0$ 处都存在尖锐的不可微折角，梯度根本不存在！
+\end{itemize}
+本章将锻造两把专治“围墙”与“尖角”的利器：前半章建立\textbf{拉格朗日对偶与 KKT 互补松弛条件}（直接打通第 4 章 SVM 对偶与支持向量理论）；后半章建立\textbf{次梯度、近端算子与软阈值迭代（ISTA）}，并在 20 维稀疏回归数据上亲手跑出精确零解的 Lasso 正则化路径。
+\end{chapIntro}
+
+% ============================================================
+\section{当最优解顶在围墙上：不等式约束的几何直觉}
+% ============================================================
+
+我们先通过一个二维极简例子，看清为什么无约束条件 $\nabla f(x^*) = 0$ 在不等式约束面前会失效。
+
+\begin{example}[半空间投影：最优解处的“推力平衡”]\label{ex:v4-ch2-halfspace}
+考虑在二维闭半空间 $C = \{x \in \R^2 : x_1 + x_2 \le 2\}$ 上寻找离目标点 $a = (3, 2)^\top$ 最近的点，即求解二次规划：
+\[
+  \min_{x \in \R^2}\; f_0(x) = \frac{1}{2}\norm{x - a}_2^2 = \frac{1}{2}\big((x_1-3)^2 + (x_2-2)^2\big)
+  \quad\text{s.t.}\quad f_1(x) = x_1 + x_2 - 2 \le 0.
+\]
+无约束极小点 $a = (3, 2)^\top$ 满足 $3+2=5 > 2$，位于围墙之外。几何上，离 $(3, 2)$ 最近的半空间点必落在边界直线 $x_1 + x_2 = 2$ 上，且恰好是垂直投影点 $x^* = \left(\frac{3}{2}, \frac{1}{2}\right)^\top$。
+
+检查 $x^*$ 处的目标梯度：$\nabla f_0(x^*) = x^* - a = \left(-\frac{3}{2}, -\frac{3}{2}\right)^\top \neq 0$！为什么球没有顺着负梯度 $-\nabla f_0(x^*) = \left(\frac{3}{2}, \frac{3}{2}\right)^\top$ 继续往右上角滚？因为边界围墙 $f_1(x) = 0$ 的外法向量恰好是 $\nabla f_1(x^*) = (1, 1)^\top$，围墙产生了一股向内推的\textbf{支撑反作用力} $-\lambda_1^* \nabla f_1(x^*)$（这里 $\lambda_1^* = \frac{3}{2} > 0$），与驱动球向外滚的拉力 $-\nabla f_0(x^*)$ 精确平衡：
+\[
+  -\nabla f_0(x^*) = \lambda_1^* \nabla f_1(x^*) \iff \nabla f_0(x^*) + \lambda_1^* \nabla f_1(x^*) = 0,\quad \lambda_1^* \ge 0.
+\]
+如果把目标点换成已经在墙内的 $a' = (0, 0)^\top$，则 $x^* = (0, 0)^\top$ 根本没碰到围墙（$f_1(x^*) = -2 < 0$），围墙不提供任何推力（$\lambda_1^* = 0$），恢复 $\nabla f_0(x^*) = 0$。注意两种情形竟然可以统一写成同一个乘积方程：
+\[
+  \lambda_1^* f_1(x^*) = 0!
+\]
+这正是名震优化史的\textbf{互补松弛条件（Complementary Slackness）}的初现端倪！在第 4 章的 SVM 中，每一个训练样本都是一堵这样的“间隔围墙”，绝大多数远离边界的样本都没被最优超平面碰到（推力 $\alpha_i = 0$），唯有死死顶住超平面的少数样本（$\alpha_i > 0$）成为\textbf{支持向量}。
+\end{example}
+
+% ============================================================
+\section{拉格朗日函数、对偶问题与弱/强对偶定理}
+% ============================================================
+
+现在我们把这种“带反作用力的围墙”推广到一般带约束优化问题（暂不要求凸性！）：
+
+\subsection{原始问题与拉格朗日对偶函数}
+
+考虑如下\textbf{标准形式原始问题（Primal Problem）}：
+\begin{equation}\label{eq:v4-primal}
+  \begin{aligned}
+    p^* \coloneqq \min_{x \in \mathcal{D}} \quad & f_0(x) \\
+    \text{s.t.} \quad & f_i(x) \le 0, \quad i = 1, \dots, m, \\
+                      & h_j(x) = 0, \quad j = 1, \dots, p,
+  \end{aligned}
+\end{equation}
+其中定义域 $\mathcal{D} = \bigcap_{i=0}^m \operatorname{dom}(f_i) \cap \bigcap_{j=1}^p \operatorname{dom}(h_j) \subseteq \R^d$ 非空，$p^*$ 称为原始最优值。
+
+\begin{defBox}
+\begin{definition}[拉格朗日函数与对偶函数]\label{def:v4-lagrangian}
+引入不等式乘子向量 $\lambda \in \R^m$（要求 $\lambda \succeq 0$，即 $\lambda_i \ge 0$）和等式乘子向量 $\nu \in \R^p$，定义\textbf{拉格朗日函数（Lagrangian）} $\mathcal{L}: \mathcal{D} \times \R^m \times \R^p \to \R$ 为
+\begin{equation}\label{eq:v4-lagrangian}
+  \mathcal{L}(x, \lambda, \nu) \coloneqq f_0(x) + \sum_{i=1}^m \lambda_i f_i(x) + \sum_{j=1}^p \nu_j h_j(x).
+\end{equation}
+进一步，定义\textbf{拉格朗日对偶函数（Lagrange Dual Function）} $g: \R^m \times \R^p \to \R \cup \{-\infty\}$ 为拉格朗日函数关于原始变量 $x$ 的下确界：
+\begin{equation}\label{eq:v4-dual-fn}
+  g(\lambda, \nu) \coloneqq \inf_{x \in \mathcal{D}} \mathcal{L}(x, \lambda, \nu)
+  = \inf_{x \in \mathcal{D}} \left(f_0(x) + \sum_{i=1}^m \lambda_i f_i(x) + \sum_{j=1}^p \nu_j h_j(x)\right).
+\end{equation}
+\end{definition}
+\end{defBox}
+
+拉格朗日函数有一种极为传神的\textbf{博弈论（零和极大极小）解释}：把 $\lambda_i \ge 0$ 看作违反第 $i$ 条不等式约束 $f_i(x) \le 0$ 的单价罚款，把 $\nu_j \in \R$ 看作违反第 $j$ 条等式约束 $h_j(x) = 0$ 的双向罚款。如果对手（乘子玩家）可以任意哄抬罚款，则：
+\[
+  \sup_{\lambda \succeq 0,\, \nu} \mathcal{L}(x, \lambda, \nu) =
+  \begin{cases}
+    f_0(x), & \text{若 } x \text{ 满足所有约束（可行），}\\
+    +\infty, & \text{若 } x \text{ 违反任意一条约束（不可行）。}
+  \end{cases}
+\]
+因此，原始带约束问题~\eqref{eq:v4-primal} 完全等价于无约束极小极大博弈 $p^* = \inf_{x\in\mathcal{D}} \sup_{\lambda \succeq 0,\, \nu} \mathcal{L}(x, \lambda, \nu)$；而如果\textbf{交换 $\inf$ 与 $\sup$ 的次序}，就得到了\textbf{拉格朗日对偶问题（Dual Problem）}：
+\begin{equation}\label{eq:v4-dual-prob}
+  d^* \coloneqq \sup_{\lambda \succeq 0,\, \nu}\; g(\lambda, \nu) = \sup_{\lambda \succeq 0,\, \nu}\;\inf_{x \in \mathcal{D}} \mathcal{L}(x, \lambda, \nu).
+\end{equation}
+
+对偶函数有一个令所有优化学家赞叹的普遍性质——无论原始问题长得多么奇形怪状、多么非凸，对偶问题永远是一个凹最大化（等价于凸最小化）问题！
+
+\begin{thmBox}
+\begin{theorem}[对偶函数的普适凹性]\label{thm:v4-dual-concave}
+即使原始问题~\eqref{eq:v4-primal} 的目标函数 $f_0$ 与约束函数 $f_i, h_j$ 均\textbf{非凸}，拉格朗日对偶函数 $g(\lambda, \nu)$ 关于 $(\lambda, \nu)$ 也\textbf{永远是凹函数}。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+固定任意 $x \in \mathcal{D}$，观察 $\mathcal{L}(x, \lambda, \nu) = f_0(x) + \sum_i f_i(x)\lambda_i + \sum_j h_j(x)\nu_j$：它是关于 $(\lambda, \nu)$ 的仿射函数（线性加常数），因此 $-\mathcal{L}(x, \lambda, \nu)$ 是关于 $(\lambda, \nu)$ 的凸函数。于是
+\[
+  -g(\lambda, \nu) = -\inf_{x \in \mathcal{D}} \mathcal{L}(x, \lambda, \nu) = \sup_{x \in \mathcal{D}} \big(-\mathcal{L}(x, \lambda, \nu)\big).
+\]
+由第 1 章命题~\ref{prop:v4-preserve} 第 3 条，一族凸函数的逐点上确界必为凸函数，故 $-g(\lambda, \nu)$ 为凸函数，即 $g(\lambda, \nu)$ 恒为凹函数。
+\end{proof}
+
+\subsection{弱对偶定理、对偶间隙与 Slater 强对偶条件}
+
+\begin{thmBox}
+\begin{theorem}[弱对偶定理，Weak Duality]\label{thm:v4-weak-duality}
+对任意优化问题~\eqref{eq:v4-primal}（无需凸性！），只要 $\lambda \succeq 0$ 且 $\tilde{x}$ 为原始可行点，就有 $g(\lambda, \nu) \le f_0(\tilde{x})$。进而恒成立：
+\begin{equation}\label{eq:v4-weak-dual}
+  d^* \le p^*.
+\end{equation}
+非负差值 $p^* - d^* \ge 0$ 称为\textbf{最优对偶间隙（Optimal Duality Gap）}。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+任取原始可行点 $\tilde{x} \in \mathcal{D}$（满足 $f_i(\tilde{x}) \le 0$ 与 $h_j(\tilde{x}) = 0$）以及任意对偶可行乘子 $\lambda \succeq 0,\; \nu \in \R^p$。直接利用下确界定义与符号判定：
+\[
+  g(\lambda, \nu) = \inf_{x \in \mathcal{D}} \mathcal{L}(x, \lambda, \nu)
+  \le \mathcal{L}(\tilde{x}, \lambda, \nu)
+  = f_0(\tilde{x}) + \sum_{i=1}^m \underbrace{\lambda_i}_{\ge 0}\underbrace{f_i(\tilde{x})}_{\le 0} + \sum_{j=1}^p \nu_j \underbrace{h_j(\tilde{x})}_{= 0}
+  \le f_0(\tilde{x}).
+\]
+由于上式对所有原始可行点 $\tilde{x}$ 成立，对右侧取下确界得 $g(\lambda, \nu) \le p^*$；再对左侧取 $\sup_{\lambda \succeq 0, \nu}$，立得 $d^* \le p^*$。
+\end{proof}
+
+弱对偶为我们提供了一张“免死金牌”式的全局下界证书：在求解任何难题（哪怕是 NP-难组合优化）时，随便算一个对偶可行点 $(\lambda, \nu)$ 对应的 $g(\lambda, \nu)$，就能严格保证最优值绝不可能低于 $g(\lambda, \nu)$。而当 $d^* = p^*$（对偶间隙为零）时，我们称\textbf{强对偶（Strong Duality）}成立——此时直接去解更简单、更低维或带有核结构的对偶问题，就能精准复原原始问题的最优值！
+
+强对偶并非免费午餐。对于凸优化问题，只要满足温和的约束规范——\textbf{Slater 条件}，强对偶便必然成立：
+
+\begin{thmBox}
+\begin{theorem}[Slater 强对偶条件，不证自引]\label{thm:v4-slater}
+若原始问题~\eqref{eq:v4-primal} 是\textbf{凸优化问题}（即 $f_0, f_1, \dots, f_m$ 均为凸函数，等式约束为仿射函数 $h_j(x) = a_j^\top x - b_j$），且存在一个\textbf{严格可行内点} $\tilde{x} \in \operatorname{relint}(\mathcal{D})$ 满足
+\[
+  f_i(\tilde{x}) < 0 \quad (i = 1, \dots, m), \qquad A\tilde{x} = b,
+\]
+则强对偶成立：$d^* = p^*$。进一步地，如果某些不等式约束 $f_i(x)$ 本身是仿射函数（例如线性不等式 $c_i^\top x \le d_i$），则对这些仿射约束无需严格小于，仅需 $f_i(\tilde{x}) \le 0$ 即可。
+\end{theorem}
+\end{thmBox}
+
+特别地，如果所有约束都是仿射线性约束（例如线性规划 LP 与第 4 章的 SVM 二次规划 QP），只要原始可行域非空且 $p^* > -\infty$，强对偶自动成立！反之，当原始问题\textbf{非凸}时，即使存在严格内点，强对偶也可能彻底崩塌。
+
+\begin{failBox}{非凸问题存在严格对偶间隙（$d^* < p^*$）的极简反例}
+考察定义域为闭区间 $\mathcal{D} = [0, 2]$ 上的一维\textbf{非凸（凹）}优化问题：
+\[
+  \min_{x \in [0, 2]}\; f_0(x) = -x^2 \quad\text{s.t.}\quad f_1(x) = x - 1 \le 0.
+\]
+\begin{enumerate}
+  \item \textbf{求原始最优值 $p^*$}：可行域为 $[0, 2] \cap (-\infty, 1] = [0, 1]$，在 $[0, 1]$ 上最小化 $-x^2$ 显然在 $x^* = 1$ 处取到，故 $p^* = -1$。
+  \item \textbf{求对偶函数 $g(\lambda)$}：对 $\lambda \ge 0$，拉格朗日函数 $\mathcal{L}(x, \lambda) = -x^2 + \lambda(x - 1)$ 关于 $x$ 的二阶导数为 $-2 < 0$（严格凹函数），因此在闭区间 $[0, 2]$ 上的最小值\textbf{必然落在两个端点 $x = 0$ 或 $x = 2$ 之一}：
+  \[
+    g(\lambda) = \min_{x \in [0, 2]} \big(-x^2 + \lambda x - \lambda\big)
+    = \min\big\{\mathcal{L}(0, \lambda),\; \mathcal{L}(2, \lambda)\big\}
+    = \min\{-\lambda,\; \lambda - 4\}.
+  \]
+  注意 $g(\lambda)$ 确实是凹函数（两条直线的下包络，印证定理~\ref{thm:v4-dual-concave}）。
+  \item \textbf{求对偶最优值 $d^*$}：两条射线 $-\lambda$ 与 $\lambda - 4$ 在 $-\lambda = \lambda - 4 \implies \lambda^* = 2 \ge 0$ 处相交达到最高峰，故 $d^* = g(2) = -2$。
+\end{enumerate}
+于是我们得到了精确的严格对偶间隙：$d^* = -2 < -1 = p^*$，$p^* - d^* = 1 > 0$！即便存在严格可行内点 $\tilde{x} = 0.5$（满足 $f_1(0.5) = -0.5 < 0$），一旦失去凸性，强对偶便不再有保障。
+\end{failBox}
+
+% ============================================================
+\section{KKT 条件：带约束优化的终极判据}
+% ============================================================
+
+当强对偶成立时，原始最优解 $x^*$ 与对偶最优解 $(\lambda^*, \nu^*)$ 之间会锁死成一组极为紧致的代数方程与不等式——这便是 Karush（1939）与 Kuhn-Tucker（1951）各自独立发现的 \textbf{KKT 条件}。
+
+\begin{defBox}
+\begin{definition}[KKT 条件，Karush-Kuhn-Tucker Conditions]\label{def:v4-kkt}
+假设原始问题~\eqref{eq:v4-primal} 中的所有函数 $f_0, f_i, h_j$ 均可微。称点组 $(x^*, \lambda^*, \nu^*)$ 满足 \textbf{KKT 条件}，如果以下四组条件同时成立：
+\begin{enumerate}
+  \item \textbf{原始可行性（Primal Feasibility）}：$f_i(x^*) \le 0\;(i=1,\dots,m)$，$h_j(x^*) = 0\;(j=1,\dots,p)$；
+  \item \textbf{对偶可行性（Dual Feasibility）}：$\lambda_i^* \ge 0\;(i=1,\dots,m)$；
+  \item \textbf{互补松弛性（Complementary Slackness）}：$\lambda_i^* f_i(x^*) = 0\;(i=1,\dots,m)$；
+  \item \textbf{平稳性（Stationarity）}：
+  \[
+    \nabla_x \mathcal{L}(x^*, \lambda^*, \nu^*) = \nabla f_0(x^*) + \sum_{i=1}^m \lambda_i^* \nabla f_i(x^*) + \sum_{j=1}^p \nu_j^* \nabla h_j(x^*) = 0.
+  \]
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+下面这条定理堪称带约束凸优化的“总纲”，它的证明极其精炼，请务必亲手跟着每一行不等式走一遍！
+
+\begin{thmBox}
+\begin{theorem}[KKT 条件的必要性与凸问题充分性]\label{thm:v4-kkt-thm}
+设问题~\eqref{eq:v4-primal} 中所有函数在开集 $\mathcal{D} = \R^d$ 上可微：
+\begin{enumerate}
+  \item \textbf{必要性（强对偶 $\implies$ KKT）}：无论原问题是否凸，只要强对偶成立且 $x^*$ 与 $(\lambda^*, \nu^*)$ 分别是原始最优解与对偶最优解，则 $(x^*, \lambda^*, \nu^*)$ 必满足全部四组 KKT 条件。
+  \item \textbf{充分性（凸问题 + KKT $\implies$ 全局最优且强对偶）}：若原问题为凸优化问题（$f_0, f_i$ 凸，$h_j$ 仿射），且存在 $(x^*, \lambda^*, \nu^*)$ 满足 KKT 条件，则 $x^*$ 必为原始全局最优解，$(\lambda^*, \nu^*)$ 必为对偶全局最优解，且强对偶成立（$d^* = p^*$）。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一部分（必要性）}：由于 $x^*$ 与 $(\lambda^*, \nu^*)$ 分别可行，原始可行性与对偶可行性自动满足。由强对偶条件 $f_0(x^*) = g(\lambda^*, \nu^*)$，写下贯穿全书的核心“夹逼链”：
+\begin{align*}
+  f_0(x^*) &= g(\lambda^*, \nu^*) = \inf_{x \in \R^d} \mathcal{L}(x, \lambda^*, \nu^*) \\
+  &\le \mathcal{L}(x^*, \lambda^*, \nu^*) \\
+  &= f_0(x^*) + \sum_{i=1}^m \underbrace{\lambda_i^* f_i(x^*)}_{\le 0} + \sum_{j=1}^p \nu_j^* \underbrace{h_j(x^*)}_{= 0}
+  \le f_0(x^*).
+\end{align*}
+首尾都是 $f_0(x^*)$，因此链条中的\textbf{每一个“$\le$”都必须强制取“$=$”}！
+\begin{itemize}
+  \item 由第二个“$\le$”取等，得 $\sum_{i=1}^m \lambda_i^* f_i(x^*) = 0$。由于求和中的每一项都满足 $\lambda_i^* f_i(x^*) \le 0$，一群非正数之和为零当且仅当\textbf{每一项各自为零}：$\lambda_i^* f_i(x^*) = 0$（互补松弛性证毕！）。
+  \item 由第一个“$\le$”取等，得 $\mathcal{L}(x^*, \lambda^*, \nu^*) = \inf_{x\in\R^d} \mathcal{L}(x, \lambda^*, \nu^*)$，说明 $x^*$ 是无约束函数 $x \mapsto \mathcal{L}(x, \lambda^*, \nu^*)$ 的全局极小点，由 Fermat 引理必有 $\nabla_x \mathcal{L}(x^*, \lambda^*, \nu^*) = 0$（平稳性证毕！）。
+\end{itemize}
+
+\textbf{第二部分（充分性）}：设原问题为凸问题且 $(x^*, \lambda^*, \nu^*)$ 满足四组 KKT 条件。因为 $\lambda_i^* \ge 0$、$f_0, f_i$ 为凸函数且 $h_j$ 为仿射函数，由第 1 章保凸运算（命题~\ref{prop:v4-preserve}），函数 $x \mapsto \mathcal{L}(x, \lambda^*, \nu^*)$ 是关于 $x$ 的可微凸函数。结合平稳性条件 $\nabla_x \mathcal{L}(x^*, \lambda^*, \nu^*) = 0$ 与定理~\ref{thm:v4-global-opt}，可知 $x^*$ 是 $\mathcal{L}(\cdot, \lambda^*, \nu^*)$ 的全局极小点！于是：
+\[
+  g(\lambda^*, \nu^*) = \inf_{x\in\R^d}\mathcal{L}(x, \lambda^*, \nu^*) = \mathcal{L}(x^*, \lambda^*, \nu^*)
+  = f_0(x^*) + \sum_{i=1}^m \underbrace{\lambda_i^* f_i(x^*)}_{= 0} + \sum_{j=1}^p \nu_j^* \underbrace{h_j(x^*)}_{= 0} = f_0(x^*).
+\]
+最后联合弱对偶定理~\ref{thm:v4-weak-duality} 与可行性定义：$f_0(x^*) = g(\lambda^*, \nu^*) \le d^* \le p^* \le f_0(x^*)$。夹逼立得 $g(\lambda^*, \nu^*) = d^* = p^* = f_0(x^*)$，故 $x^*$ 与 $(\lambda^*, \nu^*)$ 分别为原始与对偶全局最优解！
+\end{proof}
+
+\subsection{手算演练：用 KKT 求解二维不等式约束二次规划}
+
+\begin{example}[含两条不等式约束的二维 QP 完整 KKT 求解]\label{ex:v4-ch2-qp}
+扩展例~\ref{ex:v4-ch2-halfspace}，增加第二条约束 $x_2 \ge 0$，求解凸二次规划：
+\[
+  \min_{x_1, x_2 \in \R}\; \frac{1}{2}\big((x_1 - 3)^2 + (x_2 - 2)^2\big)
+  \quad\text{s.t.}\quad f_1(x) = x_1 + x_2 - 2 \le 0,\quad f_2(x) = -x_2 \le 0.
+\]
+\textbf{第 1 步：列出 KKT 方程组。} 拉格朗日函数为
+\[
+  \mathcal{L}(x, \lambda) = \frac{1}{2}(x_1 - 3)^2 + \frac{1}{2}(x_2 - 2)^2 + \lambda_1(x_1 + x_2 - 2) - \lambda_2 x_2.
+\]
+平稳性条件 $\nabla_x \mathcal{L} = 0$ 给出：
+\[
+  x_1 - 3 + \lambda_1 = 0 \implies x_1 = 3 - \lambda_1, \qquad
+  x_2 - 2 + \lambda_1 - \lambda_2 = 0 \implies x_2 = 2 - \lambda_1 + \lambda_2.
+\]
+互补松弛与可行性条件为：$\lambda_1(x_1 + x_2 - 2) = 0,\; \lambda_2 x_2 = 0,\; \lambda_1, \lambda_2 \ge 0,\; x_1 + x_2 \le 2,\; x_2 \ge 0$。
+
+\textbf{第 2 步：按积极约束（Active Set）分类讨论。}
+\begin{itemize}
+  \item \emph{假设 $\lambda_1 = 0$（第一条约束松弛）}：则 $x_1 = 3$。若 $\lambda_2 = 0$ 则 $x_2 = 2$，得 $x_1 + x_2 = 5 > 2$ 矛盾；若 $\lambda_2 > 0$ 则由互补松弛必有 $x_2 = 0$，得 $x_1 + x_2 = 3 > 2$ 仍矛盾！因此必有 $\lambda_1 > 0$，即约束 1 处于\textbf{积极（激活）状态}：$x_1 + x_2 = 2$。
+  \item \emph{在 $\lambda_1 > 0$ 下测试 $\lambda_2 = 0$（约束 2 松弛）}：将 $x_1 = 3 - \lambda_1$ 与 $x_2 = 2 - \lambda_1$ 代入 $x_1 + x_2 = 2$：
+  \[
+    (3 - \lambda_1) + (2 - \lambda_1) = 2 \implies \lambda_1^* = \frac{3}{2} > 0.
+  \]
+  回代得 $x_1^* = 3 - \frac{3}{2} = \frac{3}{2}$，且 $x_2^* = 2 - \frac{3}{2} = \frac{1}{2} > 0$。
+\end{itemize}
+\textbf{第 3 步：核对全部四组 KKT 条件。} 原始可行（$\frac{3}{2}+\frac{1}{2}=2\le 2,\; -\frac{1}{2}\le 0$）、对偶可行（$\lambda_1^*=\frac{3}{2}\ge 0,\; \lambda_2^*=0\ge 0$）、互补松弛（$\frac{3}{2}\cdot 0 = 0,\; 0\cdot(-\frac{1}{2})=0$）、平稳性全部成立！由定理~\ref{thm:v4-kkt-thm} 的充分性，这组解就是唯一的全局最优解，最优值 $p^* = \frac{1}{2}\big(\frac{9}{4}+\frac{9}{4}\big) = \frac{9}{4}$。
+\end{example}
+
+\begin{insightBox}{直通第 4 章 SVM：互补松弛如何孕育“支持向量”}
+把例~\ref{ex:v4-ch2-qp} 中的两条不等式换作 $N$ 个样本的分类间隔约束 $f_i(w, b) = 1 - y_i(w^\top x_i + b) \le 0$（乘子记为 $\alpha_i \ge 0$），拉格朗日平稳性将直接把法向量表示为样本的线性组合 $w^* = \sum_{i=1}^N \alpha_i^* y_i x_i$；而互补松弛条件
+\[
+  \alpha_i^* \Big(1 - y_i({w^*}^\top x_i + b^*)\Big) = 0
+\]
+立刻给出惊人的稀疏结构：任何严格落在安全间隔之外的样本（$y_i({w^*}^\top x_i + b^*) > 1$）必有 $\alpha_i^* = 0$，对决策边界毫无贡献；唯有乘子 $\alpha_i^* > 0$ 的点必满足 $y_i({w^*}^\top x_i + b^*) = 1$——它们正是紧紧顶住间隔边界的\textbf{支持向量（Support Vectors）}！
+\end{insightBox}
+
+% ============================================================
+\section{当目标出现尖角：次梯度与近端梯度法（ISTA）}
+% ============================================================
+
+解决了“围墙”，现在我们迎战第二道坎：\textbf{不可微凸函数}。在机器学习中，最著名的不可微凸项当属 Lasso 回归中的 $\ell_1$ 正则项 $\lambda\norm{w}_1 = \lambda\sum_{j=1}^D |w_j|$ 与 SVM 的合页损失 $\max(0, 1 - z)$。在尖角处，切平面不再唯一，但“从下方托住函数图像”这一凸性本质依然完好无损！
+
+\subsection{次梯度与次微分}
+
+\begin{defBox}
+\begin{definition}[次梯度与次微分]\label{def:v4-subgrad}
+设 $f: \R^d \to \R$ 为凸函数（无需可微）。向量 $g \in \R^d$ 称为 $f$ 在点 $x$ 处的\textbf{次梯度（Subgradient）}，如果它定义的仿射超平面在全局范围内从下方托住 $f$：
+\begin{equation}\label{eq:v4-subgrad-def}
+  f(y) \ge f(x) + g^\top (y - x), \qquad \forall y \in \R^d.
+\end{equation}
+$f$ 在 $x$ 处所有次梯度的集合称为\textbf{次微分（Subdifferential）}，记作 $\partial f(x)$。
+\end{definition}
+\end{defBox}
+
+当 $f$ 在 $x$ 处可微时，切平面唯一，故 $\partial f(x) = \{\nabla f(x)\}$。而在不可微尖角处，次微分是一个闭凸集。以最核心的绝对值函数 $f(x) = |x|$ 为例：
+\begin{itemize}
+  \item $x > 0$ 时可微，$\partial |x| = \{+1\}$；$x < 0$ 时可微，$\partial |x| = \{-1\}$；
+  \item $x = 0$ 时，斜率 $g$ 满足 $|y| \ge 0 + g\cdot(y - 0) = g y$ 对一切 $y \in \R$ 成立，等价于 $|g| \le 1$！因此
+  \begin{equation}\label{eq:v4-subdiff-abs}
+    \partial |x| =
+    \begin{cases}
+      \{-1\}, & x < 0, \\
+      [-1,\, 1], & x = 0, \\
+      \{+1\}, & x > 0.
+    \end{cases}
+  \end{equation}
+\end{itemize}
+与可微凸函数定理~\ref{thm:v4-global-opt} 一脉相承，次梯度拥有一行即可证明的全局最优性判据：
+
+\begin{proposition}[广义 Fermat 最优性条件]\label{prop:v4-subgrad-opt}
+对任意凸函数 $f: \R^d \to \R$，$x^*$ 是 $f$ 的全局极小点，当且仅当 $0 \in \partial f(x^*)$。
+\end{proposition}
+\begin{proof}
+由定义~\ref{def:v4-subgrad}，$0 \in \partial f(x^*) \iff f(y) \ge f(x^*) + 0^\top(y - x^*) = f(x^*)\ \forall y \in \R^d \iff x^*$ 是全局极小点。
+\end{proof}
+
+\begin{failBox}{为什么直接做“次梯度下降”既慢又得不到精确稀疏解？}
+既然有了次梯度，很自然会想到把梯度下降改为 $x_{t+1} = x_t - \eta_t g_t$（$g_t \in \partial f(x_t)$）。但这套朴素方案有两大硬伤：
+\begin{enumerate}
+  \item \textbf{无法使用常数步长，收敛退化为 $O(1/\sqrt{T})$}：以 $f(x) = |x|$ 为例，即使无限接近最优解 $x^* = 0$，次梯度的模长始终为 $1$ 而不会趋于零！若取固定步长 $\eta$，迭代点将在 $[-\eta, \eta]$ 内永无止境地来回跳跃。迫不得已只能使用衰减步长 $\eta_t \propto 1/\sqrt{t}$，收敛率暴跌至 $O(1/\sqrt{T})$（误差降到 $10^{-3}$ 需要百万步！）。
+  \item \textbf{几乎永远产不出精确零分量}：浮点数累加 $w_j - \eta_t (\nabla_j f + \lambda \sign(w_j))$ 很难恰好踩中 $0.0$，最终结果往往是一堆 $10^{-4}$ 量级的非零毛刺，彻底毁掉 Lasso 特征选择的稀疏美学。
+\end{enumerate}
+\end{failBox}
+
+\subsection{复合凸优化、近端算子与软阈值闭式解}
+
+怎么才能既保留 $L$-光滑的 $O(1/T)$ 高速，又干净利落地劈出精确零解？核心洞察在于\textbf{拆分结构}：Lasso 这类问题并非一团浆糊式的不可微函数，而是\textbf{“光滑凸损失 + 简单不可微凸正则”的复合结构}：
+\begin{equation}\label{eq:v4-composite}
+  \min_{x \in \R^d}\; F(x) = f(x) + g(x),
+\end{equation}
+其中 $f(x)$ 是 $L$-光滑凸函数（如最小二乘 $\frac{1}{2N}\norm{Xw-y}_2^2$），$g(x)$ 是凸但可能不可微的简单函数（如 $\lambda\norm{w}_1$）。
+
+回想第 1 章图~\ref{fig:v4-sandwich} 的二次代理思想：\textbf{只对光滑部分 $f(x)$ 在 $x_t$ 处做二次上界展开，而将不可微部分 $g(x)$ 原封不动地保留下来！} 于是每一步我们求解代理子问题：
+\begin{align}
+  x_{t+1} &= \argmin_{x \in \R^d} \left\{ f(x_t) + \nabla f(x_t)^\top (x - x_t) + \frac{1}{2\eta}\norm{x - x_t}_2^2 + g(x) \right\} \nonumber \\
+  &= \argmin_{x \in \R^d} \left\{ \frac{1}{2}\norm{x - \big(x_t - \eta \nabla f(x_t)\big)}_2^2 + \eta g(x) \right\}. \label{eq:v4-prox-gd-deriv}
+\end{align}
+（从第一行到第二行只需把常数项丢掉、乘以 $\eta$ 并对 $x$ 配方即可验证！）由此，我们隆重定义优化领域最优雅的算子之一——\textbf{近端算子（Proximal Operator）}。
+
+\begin{defBox}
+\begin{definition}[近端算子与近端梯度法]\label{def:v4-prox}
+对任意闭真凸函数 $g: \R^d \to \R \cup \{+\infty\}$ 与步长参数 $\tau > 0$，定义其\textbf{近端算子}为
+\begin{equation}\label{eq:v4-prox-def}
+  \prox_{\tau g}(z) \coloneqq \argmin_{x \in \R^d} \left\{ \frac{1}{2}\norm{x - z}_2^2 + \tau g(x) \right\}.
+\end{equation}
+由于目标函数关于 $x$ 是 $1$-强凸的，上述极小点必然\textbf{存在且唯一}。利用它，复合优化~\eqref{eq:v4-composite} 的\textbf{近端梯度法（Proximal Gradient Descent）}简洁地写作两步曲：
+\begin{equation}\label{eq:v4-pgd}
+  x_{t+1} = \prox_{\eta g}\!\Big(x_t - \eta \nabla f(x_t)\Big).
+\end{equation}
+\end{definition}
+\end{defBox}
+
+近端算子具有惊人的统一力：
+\begin{itemize}
+  \item 若 $g(x) \equiv 0$，则 $\prox_{\eta g}(z) = z$，退化为第 1 章的普通梯度下降；
+  \item 若 $g(x) = I_C(x)$（凸集 $C$ 的示性函数：在 $C$ 内为 $0$，在 $C$ 外为 $+\infty$），则近端算子化为欧氏投影 $\prox_{\eta I_C}(z) = \argmin_{x\in C}\frac{1}{2}\norm{x-z}_2^2 = \Pi_C(z)$，恰好就是\textbf{投影梯度下降（Projected Gradient Descent）}！
+  \item 若 $g(x) = \lambda \norm{x}_1$，则近端算子拥有令人拍案叫绝的逐坐标解析解——\textbf{软阈值算子（Soft-Thresholding）}！
+\end{itemize}
+
+\begin{thmBox}
+\begin{theorem}[$\ell_1$ 范数的近端算子与软阈值闭式解]\label{thm:v4-soft-thresh}
+对于 $g(x) = \norm{x}_1$ 与阈值 $\tau > 0$，近端算子 $\prox_{\tau\norm{\cdot}_1}(z)$ 按坐标完全解耦，其第 $j$ 个分量等于\textbf{软阈值算子} $S_\tau(z_j)$：
+\begin{equation}\label{eq:v4-soft-thresh}
+  \big[\prox_{\tau\norm{\cdot}_1}(z)\big]_j = S_\tau(z_j) \coloneqq \sign(z_j)\max\big(|z_j| - \tau,\, 0\big) =
+  \begin{cases}
+    z_j - \tau, & z_j > \tau, \\
+    0, & |z_j| \le \tau, \\
+    z_j + \tau, & z_j < -\tau.
+  \end{cases}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+将定义~\eqref{eq:v4-prox-def} 按坐标展开：
+\[
+  \frac{1}{2}\norm{x - z}_2^2 + \tau \norm{x}_1 = \sum_{j=1}^d \left[\frac{1}{2}(x_j - z_j)^2 + \tau |x_j|\right].
+\]
+各坐标互不耦合，因此只需对任意标量 $z \in \R$ 独立最小化一维严格凸函数 $\phi(x) = \frac{1}{2}(x - z)^2 + \tau|x|$。由广义 Fermat 最优性条件（命题~\ref{prop:v4-subgrad-opt}），$x^*$ 是唯一极小点当且仅当
+\[
+  0 \in \partial \phi(x^*) = (x^* - z) + \tau\,\partial |x^*|.
+\]
+结合式~\eqref{eq:v4-subdiff-abs} 分三种情形直接求解：
+\begin{enumerate}
+  \item \textbf{若 $x^* > 0$}：$\partial |x^*| = \{+1\}$，方程化为 $x^* - z + \tau = 0 \implies x^* = z - \tau$。这与前提 $x^* > 0$ 相容当且仅当 $z > \tau$。
+  \item \textbf{若 $x^* < 0$}：$\partial |x^*| = \{-1\}$，方程化为 $x^* - z - \tau = 0 \implies x^* = z + \tau$。这与前提 $x^* < 0$ 相容当且仅当 $z < -\tau$。
+  \item \textbf{若 $x^* = 0$}：$\partial |0| = [-1, 1]$，条件化为 $0 \in -z + [-\tau, \tau] \iff z \in [-\tau, \tau] \iff |z| \le \tau$。
+\end{enumerate}
+三种情形恰好将整个实轴 $z \in \R$ 互斥且无遗漏地完全覆盖，综合即得软阈值公式~\eqref{eq:v4-soft-thresh}！
+\end{proof}
+
+将定理~\ref{thm:v4-soft-thresh} 代入近端梯度框架~\eqref{eq:v4-pgd}（令 $\tau = \eta\lambda$），即得到著名的\textbf{迭代收缩阈值算法（ISTA, Iterative Shrinkage-Thresholding Algorithm）}求解 Lasso 问题 $\min_w \frac{1}{2N}\norm{Xw - y}_2^2 + \lambda\norm{w}_1$：
+\begin{equation}\label{eq:v4-ista}
+  w^{(t+1)} = S_{\eta\lambda}\!\left(w^{(t)} - \frac{\eta}{N}X^\top\big(Xw^{(t)} - y\big)\right), \qquad \eta = \frac{1}{L},\quad L = \frac{\sigma_{\max}(X)^2}{N}.
+\end{equation}
+令人振奋的是：尽管 Lasso 目标不可微，可以严格证明（沿用第 1 章定理~\ref{thm:v4-gd-convex} 的望远镜证明思路将梯度替换为“广义梯度映射”），取固定步长 $\eta = 1/L$ 的 ISTA 完整恢复了光滑问题的 \textbf{$O(1/T)$ 收敛率}，同时软阈值的死区 $[-\eta\lambda, \eta\lambda]$ 会在有限步内将所有微弱噪声特征直接精准归零！
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.95, >=Stealth]
+  % ===== Left Panel: L1 Diamond vs L2 Circle Contours =====
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\small\sffamily\bfseries, color=tealDark] at (0.2, 3.35) {(a) $L_1$ 菱形尖角与 $L_2$ 圆球的稀疏几何对比};
+    % Axes
+    \draw[->, slate!80] (-2.2, 0) -- (2.7, 0) node[right, font=\footnotesize] {$w_1$};
+    \draw[->, slate!80] (0, -1.75) -- (0, 2.60) node[above, font=\footnotesize] {$w_2$};
+
+    % L2 ball (radius 1.15)
+    \fill[navyLight, opacity=0.65] (0,0) circle (1.15);
+    \draw[navy, thick, dashed] (0,0) circle (1.15);
+    \node[navy, font=\scriptsize\sffamily, anchor=east] (l2lbl) at (-1.30, -1.28) {$L_2$ 球 $\norm{w}_2 \le C$};
+    \draw[->, navy!80, thin] (l2lbl.east) -- (-0.82, -0.82);
+
+    % L1 diamond (radius 1.15)
+    \fill[tealLight, opacity=0.85] (1.15,0) -- (0,1.15) -- (-1.15,0) -- (0,-1.15) -- cycle;
+    \draw[tealDark, very thick] (1.15,0) -- (0,1.15) -- (-1.15,0) -- (0,-1.15) -- cycle;
+    \node[tealDark, font=\scriptsize\sffamily, anchor=east] (l1lbl) at (-1.30, 0.85) {$L_1$ 菱形 $\norm{w}_1 \le C$};
+    \draw[->, tealDark!85, thin] (l1lbl.east) -- (-0.58, 0.58);
+
+    % Elliptical loss contours centered at w_ols = (1.55, 1.80)
+    \begin{scope}[shift={(1.55, 1.80)}, rotate=28]
+      \draw[ochre!75, thin] (0,0) ellipse (0.52 and 0.30);
+      \draw[ochre!85, semithick] (0,0) ellipse (1.05 and 0.60);
+      \draw[ochre, thick] (0,0) ellipse (1.62 and 0.92);
+    \end{scope}
+    \fill[ochre] (1.55, 1.80) circle (2pt);
+    \node[ochre, font=\scriptsize\sffamily, right] at (1.60, 1.88) {$\hat{w}_{\mathrm{OLS}}$};
+
+    % Intersection point on w2 axis for L1 (0, 1.15) - label in open upper-left
+    \fill[gold] (0, 1.15) circle (3pt);
+    \draw[tealDark, semithick] (0, 1.15) circle (4.8pt);
+    \node[font=\scriptsize\sffamily, color=tealDark, align=center, anchor=east] (cornerlbl) at (-0.58, 2.02)
+      {$L_1$ 切于尖角\\$w_1^* = 0$（精确稀疏）};
+    \draw[->, tealDark, semithick] (cornerlbl.south east) -- (-0.10, 1.24);
+
+    % Intersection point on L2 circle approx (0.66, 0.94) - label in open lower-right
+    \fill[navy] (0.66, 0.94) circle (2.5pt);
+    \node[font=\scriptsize\sffamily, color=navy, align=left, anchor=west] (arclbl) at (1.28, -0.78)
+      {$L_2$ 切于光滑弧\\($w_1, w_2 \neq 0$)};
+    \draw[->, navy!85, thin] (1.35, -0.45) -- (0.72, 0.86);
+  \end{scope}
+
+  % ===== Right Panel: Soft-Thresholding Operator =====
+  \begin{scope}[shift={(7.7, 0.25)}]
+    \node[font=\small\sffamily\bfseries, color=tealDark] at (0, 3.10) {(b) 软阈值算子 $S_\tau(z)$ 与死区归零机理};
+    % Axes
+    \draw[->, slate!80] (-2.4, 0) -- (2.55, 0) node[right, font=\footnotesize] {$z$};
+    \draw[->, slate!80] (0, -1.95) -- (0, 2.35) node[above, font=\footnotesize] {$S_\tau(z)$};
+
+    % Identity line y = z
+    \draw[slate!55, dashed, thick] (-2.05, -2.05) -- (2.05, 2.05);
+    \node[slate, font=\scriptsize\sffamily, anchor=west] at (0.88, 2.15) {$y = z$（无惩罚）};
+
+    % Dead zone shading [-tau, tau], tau = 0.85
+    \fill[ochreLight, opacity=0.9] (-0.85, -0.22) rectangle (0.85, 0.22);
+    \draw[ochre!70, dotted, thick] (-0.85, -1.55) -- (-0.85, 0.75);
+    \draw[ochre!70, dotted, thick] (0.85, -0.85) -- (0.85, 1.55);
+
+    % Soft thresholding piecewise linear curve
+    \draw[tealDark, line width=1.8pt] (-2.20, -1.35) -- (-0.85, 0) -- (0.85, 0) -- (2.20, 1.35);
+    \fill[tealDark] (-0.85, 0) circle (2.2pt);
+    \fill[tealDark] (0.85, 0) circle (2.2pt);
+
+    % Labels for -tau and tau
+    \node[below, font=\footnotesize, color=ochre] at (-0.85, -0.24) {$-\tau$};
+    \node[below, font=\footnotesize, color=ochre] at (0.85, -0.24) {$+\tau$};
+    \node[font=\scriptsize\sffamily, color=ochre, align=center] (deadlbl) at (-1.45, 1.25)
+      {死区 $[-\tau,\tau]$\\精确截断为 $0$};
+    \draw[->, ochre, semithick] (deadlbl.south east) -- (-0.28, 0.08);
+
+    % Shift annotation
+    \draw[<->, navy, semithick] (1.92, 1.92) -- (1.92, 1.07) node[midway, right, font=\scriptsize\sffamily] {收缩 $\tau$};
+  \end{scope}
+\end{tikzpicture}
+\caption{$L_1$ 稀疏性的双重视角：(a) 在约束几何上，椭圆损失等高线向外扩张时极易先撞击 $\ell_1$ 菱形位于坐标轴上的尖角，使对应权重精确归零，而光滑的 $\ell_2$ 圆球几乎总在非坐标轴处相切；(b) 在算法解析上，软阈值算子 $S_\tau(z)$ 将幅值落入死区 $[-\tau, \tau]$ 的梯度步输出严格压回零点，大权重则向零平移 $\tau$。}\label{fig:v4-l1-prox}
+\end{figure}
+
+% ============================================================
+\section{实测验证：纯 NumPy ISTA 求解 20 维 Lasso 稀疏路径}
+% ============================================================
+
+{\rightskip=0pt plus 1fil\relax 下面我们用纯 NumPy 实现式~\eqref{eq:v4-ista} 的 ISTA 算法（见 \texttt{code/vol4\_experiments.py} 中的 \texttt{exp2\_lasso\_ista}），在真实含噪稀疏回归问题上检验软阈值的威力：\par}
+\begin{itemize}
+  \item 数据规模：$N = 120$ 个样本，$D = 20$ 维已标准化特征（零均值、单位标准差），高斯观测噪声 $\sigma = 0.5$。
+  \item 真实参数向量 $w_{\text{true}} \in \R^{20}$ 中\textbf{只有前 4 维非零}：$w_{\text{true}, 0:4} = [3.5,\; -2.5,\; 1.8,\; -1.2]$，其余 16 维均为纯干扰特征（真值为 $0$）。
+  \item 固定步长 $\eta = 1/L$（其中 $L = \sigma_{\max}(X)^2/N$），对 12 个递增的正则化强度 $\lambda \in [0.00, 3.80]$ 各运行 1200 步 ISTA，记录全部非零权重个数 \texttt{nnz}（阈值 $|w_j| > 10^{-4}$）及关键特征轨迹，导出至 \texttt{data/lasso\_path.csv}。
+\end{itemize}
+
+\begin{lstlisting}[caption={纯 NumPy 实现近端梯度 ISTA 追踪 Lasso 路径（节选自 \texttt{vol4\_experiments.py}）},label={lst:v4-ch2-ista}]
+L = float(np.linalg.svd(X, compute_uv=False)[0] ** 2 / N)
+eta = 1.0 / L
+
+def soft_thresh(z, tau):
+    return np.sign(z) * np.maximum(np.abs(z) - tau, 0.0)
+
+for lam in [0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.9, 1.2, 1.6, 2.2, 3.0, 3.8]:
+    w = np.zeros(D)
+    for _ in range(1200):
+        grad = (X.T @ (X @ w - y)) / N
+        w = soft_thresh(w - eta * grad, eta * lam)
+    nnz = int(np.sum(np.abs(w) > 1e-4))
+\end{lstlisting}
+
+图~\ref{fig:v4-ch2-lasso} 与表~\ref{tab:v4-ch2-lasso} 忠实展示了从 \texttt{data/lasso\_path.csv} 读取的完整正则化路径（Regularization Path）。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.92\linewidth,
+  height=6.8cm,
+  xlabel={$\ell_1$ 正则化强度 $\lambda$},
+  ylabel={估计权重系数 $w_j(\lambda)$},
+  xmin=-0.08, xmax=3.88,
+  ymin=-3.1, ymax=3.9,
+  grid=both,
+  major grid style={tealLine!45, line width=0.4pt},
+  axis line style={slate!80},
+  tick label style={font=\footnotesize\sffamily, color=ink},
+  label style={font=\small\sffamily, color=ink},
+  legend style={
+    at={(0.98,0.97)}, anchor=north east,
+    fill=white, draw=tealLine, rounded corners=1.2mm,
+    font=\scriptsize\sffamily, cells={anchor=west}
+  },
+  every axis plot/.append style={line width=1.45pt}
+]
+  % Zero reference line
+  \addplot[slate!65, thin, dashed, forget plot] coordinates {(0,0) (3.8,0)};
+  % Vertical marker at exact recovery lam = 0.20
+  \addplot[gold, thick, dotted, forget plot] coordinates {(0.20,-2.8) (0.20,3.9)};
+  \node[font=\scriptsize\sffamily, color=gold!85!ink, anchor=south west, fill=white, inner sep=1.5pt]
+    at (axis cs:0.24, -2.62) {$\lambda=0.20$：精确支撑恢复（$\mathrm{nnz}=4$）};
+
+  \addplot[color=tealDark, mark=*, mark size=1.6pt]
+    table[x=lam, y=w0, col sep=comma]{data/lasso_path.csv};
+  \addlegendentry{$w_0$（真值 $+3.5$）}
+
+  \addplot[color=ochre, mark=square*, mark size=1.6pt]
+    table[x=lam, y=w1, col sep=comma]{data/lasso_path.csv};
+  \addlegendentry{$w_1$（真值 $-2.5$）}
+
+  \addplot[color=navy, mark=triangle*, mark size=1.9pt]
+    table[x=lam, y=w2, col sep=comma]{data/lasso_path.csv};
+  \addlegendentry{$w_2$（真值 $+1.8$）}
+
+  \addplot[color=plum, mark=diamond*, mark size=1.9pt]
+    table[x=lam, y=w3, col sep=comma]{data/lasso_path.csv};
+  \addlegendentry{$w_3$（真值 $-1.2$）}
+
+  \addplot[color=slate, dashed, mark=x, mark size=2pt]
+    table[x=lam, y=w4_noise, col sep=comma]{data/lasso_path.csv};
+  \addlegendentry{$w_4$（噪声特征，真值 $0$）}
+\end{axis}
+\end{tikzpicture}
+\caption{20 维稀疏回归（4 个真实信号 + 16 个纯噪声特征）的实测 Lasso 正则化路径（读取自 \texttt{data/lasso\_path.csv}）。当 $\lambda = 0$ 时全部 20 个系数非零；刚增至 $\lambda = 0.20$ 时，16 个噪声特征全部被精确归零，4 个真实信号毫发无损地保留（$\mathrm{nnz}=4$）；继续增大 $\lambda$，真实信号按幅值从小到大（$w_3 \to w_2 \to w_1 \to w_0$）依次归零。}\label{fig:v4-ch2-lasso}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{ISTA 求解 20 维 Lasso 路径关键节点实测值（\texttt{data/lasso\_path.csv}）}\label{tab:v4-ch2-lasso}
+\small
+\begin{tabular}{@{}rrrrrrrc@{}}
+\toprule
+$\lambda$ & $w_0\,(+3.5)$ & $w_1\,(-2.5)$ & $w_2\,(+1.8)$ & $w_3\,(-1.2)$ & $w_4\,(0.0)$ & 非零个数 \texttt{nnz} & 阶段解读 \\
+\midrule
+$0.00$ & $3.5393$ & $-2.4444$ & $1.8266$ & $-1.1874$ & $-0.0489$ & $20$ & 无惩罚 OLS，全员非零 \\
+$0.20$ & $3.3257$ & $-2.2861$ & $1.5831$ & $-0.9226$ & $0.0000$  & $4$  & \textbf{精确支撑恢复}（16 噪声归零） \\
+$0.60$ & $2.8824$ & $-1.8848$ & $1.0838$ & $-0.3767$ & $0.0000$  & $4$  & 保持真支撑，系数整体收缩 \\
+$1.20$ & $2.2588$ & $-1.3184$ & $0.3979$ & $0.0000$  & $0.0000$  & $3$  & 最弱信号 $w_3$ 率先归零 \\
+$3.00$ & $0.5615$ & $0.0000$  & $0.0000$ & $0.0000$  & $0.0000$  & $1$  & 仅剩最强信号 $w_0$ \\
+$3.80$ & $0.0000$ & $0.0000$  & $0.0000$ & $0.0000$  & $0.0000$  & $0$  & 超过 $\lambda_{\max}$，全零解 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+从表~\ref{tab:v4-ch2-lasso} 可以清楚地看到 Lasso 的一把“双刃剑”效应：在 $\lambda = 0.20$ 处，它干净利落地把 16 个纯噪声维度全部清零，实现了完美的模型稀疏化；但与此同时，真实信号 $w_0$ 也从 $3.5393$ 被略微向零拉低到了 $3.3257$（软阈值产生的\textbf{收缩偏差，Shrinkage Bias}）。这正好无缝引出第 3 章的中心命题——\textbf{偏差与方差的权衡}！
+
+\begin{extBox}{加速近端梯度（FISTA）与交替方向乘子法（ADMM）}
+当我们把第 1 章的 Nesterov 加速思想与本章的近端梯度法 ISTA 结合，便诞生了 Beck \& Teboulle（2009）著名的 \textbf{FISTA（Fast ISTA）}：
+\[
+  x_{t+1} = \prox_{\eta g}\!\big(y_t - \eta \nabla f(y_t)\big), \qquad
+  \theta_{t+1} = \frac{1 + \sqrt{1 + 4\theta_t^2}}{2}, \qquad
+  y_{t+1} = x_{t+1} + \frac{\theta_t - 1}{\theta_{t+1}}(x_{t+1} - x_t).
+\]
+仅仅增加两行外推运算，FISTA 就把复合非光滑问题的收敛率从 ISTA 的 $O(1/T)$ 直接提升至最优一阶速率 $O(1/T^2)$！
+
+另一方面，如果目标函数包含\textbf{两个都很复杂}的凸项，或者带有线性耦合约束 $Ax + Bz = c$（例如分布式大规模机器学习或总变差图像去噪），单靠近端梯度就力不从心了。此时\textbf{交替方向乘子法（ADMM）}通过引入二次惩罚构成\textbf{增广拉格朗日函数}：
+\[
+  \mathcal{L}_\rho(x, z, u) = f(x) + g(z) + u^\top (Ax + Bz - c) + \frac{\rho}{2}\norm{Ax + Bz - c}_2^2,
+\]
+按“固定 $z$ 最小化 $x$ $\to$ 固定 $x$ 最小化 $z$ $\to$ 对偶变量 $u$ 做一步梯度上升”的节奏交替更新，将拉格朗日对偶与近端分裂的威力发挥到极致。
+\end{extBox}
+
+% ============================================================
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+% ============================================================
+
+\exTier{A 层}{对偶构建与软阈值手算}
+\begin{enumerate}[label=\textbf{4.2.\arabic*}, leftmargin=3.3em, itemsep=5pt]
+  \item\label{ex:4.2.1} \textbf{最小欧氏范数线性方程组的对偶问题}：求解凸优化问题 $\min_{x\in\R^d} \frac{1}{2}\norm{x}_2^2$，满足等式约束 $Ax = b$（其中 $A \in \R^{m\times d}$ 行满秩，$m \le d$）。请写出拉格朗日函数 $\mathcal{L}(x, \nu)$、对偶函数 $g(\nu)$、对偶最优解 $\nu^*$ 以及对应的原始最优解 $x^* = A^\top (AA^\top)^{-1} b$，并验证 $d^* = p^*$。
+  \exHint{对 $\mathcal{L}(x,\nu) = \frac{1}{2}x^\top x + \nu^\top(Ax - b)$ 求梯度并令其为零得 $x = -A^\top \nu$，回代即得二次凹函数 $g(\nu)$。}
+
+  \item\label{ex:4.2.2} \textbf{软阈值算子与 $\ell_1$ 次微分手算}：
+  (a) 设向量 $z = (2.4,\; -0.6,\; 0.8,\; -3.1)^\top$，阈值 $\tau = 0.8$，手工计算 $\prox_{\tau\norm{\cdot}_1}(z)$；
+  (b) 求三维函数 $g(x) = \norm{x}_1$ 在点 $x = (2, 0, -1)^\top$ 处的完整次微分集合 $\partial g(x)$；
+  (c) 求合页损失 $h(z) = \max(0, 1 - z)$ 在 $z = 1$ 处的次微分 $\partial h(1)$。
+  \exHint{利用公式~\eqref{eq:v4-soft-thresh} 与逐坐标次微分规则；对合页损失直接检验定义~\eqref{eq:v4-subgrad-def}。}
+\end{enumerate}
+
+\exTier{B 层}{KKT 完整推导与经典投影}
+\begin{enumerate}[label=\textbf{4.2.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=3]
+  \item\label{ex:4.2.3} \textbf{最大熵分布与 Softmax 的 KKT 起源}：在概率单纯形上最大化 Shannon 熵：
+  \[
+    \min_{p \in \R^K}\; \sum_{k=1}^K p_k \ln p_k - \sum_{k=1}^K s_k p_k
+    \quad\text{s.t.}\quad \sum_{k=1}^K p_k = 1,\quad p_k \ge 0.
+  \]
+  利用 KKT 条件证明唯一最优解恰好就是 \textbf{Softmax 分布} $p_k^* = \frac{e^{s_k}}{\sum_{j=1}^K e^{s_j}}$（注意为何不等式乘子自动为零！）。
+  \exHint{因为 $\lim_{p_k\to 0^+} \ln p_k = -\infty$，最优解自动落在开集 $p_k > 0$ 内，由互补松弛得所有不等式乘子 $\lambda_k^* = 0$。}
+
+  \item\label{ex:4.2.4} \textbf{注水算法（Water-Filling）的 KKT 求解}：在通信功率分配与矩阵特征值截断中常见如下凸问题（给定常数 $\alpha_i > 0$）：
+  \[
+    \min_{x \in \R^d}\; -\sum_{i=1}^d \ln(\alpha_i + x_i) \quad\text{s.t.}\quad x_i \ge 0,\quad \sum_{i=1}^d x_i = 1.
+  \]
+  用 KKT 条件证明最优解形如 $x_i^* = \max(0,\; \nu^{-1} - \alpha_i)$，其中水位线 $\nu^{-1}$ 由 $\sum_{i=1}^d \max(0, \nu^{-1}-\alpha_i) = 1$ 唯一确定。
+  \exHint{列出平稳性 $-\frac{1}{\alpha_i + x_i^*} - \lambda_i^* + \nu^* = 0$，结合 $\lambda_i^* \ge 0$ 与 $\lambda_i^* x_i^* = 0$ 消去 $\lambda_i^*$。}
+\end{enumerate}
+
+\exTier{C 层}{对偶深入定理与弹性网近端算子}
+\begin{enumerate}[label=\textbf{4.2.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=5]
+  \item\label{ex:4.2.5} \textbf{Lasso 全零解的精确临界阈值 $\lambda_{\max}$}：对于 Lasso 目标 $F_\lambda(w) = \frac{1}{2N}\norm{Xw - y}_2^2 + \lambda\norm{w}_1$，利用次梯度最优性条件 $0 \in \partial F_\lambda(0)$ 证明：
+  \[
+    w^* = 0 \iff \lambda \ge \lambda_{\max} \coloneqq \frac{1}{N}\norm{X^\top y}_\infty.
+  \]
+  结合第 2.4 节实验解释为何表~\ref{tab:v4-ch2-lasso} 在 $\lambda = 3.80$ 时全部系数已精准归零。
+  \exHint{计算 $w=0$ 处光滑项的梯度 $-\frac{1}{N}X^\top y$，令其落入 $\lambda\,\partial\norm{0}_1 = [-\lambda, \lambda]^D$。}
+
+  \item\label{ex:4.2.6} \textbf{弹性网（Elastic Net）的闭式近端算子}：弹性网结合了 $\ell_1$ 与 $\ell_2$ 正则项：$g(w) = \lambda_1\norm{w}_1 + \frac{\lambda_2}{2}\norm{w}_2^2$（$\lambda_1, \lambda_2 > 0$）。仿照定理~\ref{thm:v4-soft-thresh} 的证明，推导近端算子 $\prox_{\eta g}(z)$ 的精确逐坐标解析表达式。
+  \exHint{先对 $\frac{1}{2}(x_j - z_j)^2 + \frac{\eta\lambda_2}{2}x_j^2 + \eta\lambda_1|x_j|$ 配方整理，将得到缩放后的软阈值 $\frac{1}{1+\eta\lambda_2} S_{\eta\lambda_1}(z_j)$。}
+\end{enumerate}
+
+\exTier{D 层}{代码实战与算法加速对照}
+\begin{enumerate}[label=\textbf{4.2.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=7]
+  \item{\rightskip=0pt plus 1fil\relax \label{ex:4.2.7} \textbf{ISTA vs FISTA 与次梯度下降三法实测}：基于 \texttt{code/vol4\_experiments.py} 中的 \texttt{exp2\_lasso\_ista}（固定 $\lambda = 0.20$），用纯 NumPy 同时实现三种求解器：(1) 衰减步长次梯度下降（$\eta_t = \frac{0.5}{\sqrt{t+1}}$），(2) ISTA，(3) 拓展栏中的 FISTA。对比三者在前 200 步的目标次优度 $F(w^{(t)}) - F^*$ 与第 200 步的稀疏度 \texttt{nnz}，亲眼验证次梯度法为何无法产出精确零解、以及 FISTA 相比 ISTA 的提速幅度。\par}
+  \exHint{可先运行 5000 步 FISTA 充当精确基准值 $F^*$，再绘制三者的半对数收敛对比曲线。}
+
+  \item\label{ex:4.2.8} \textbf{单纯形投影算子（Simplex Projection）编程实现}：利用习题~\ref{ex:4.2.4} 类似的 KKT 推导，可以证明向量 $z \in \R^d$ 到概率单纯形 $\Delta^{d-1} = \{p \ge 0 : \sum_i p_i = 1\}$ 的欧氏投影为 $p_i^* = \max(z_i - \tau, 0)$，其中 $\tau$ 由将 $z$ 降序排列后在 $O(d\log d)$ 时间内解析求得。请推导该 $O(d\log d)$ 阈值公式，用纯 NumPy 实现 \texttt{proj\_simplex(z)}，并验证任意随机向量投影后均满足 KKT 全部条件。
+  \exHint{记 $z$ 降序排列为 $u_1 \ge \dots \ge u_d$，寻找最大下标 $\rho$ 满足 $u_\rho > \frac{1}{\rho}\big(\sum_{j=1}^\rho u_j - 1\big)$，则 $\tau = \frac{1}{\rho}\big(\sum_{j=1}^\rho u_j - 1\big)$。}
+\end{enumerate}

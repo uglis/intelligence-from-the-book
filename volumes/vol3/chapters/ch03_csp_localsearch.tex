@@ -1,0 +1,449 @@
+\chapter[约束满足问题（CSP）与局部搜索]{约束满足问题（CSP）、弧相容与局部搜索}\label{ch:csp}
+\chapEpigraph{你越是施加约束，就越能释放自己的自由。}{伊戈尔·斯特拉文斯基（Igor Stravinsky），《音乐诗学》}
+
+\begin{chapIntro}{本章定位与学习路线}
+第 1 章与第 2 章把状态视为不可拆分的“黑箱原子”（例如整张棋盘或坐标点），算法只关心状态之间的转移边，而看不见状态内部的变量结构。但在排课表、数独、地图着色、芯片布线与 $N$ 皇后等大量组合优化问题中，我们只关心最终能否找到一个满足所有规则的\textbf{合法配置}，而不在乎到达它的路径。本章引入\textbf{因子化状态表示（Factored Representation）}——\textbf{约束满足问题（CSP）}，通过变量/值排序启发式（MRV、度启发、LCV）、\textbf{前向检验（FC）}与 \textbf{AC-3 弧相容传播（$O(ed^3)$）}将指数搜索树压缩数千倍；随后转向\textbf{局部搜索（Min-Conflicts 与模拟退火）}，展示如何用线性内存与毫秒时间攻克 $50$ 乃至百万级 $N$ 皇后难题。
+\end{chapIntro}
+
+% ======================================================================
+\section{CSP 形式化、约束图与朴素回溯瓶颈}\label{sec:csp-form}
+% ======================================================================
+
+\subsection{从黑箱状态到因子化变量：三元组 $(X, D, C)$}
+
+如果把 $9\times 9$ 数独硬塞进第 1 章的通用搜索框架，状态空间就像一个完全不透明的迷宫，搜索算法不得不逐格盲目试探。但如果把盘面拆解为 $81$ 个变量，每个变量取值于 $\{1,\dots,9\}$，并显式声明“同行、同列、同宫互不相等”的约束条件，求解器就能像人类一样，在落子之前利用约束链条大范围排除不可能的候选数字。这种“打开状态黑箱”的建模方法，就是约束满足问题。
+
+\begin{defBox}
+\begin{definition}[约束满足问题（Constraint Satisfaction Problem, CSP）]\label{def:csp}
+一个有限域约束满足问题由三元组 $(X, D, C)$ 定义：
+\begin{enumerate}
+  \item \textbf{变量集合（Variables）}$X = \{X_1, X_2, \dots, X_n\}$；
+  \item \textbf{值域集合（Domains）}$D = \{D_1, D_2, \dots, D_n\}$，每个非空有限集合 $D_i$ 规定了变量 $X_i$ 的合法候选取值；
+  \item \textbf{约束集合（Constraints）}$C = \{C_1, C_2, \dots, C_m\}$，每条约束 $C_k = \langle \text{scope}_k, \text{rel}_k \rangle$ 指定了其作用的变量元组（作用域）以及允许的取值组合关系。
+\end{enumerate}
+按作用域包含的变量个数，约束分为\textbf{一元约束}（如 $X_1 \neq \text{绿}$）、\textbf{二元约束}（如 $X_1 \neq X_2$ 或 $X_1 < X_2$）与\textbf{高阶/全局约束}（如数独每行的 $\mathrm{AllDiff}(X_1,\dots,X_9)$）。若一组赋值不违反任何约束，称为\textbf{相容的（Consistent）}；若为全部 $n$ 个变量赋予了取值，称为\textbf{完备的（Complete）}。一个\textbf{解（Solution）}即是既完备又相容的赋值。
+\end{definition}
+\end{defBox}
+
+当所有约束均为一元或二元约束时（任何有限域高阶约束都可通过引入辅助变量等价转化为二元约束），CSP 可以直观地画成一张\textbf{约束图（Constraint Graph）}$G=(X, E)$：顶点是变量，无向边 $(X_i, X_j) \in E$ 表示变量 $X_i$ 与 $X_j$ 之间存在二元约束。
+
+图~\ref{fig:aus-csp} 展示了人工智能史上最经典的 CSP 例子——\textbf{澳大利亚地图三着色问题}：将 7 个行政区（\textsf{WA}、\textsf{NT}、\textsf{SA}、\textsf{Q}、\textsf{NSW}、\textsf{V}、\textsf{T}）染成红（R）、绿（G）、蓝（B）三色，要求相邻区域颜色不同。仅仅扫一眼约束图，两个极其宝贵的结构特征便跃然纸上：
+\begin{itemize}
+  \item 塔斯马尼亚岛 \textsf{T} 与大陆没有任何连边，是一个\textbf{独立的连通分量}，可以完全独立地随便涂色，无需乘进主搜索树；
+  \item 南澳大利亚 \textsf{SA} 的度高达 $5$（几乎与所有大陆省份接壤），它一旦选错颜色就会牵连全图——直觉告诉我们，应当优先处理这种“核心枢纽变量”！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  reg/.style={
+    circle, draw=tealDark, thick, fill=tealLight,
+    minimum size=10.5mm, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  hub/.style={
+    circle, draw=ochre, very thick, fill=ochreLight,
+    minimum size=11.5mm, font=\sffamily\bfseries\footnotesize, text=ochre
+  },
+  iso/.style={
+    circle, draw=navy, thick, dashed, fill=navyLight,
+    minimum size=10.5mm, font=\sffamily\bfseries\footnotesize, text=navy
+  },
+  cedge/.style={thick, slate!85}
+]
+  \node[reg] (WA)  at (0.0,  0.4) {WA};
+  \node[reg] (NT)  at (2.4,  2.0) {NT};
+  \node[hub] (SA)  at (2.8,  0.0) {SA};
+  \node[reg] (Q)   at (5.4,  2.0) {Q};
+  \node[reg] (NSW) at (6.0,  0.2) {NSW};
+  \node[reg] (V)   at (5.0, -1.6) {V};
+  \node[iso] (T)   at (8.2, -1.6) {T};
+
+  \draw[cedge] (WA)--(NT) (WA)--(SA) (NT)--(SA) (NT)--(Q)
+               (SA)--(Q) (SA)--(NSW) (SA)--(V) (Q)--(NSW) (NSW)--(V);
+
+  % Clean non-overlapping annotations
+  \node[font=\scriptsize\sffamily\bfseries, text=ochre, anchor=east] at (2.15, -0.82) {枢纽变量（度 $=5$）};
+  \node[font=\scriptsize\sffamily\bfseries, text=navy, above=2.2mm of T] {独立分量（度 $=0$）};
+  \node[font=\scriptsize\sffamily, text=slate, anchor=west] at (-0.4, -2.55)
+    {变量值域均为 $D_i = \{\text{红},\, \text{绿},\, \text{蓝}\}$，每条无向边代表二元约束 $X_i \neq X_j$。};
+\end{tikzpicture}
+\caption{澳大利亚地图三着色问题的约束图（7 个变量、9 条二元不等式约束）}\label{fig:aus-csp}
+\end{figure}
+
+\subsection{朴素回溯搜索的两大性能瓶颈}
+
+如果把第 1 章的普通 DFS 直接套在 CSP 上，每一步都枚举“挑哪一个未赋值变量”以及“给它赋什么值”，记最大值域大小为 $d = \max_i |D_i|$，搜索树的叶节点数会膨胀到灾难性的 $n!\, d^n$！幸运的是，CSP 赋值具有\textbf{交换律（Commutativity）}——先设 $\text{WA}=\text{红}$ 再设 $\text{NT}=\text{绿}$，与先设 $\text{NT}=\text{绿}$ 再设 $\text{WA}=\text{红}$ 得到的是完全相同的部分赋值。因此，每一层递归只需\textbf{固定选定一个未赋值变量}，仅对其 $d$ 个取值做分支，这就是\textbf{回溯搜索（Backtracking Search）}，叶节点上限立刻缩小 $n!$ 倍至 $d^n$。
+
+但即便消除了 $n!$，\textbf{朴素回溯}面对 $N=16$ 皇后这样中等规模的问题依然慢得令人绝望（正如 3.3 节实测所示，需要探索高达 $160{,}712$ 个节点！），根源在于两大缺陷：
+\begin{enumerate}
+  \item \textbf{盲目顺序}：按固定编号 $X_1, X_2, \dots, X_n$ 赋值，放任毫无冲突压力的“宽松变量”占据搜索树上层，把真正死胡同的“瓶颈变量”拖到极深层才暴露；
+  \item \textbf{被动检错（颠簸 / Thrashing）}：只有等递归走到深层变量 $X_k$ 时，才发现它和早已锁死的 $X_1$ 冲突，期间白白反复探索了成千上万个注定无解的中间子树。
+\end{enumerate}
+
+% ======================================================================
+\section{变量/值排序启发式与约束传播（前向检验 \& AC-3 弧相容）}\label{sec:csp-prop}
+% ======================================================================
+
+要彻底治好回溯搜索的“盲目”与“晚发现”，经典 AI 祭出了两套可以无缝叠加的通用加速武器：\textbf{领域无关启发式排序}与\textbf{主动约束传播（Constraint Propagation）}。
+
+\subsection{选变量“先败为快”，选取值“留足退路”}
+
+在回溯的每一层，我们面临两个决策：下一步\textbf{给哪个变量赋值}？给它\textbf{先试哪个值}？这两个决策遵循截然相反的哲学：
+\begin{itemize}
+  \item \textbf{最小剩余值启发式（MRV, Minimum Remaining Values / Fail-First）}：优先选择\textbf{当前合法剩余值最少}的未赋值变量。如果某个变量只剩 $1$ 个合法值，立刻给它赋值（无分支）；如果只剩 $0$ 个合法值，\textbf{当下立刻触发回溯}，一举剪掉整棵深度为 $n-k$ 的无效子树！
+  \item \textbf{度启发式（Degree Heuristic）}：当多个变量的剩余值个数打平（例如初始时刻所有变量剩余值都是 $d$）时，优先选择\textbf{在约束图中与最多未赋值变量相连}的变量（例如图~\ref{fig:aus-csp} 中的 \textsf{SA}），尽早把约束压力施加到全图。
+  \item \textbf{最少约束值启发式（LCV, Least Constraining Value / Fail-Last）}：一旦选定了变量 $X_i$，按顺序枚举其取值 $v \in D_i$ 时，优先尝试\textbf{导致邻居未赋值变量合法值减少最少}的那个取值。
+\end{itemize}
+
+\begin{insightBox}{为什么变量选“最难的（Fail-First）”，取值却选“最松的（Fail-Last）”？}
+这个看似矛盾的口诀背后是极其清澈的逻辑：为了找到一个完备解，\textbf{每一个变量都必须被成功赋值}——如果当前分支注定无解，早晚都会死在最紧的那个瓶颈变量上，所以必须“早死早超生”（Fail-First），把死胡同尽量提早到浅层剪掉；相反，对于已经选中的变量 $X_i$，我们\textbf{只需要找到一个能通往全局解的取值即可}，不必遍历完所有取值，因此优先挑选给下游留出最大自由度的取值（Fail-Last），最大化一次命中的概率！
+\end{insightBox}
+
+\subsection{前向检验（FC）与弧相容（AC-3）}
+
+仅仅做启发式排序还不够——我们必须实时维护每个未赋值变量的动态剩余值域 $D_j$。最轻量的做法是\textbf{前向检验（Forward Checking, FC）}：每当给变量 $X_i$ 赋值为 $v$ 时，立即扫描所有与 $X_i$ 直接相邻的未赋值变量 $X_j$，从 $D_j$ 中删去一切与 $X_i=v$ 冲突的值；一旦发现某个邻居 $D_j$ 被清空（Domain Wipeout），马上回溯！
+
+前向检验高效且实现极简，但它只向前看\textbf{一步}，无法察觉\textbf{未赋值邻居之间的连锁矛盾}！来看图~\ref{fig:aus-csp} 的一个绝佳例子：假设当前已赋值 $\text{WA}=\text{红}$ 且 $\text{Q}=\text{绿}$。
+\begin{itemize}
+  \item \textbf{前向检验的盲区}：FC 删掉 \textsf{WA} 和 \textsf{Q} 的邻居中的红、绿两色，于是 $\text{NT}$ 剩余值域变为 $\{\text{蓝}\}$，$\text{SA}$ 剩余值域也变为 $\{\text{蓝}\}$。此时所有未赋值变量的值域均非空，\textbf{FC 误以为一切正常}，继续盲目向下搜索！
+  \item \textbf{提前一拍看穿死局}：事实上，$\text{NT}$ 和 $\text{SA}$ 彼此相邻（约束 $\text{NT} \neq \text{SA}$），两者却同时被逼得只剩唯一颜色 $\{\text{蓝}\}$——这里已经发生不可挽回的死锁！表~\ref{tab:fc-vs-ac3} 直观对比了二者在此时刻的剩余值域状态。
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\caption{澳大利亚三着色预赋值 $\text{WA}=\text{R},\,\text{Q}=\text{G}$ 后，前向检验（FC）与 AC-3 弧相容的剩余值域对比}\label{tab:fc-vs-ac3}
+\small
+\begin{tabularx}{\linewidth}{@{}lcccccccX@{}}
+\toprule
+\textbf{传播阶段} & \textbf{WA} & \textbf{Q} & \textbf{NT} & \textbf{SA} & \textbf{NSW} & \textbf{V} & \textbf{T} & \textbf{能否即刻检出死局？} \\
+\midrule
+初始状态 & $\{\text{R}\}$ & $\{\text{G}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & --- \\
+仅前向检验 & $\{\text{R}\}$ & $\{\text{G}\}$ & $\{\text{B}\}$ & $\{\text{B}\}$ & $\{\text{R,B}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & \textcolor{ochre}{否（误以为有解）} \\
+\textbf{AC-3 弧相容} & $\{\text{R}\}$ & $\{\text{G}\}$ & $\{\text{B}\}$ & $\textcolor{ochre}{\mathbf{\varnothing}}$ & $\{\text{R,B}\}$ & $\{\text{R,G,B}\}$ & $\{\text{R,G,B}\}$ & \textcolor{teal}{\textbf{是（零回溯清空 SA）}} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+为了沿着约束图自动触发这种多步连锁推理，我们引入\textbf{弧相容（Arc Consistency）}与著名的 \textbf{AC-3 算法}（Mackworth, 1977）。
+
+\begin{defBox}
+\begin{definition}[有向弧相容（Arc Consistency）]\label{def:arc-consistency}
+对于二元约束图中的一条\textbf{有向弧} $(X_i, X_j)$，称变量 $X_i$ 对 $X_j$ 是\textbf{弧相容的}，当且仅当对于 $X_i$ 当前值域中的\textbf{每一个}取值 $x \in D_i$，在 $X_j$ 当前值域中都\textbf{至少存在一个}取值 $y \in D_j$，使得 $(x, y)$ 满足二元约束 $C_{ij}$。若图中所有有向弧均满足弧相容，则称整个 CSP 是弧相容的。
+\end{definition}
+\end{defBox}
+
+AC-3 算法的核心逻辑极为凝练：
+\begin{enumerate}
+  \item 将约束图中所有 $2e$ 条有向弧 $(X_i, X_j)$ 压入队列 $Q$；
+  \item 每次从 $Q$ 弹出一条有向弧 $(X_i, X_j)$，执行修剪子过程 $\mathrm{REVISE}(X_i, X_j)$：逐个检查 $x \in D_i$，若 $D_j$ 中找不到任何与之相容的 $y$，则将 $x$ 从 $D_i$ 中永久删除；
+  \item 若 $D_i$ 变为空集，立刻返回 \texttt{False}（无解）；
+  \item 若 $D_i$ 发生了至少一次删减，因为 $D_i$ 变小可能破坏指向 $X_i$ 的其他弧的支撑，必须把\textbf{所有指向 $X_i$ 的相邻有向弧} $(X_k, X_i)\;(X_k \in \text{Neighbors}(X_i) \setminus \{X_j\})$ 重新压入队列 $Q$；
+  \item 当队列 $Q$ 为空时，全图达到弧相容，返回 \texttt{True}。
+\end{enumerate}
+
+\begin{thmBox}
+\begin{theorem}[AC-3 算法的时间复杂度定理]\label{thm:ac3-complexity}
+设二元约束图共有 $n$ 个变量、$e$ 条无向约束边（即 $2e$ 条有向弧），各变量最大初始值域大小为 $d = \max_i |D_i|$。则 AC-3 算法必在有限步内终止，其最坏时间复杂度为
+\begin{equation}\label{eq:ac3-time}
+  T_{\text{AC-3}} = O\!\left(e\, d^3\right).
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+考察队列操作与单次 $\mathrm{REVISE}$ 代价的乘积：
+\begin{enumerate}
+  \item \textbf{每条有向弧的入队次数上界}：全图共有 $2e$ 条不同的有向弧。在初始化时，每条有向弧 $(X_k, X_i)$ 入队 $1$ 次；此后，它只会在其终点变量的值域 $D_i$ \textbf{严格减少至少一个元素}时才可能被重新入队。因为 $|D_i| \le d$，且值域只会删减不会增加，$D_i$ 最多减少 $d$ 次。因此，每条有向弧被弹出处理的次数至多为 $d + 1 = O(d)$ 次，全过程调用 $\mathrm{REVISE}$ 的总次数至多为 $2e(d+1) = O(ed)$ 次。
+  \item \textbf{单次 $\mathrm{REVISE}(X_i, X_j)$ 的时间上界}：对每个 $x \in D_i$（至多 $d$ 个），最坏需扫描全部 $y \in D_j$（至多 $d$ 个）以寻找相容支撑，耗时 $O(d^2)$。
+\end{enumerate}
+两者相乘，AC-3 的最坏总时间复杂度严格为 $O(ed) \times O(d^2) = O(ed^3)$。
+\end{proof}
+
+\subsection{3 变量值域级联修剪手工追踪与 AC-3 不完备性反例}
+
+先看一个令人赏心悦目的正面示例：三个整数变量 $X_1, X_2, X_3$，初始值域 $D_1 = \{1,2,3\}$、$D_2 = \{1,2,3\}$、$D_3 = \{2,3\}$，二元约束为严格递增链 $X_1 < X_2$ 与 $X_2 < X_3$。运行 AC-3（初始队列包含全部 4 条有向弧 $(X_1,X_2),\allowbreak\,(X_2,X_1),\allowbreak\,(X_2,X_3),\allowbreak\,(X_3,X_2)$）：
+\begin{enumerate}
+  \item 弹出 $(X_1, X_2)$：$x=3\in D_1$ 在 $D_2$ 中找不到严格更大的 $y$，删去 $3$，得 $D_1=\{1,2\}$；
+  \item 弹出 $(X_2, X_1)$：$x=1\in D_2$ 在 $D_1$ 中找不到严格更小的 $y$，删去 $1$，得 $D_2=\{2,3\}$，重入队 $(X_3, X_2)$；
+  \item 弹出 $(X_2, X_3)$：$x=3\in D_2$ 在 $D_3=\{2,3\}$ 中找不到严格更大的 $y$，删去 $3$，得 $D_2=\{2\}$，重入队 $(X_1, X_2)$；
+  \item 弹出 $(X_3, X_2)$：$x=2\in D_3$ 对 $D_2=\{2\}$ 无法满足 $2<2$，删去 $2$，得 $D_3=\{3\}$，重入队 $(X_2, X_3)$；
+  \item 弹出 $(X_1, X_2)$：$x=2\in D_1$ 对 $D_2=\{2\}$ 无法满足 $2<2$，删去 $2$，得 $D_1=\{1\}$！随后队中剩余弧均无删减，算法终止。
+\end{enumerate}
+图~\ref{fig:ac3-cascade} 生动展示了这一波值域坍缩过程：\textbf{AC-3 竟然在没有做任何一次猜测回溯的情况下，纯靠多项式时间约束传播就直接锁出了唯一解 $(X_1,X_2,X_3)=(1,2,3)$！}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  stage/.style={
+    rectangle, rounded corners=1.6mm, draw=tealLine, thick, fill=tealLight!45,
+    minimum width=34mm, minimum height=26mm, anchor=north west
+  },
+  hdr/.style={font=\sffamily\bfseries\scriptsize, text=tealDark},
+  dom/.style={font=\footnotesize\ttfamily, text=ink},
+  del/.style={font=\footnotesize\ttfamily, text=ochre},
+  arr/.style={-{Stealth[length=2.4mm]}, very thick, gold}
+]
+  \node[stage] (S0) at (0, 0) {};
+  \node[hdr] at (1.7, -0.3) {初始值域};
+  \node[dom, anchor=west] at (0.35, -0.95) {$D_1=\{1,2,3\}$};
+  \node[dom, anchor=west] at (0.35, -1.55) {$D_2=\{1,2,3\}$};
+  \node[dom, anchor=west] at (0.35, -2.15) {$D_3=\{\phantom{1,}2,3\}$};
+
+  \node[stage] (S1) at (4.1, 0) {};
+  \node[hdr] at (5.8, -0.3) {处理 $(X_1,X_2),(X_2,X_1)$};
+  \node[dom, anchor=west] at (4.45, -0.95) {$D_1=\{1,2\}$ \textcolor{ochre}{\scriptsize(删3)}};
+  \node[dom, anchor=west] at (4.45, -1.55) {$D_2=\{2,3\}$ \textcolor{ochre}{\scriptsize(删1)}};
+  \node[dom, anchor=west] at (4.45, -2.15) {$D_3=\{2,3\}$};
+
+  \node[stage] (S2) at (8.2, 0) {};
+  \node[hdr] at (9.9, -0.3) {处理 $(X_2,X_3),(X_3,X_2)$};
+  \node[dom, anchor=west] at (8.55, -0.95) {$D_1=\{1,2\}$};
+  \node[dom, anchor=west] at (8.55, -1.55) {$D_2=\{\mathbf{2}\}$ \textcolor{ochre}{\scriptsize(删3)}};
+  \node[dom, anchor=west] at (8.55, -2.15) {$D_3=\{\mathbf{3}\}$ \textcolor{ochre}{\scriptsize(删2)}};
+
+  \node[stage, fill=ochreLight!45, draw=gold] (S3) at (12.3, 0) {};
+  \node[hdr, text=ochre] at (14.0, -0.3) {重查 $(X_1,X_2)$ 锁定唯一解};
+  \node[dom, anchor=west] at (12.65, -0.95) {$D_1=\{\mathbf{1}\}$ \textcolor{ochre}{\scriptsize(删2)}};
+  \node[dom, anchor=west] at (12.65, -1.55) {$D_2=\{\mathbf{2}\}$};
+  \node[dom, anchor=west] at (12.65, -2.15) {$D_3=\{\mathbf{3}\}$};
+
+  \draw[arr] (3.45, -1.3) -- (4.05, -1.3);
+  \draw[arr] (7.55, -1.3) -- (8.15, -1.3);
+  \draw[arr] (11.65,-1.3) -- (12.25,-1.3);
+\end{tikzpicture}}
+\caption{约束链 $X_1 < X_2 < X_3$ 上 AC-3 弧相容的级联修剪过程：零回溯直接推导出唯一解 $(1,2,3)$}\label{fig:ac3-cascade}
+\end{figure}
+
+既然 AC-3 如此神奇，能否只跑一次多项式时间的 AC-3 就解决所有 CSP 呢？\textbf{绝对不行！}（否则 $\text{P}=\text{NP}$ 就被你随手证出来了！）下面的极简三角形反例一针见血地指明了 AC-3 的能力边界。
+
+\begin{failBox}{AC-3 本身不是完备求解器：3 团（$K_3$）二着色的经典反例}
+考虑 3 个两两相连的变量 $A, B, C$（构成三角形完全图 $K_3$），约束为 $A\neq B,\; B\neq C,\; A\neq C$，但仅提供\textbf{两种颜色}：
+\[
+  D_A = D_B = D_C = \{\text{红},\, \text{蓝}\}.
+\]
+由抽屉原理显然可知，该 CSP \textbf{绝对无解}（3 个节点不可能只用 2 种颜色做到两两不同）。然而，如果你对其运行 AC-3：
+\begin{itemize}
+  \item 检验有向弧 $(A, B)$：当 $A=\text{红}$ 时，$B$ 可以选 $\text{蓝}$；当 $A=\text{蓝}$ 时，$B$ 可以选 $\text{红}$——\textbf{完全相容，一个值也删不掉！}
+  \item 同理，其余 5 条有向弧 $(B,A),(B,C),(C,B),(A,C),(C,A)$ 全部满足弧相容！
+\end{itemize}
+于是 AC-3 \textbf{一值未删、安静地返回 \texttt{True}}，根本没察觉全图无解！
+
+\textbf{本质原因}：弧相容只检查\textbf{成对变量（2-相容）}的局部合法性，看不穿 3 个及以上变量围成的全局环路矛盾。因此，在通用求解器中，必须将 AC-3 嵌入回溯搜索的每一步赋值之后——即 \textbf{MAC（Maintaining Arc Consistency）}：一旦试探赋值 $A=\text{红}$，AC-3 立刻将 $B, C$ 同时压缩为 $\{\text{蓝}\}$，随即沿着弧 $(B,C)$ 瞬间清空值域并宣告无解！
+\end{failBox}
+
+\begin{extBox}{树结构 CSP 的多项式精确求解与割集条件化（预告第 4 章树宽）}
+如果一个 CSP 的约束图\textbf{没有环（是一棵树或森林）}，那么根本不需要回溯！只需：（1）任选一根节点并按拓扑序排列变量 $X_1,\dots,X_n$；（2）从后往前仅跑一遍\textbf{有向弧相容} $\mathrm{REVISE}(\text{parent}(X_i), X_i)$；（3）从前往后贪心为每个变量挑任意一个与父节点相容的值——保证一步到位无回溯，总时间仅需 $O(n d^2)$！对于含环图，若删去一个小集合 $S$（\textbf{环割集，Cycle Cutset}）后剩余子图变成树，只需枚举 $S$ 的至多 $d^{|S|}$ 种赋值，其余部分用树算法瞬间求解，总复杂度 $O(d^{|S|}\cdot n d^2)$。这种“沿树分解降维”的思想，将在第 4 章贝叶斯网络变量消元与树宽（Treewidth）理论中再次闪耀！
+\end{extBox}
+
+% ======================================================================
+\section{局部搜索：Min-Conflicts 与模拟退火（Simulated Annealing）}\label{sec:local-search}
+% ======================================================================
+
+回溯搜索（含 MRV+FC 或 MAC）属于\textbf{系统化完备搜索}：从空赋值出发一步步构建合法解。但当问题规模扩展到 $N=50$、$N=1000$ 甚至 $N=10^6$ 皇后，或是航空公司上万班次的机组排班时，系统回溯哪怕只在一开始错选了某个浅层决策，也可能需要极长时间才能退回来修正。这时，换一条思路——\textbf{完整状态局部搜索（Local Search）}——往往能创造奇迹。
+
+\subsection{最小冲突法（Min-Conflicts）：用线性内存秒解大规模 $N$ 皇后}
+
+在 $N$ 皇后问题的完整状态建模中，我们让每行 $r \in \{0,\dots,N-1\}$ 恰好放一个皇后，位置记为列号 $q_r \in \{0,\dots,N-1\}$。初始时随机摆满全部 $N$ 个皇后（显然存在不少同行/同列/同斜线冲突），然后反复执行极其简单的\textbf{最小冲突启发式（Min-Conflicts）}：
+\begin{enumerate}
+  \item 若当前配置冲突数为 $0$，立刻成功返回；
+  \item 从当前\textbf{存在冲突的皇后}中均匀随机挑出一个（第 $r$ 行）；
+  \item 将该皇后移动到第 $r$ 行中\textbf{使总冲突数最小的列 $c^*$}（若有多个并列最小列，随机选其一）。
+\end{enumerate}
+
+令人难以置信的经验事实是（Minton 等，1992）：尽管 $N$ 皇后问题的状态空间高达 $N^N$，\textbf{Min-Conflicts 求解 $N=10^6$ 皇后的期望步数竟然几乎与 $N$ 无关（常数级，通常不到 100 步）！}原因在于大规模 $N$ 皇后的解在状态空间中高度密集，冲突地形平滑，很少出现需要大幅翻越的深坑。且全过程仅需 $O(N)$ 内存保存当前盘面！
+
+\begin{example}[4 皇后的 Min-Conflicts 两步修复追踪]
+设 4 皇后的初始冲突配置为 $q = [0, 0, 0, 2]$（即第 $0,1,2$ 行皇后挤在第 $0$ 列，第 $3$ 行皇后在第 $2$ 列，共有 $3$ 对同列冲突）：
+\begin{enumerate}
+  \item \textbf{第 1 步}：随机选中冲突行 $r = 1$，固定其余三行 $(0,0),(2,0),(3,2)$，逐列统计第 $1$ 行放在 $c=0,1,2,3$ 时的冲突数：依次为 $(2, 2, 2, \mathbf{0})$。将 $q_1$ 移至冲突数为 $0$ 的第 $3$ 列，盘面瞬间化简为 $q = [0, 3, 0, 2]$（仅剩 $(0,0)$ 与 $(2,0)$ 一对冲突）；
+  \item \textbf{第 2 步}：随机选中冲突行 $r = 0$，固定 $(1,3),(2,0),(3,2)$，统计 $c=0,1,2,3$ 的冲突数：依次为 $(1, \mathbf{0}, 2, 1)$。将 $q_0$ 移至第 $1$ 列，得到 $q = [1, 3, 0, 2]$——4 个皇后的列号、主对角线差 $r-c\in\{-1,-2,2,1\}$ 与副对角线和 $r+c\in\{1,4,2,5\}$ 全部互异，\textbf{仅用 2 步修复即达成零冲突全局解！}
+\end{enumerate}
+\end{example}
+
+\subsection{爬山法陷阱与模拟退火（Simulated Annealing）}
+
+Min-Conflicts 本质上是一种贪心下降的\textbf{爬山法（Hill Climbing）}：每步只允许向冲突更少（或持平）的邻居移动。在更一般的非凸组合优化（如旅行商问题 TSP、芯片布局）中，贪心爬山极易被三类地形困死：\textbf{局部极小值（Local Minimum）}（四周邻居都比自己差，但并非全局最优）、\textbf{高原（Plateau）}（大面积平坦区域找不到下降方向）以及\textbf{山脊（Ridge）}。
+
+受冶金学中金属“高温熔化 $\to$ 缓慢冷却结晶为最低能量晶格”的启发，Kirkpatrick 等（1983）提出了\textbf{模拟退火算法（Simulated Annealing, SA）}。设我们希望最小化代价/能量函数 $E(s)$（例如 CSP 中的冲突总数），当前温度为 $T_k > 0$。在每一步随机提出一个邻居状态 $s'$，定义\textbf{能量收益} $\Delta E = E(s) - E(s')$（即能量下降量；若为最大化目标函数 $f(s)$，则 $\Delta E = f(s') - f(s)$）：
+\begin{itemize}
+  \item 若 $\Delta E \ge 0$（新状态更优或持平，能量未升高）：\textbf{以概率 $1$ 必然接受}；
+  \item 若 $\Delta E < 0$（新状态更差，需向上翻越高度为 $|\Delta E|$ 的能量壁垒）：\textbf{以 Metropolis 概率接受这次“短暂变差”的试探}：
+  \begin{equation}\label{eq:metropolis}
+    P_{\text{accept}}(\Delta E, T_k) = \exp\!\left(\frac{\Delta E}{T_k}\right) = \exp\!\left(-\frac{E(s') - E(s)}{T_k}\right) \in (0, 1).
+  \end{equation}
+\end{itemize}
+随着迭代步数 $k$ 推进，按退火表缓慢降温 $T_k \to 0^+$（工程上常用指数降温 $T_{k+1} = \gamma T_k,\; \gamma\in[0.95,0.999]$）。图~\ref{fig:sa-landscape} 直观刻画了温度 $T_k$ 的双重魔力：
+\begin{enumerate}
+  \item \textbf{高温早期（$T_k$ 很大）}：$\Delta E / T_k \approx 0$，$e^{\Delta E/T_k} \approx 1$，算法近乎自由漫游，轻松翻越能量壁垒逃离浅层局部极小值；
+  \item \textbf{低温后期（$T_k \to 0^+$）}：任何变差步的接受概率指数级坍缩为 $0$，算法平滑退化为精准爬山，稳稳沉降进全局最优谷底！
+\end{enumerate}
+理论上（Geman \& Geman, 1984），只要降温速度慢于对数速率 $T_k \ge c / \ln(k+2)$，模拟退火收敛到全局最优解的概率趋近于 $1$。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.95]
+  % Axes
+  \draw[-{Stealth[length=2.2mm]}, thick, slate] (0,0) -- (11.5,0) node[right, font=\footnotesize\sffamily, text=ink] {状态空间 $s$};
+  \draw[-{Stealth[length=2.2mm]}, thick, slate] (0,0) -- (0,4.1) node[above, font=\footnotesize\sffamily, text=ink] {能量 / 冲突数 $E(s)$};
+
+  % Smooth 1D energy curve with generous room above x-axis for global min label
+  \draw[very thick, tealDark, smooth] plot coordinates {
+    (0.5, 3.4) (1.4, 2.3) (2.3, 1.65) (3.1, 1.35) (4.0, 1.75)
+    (5.2, 2.65) (6.3, 2.05) (7.4, 0.95) (8.3, 0.65) (9.2, 1.15) (10.3, 2.5) (10.9, 3.2)
+  };
+
+  % Highlight local min & global min
+  \fill[ochre] (3.1, 1.35) circle (3.2pt);
+  \node[below=2.5mm, font=\scriptsize\sffamily\bfseries, text=ochre] at (3.1, 1.35) {局部极小（爬山卡死）};
+
+  \fill[teal] (8.3, 0.65) circle (3.6pt);
+  \node[below=1.8mm, font=\scriptsize\sffamily\bfseries, text=tealDark] at (8.3, 0.65) {全局最优解};
+
+  % Barrier height Delta E cleanly placed to the right of the peak
+  \draw[dashed, navy!75] (3.1, 1.35) -- (5.65, 1.35);
+  \draw[dashed, navy!75] (5.2, 2.65) -- (5.65, 2.65);
+  \draw[{Stealth[length=1.8mm]}-{Stealth[length=1.8mm]}, thick, navy] (5.45, 1.38) -- (5.45, 2.62)
+    node[midway, right=2pt, font=\scriptsize\sffamily, text=navy, fill=white, inner sep=1pt] {$|\Delta E|$};
+
+  % Thermal jump arc
+  \draw[-{Stealth[length=2.4mm]}, very thick, gold, bend left=36] (3.15, 1.50) to
+    node[above=1.8mm, font=\scriptsize\sffamily\bfseries, text=ochre, fill=white, inner sep=1.2pt]
+    {高温逃逸概率 $p = e^{\Delta E / T_k}$} (5.30, 2.75);
+  \draw[-{Stealth[length=2.4mm]}, very thick, teal, dashed, bend left=16] (5.75, 2.50) to
+    node[above right=1.0mm, font=\scriptsize\sffamily, text=tealDark] {低温沿谷底收敛} (8.18, 0.85);
+\end{tikzpicture}
+\caption{一维能量地形上的局部极小陷阱与模拟退火（SA）热逃逸机制示意}\label{fig:sa-landscape}
+\end{figure}
+
+\subsection{真实实验：$N$ 皇后基准对比与 AC-3 / Min-Conflicts 核心代码}
+
+我们在 \texttt{code/vol3\_experiments.py} 中对 $N \in \{8, 12, 16, 20, 50\}$ 五个规模的 $N$ 皇后问题系统测评了三种求解引擎：\textbf{朴素回溯}、\textbf{MRV + 前向检验}与\textbf{Min-Conflicts 局部搜索}（随机种子固定为 \texttt{42}）。表~\ref{tab:nqueens-exp} 展示了真实实测数据。
+
+\begin{table}[htbp]
+\centering
+\caption{$N$ 皇后问题三种求解算法实测节点数/步数与耗时对比（\texttt{code/vol3\_experiments.py}，\texttt{seed=42}）}\label{tab:nqueens-exp}
+\small
+\begin{tabular}{@{}c|cc|cc|cc@{}}
+\toprule
+\multirow{2}{*}{\textbf{规模 $N$}} & \multicolumn{2}{c|}{\textbf{朴素回溯（Naive BT）}} & \multicolumn{2}{c|}{\textbf{MRV + 前向检验}} & \multicolumn{2}{c}{\textbf{Min-Conflicts 局部搜索}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+ & 尝试节点数 & 耗时 & 尝试节点数 & 耗时 & 修正步数 & 耗时 \\
+\midrule
+$8$  & $876$          & $0.54\,\text{ms}$  & $\mathbf{75}$  & $0.38\,\text{ms}$ & $206$ 步 & $9.17\,\text{ms}$ \\
+$12$ & $3{,}066$      & $1.06\,\text{ms}$  & $\mathbf{153}$ & $0.39\,\text{ms}$ & $85$ 步  & $8.56\,\text{ms}$ \\
+$16$ & $160{,}712$    & $63.31\,\text{ms}$ & $\mathbf{44}$  & $\mathbf{0.16\,\text{ms}}$ & $63$ 步  & $6.21\,\text{ms}$ \\
+$20$ & 指数爆炸（超时） & ---                & $\mathbf{145}$ & $\mathbf{0.48\,\text{ms}}$ & $135$ 步 & $34.00\,\text{ms}$ \\
+$50$ & 不可行          & ---                & 规模受限       & ---               & $\mathbf{87}$ 步 & $\mathbf{79.71\,\text{ms}}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表~\ref{tab:nqueens-exp} 给出的对比极具说服力：
+\begin{itemize}
+  \item 在 $N=16$ 时，朴素回溯疯狂试探了 $160{,}712$ 个节点（耗时 $63.31\,\text{ms}$），而仅仅叠加 MRV 与前向检验，节点数暴跌至惊人的 $\mathbf{44}$ \textbf{个（耗时仅 $0.16\,\text{ms}$，节点数缩减 $3{,}652$ 倍！）}；
+  \item 到了 $N=50$（状态空间达 $50^{50} \approx 8.9\times 10^{84}$），朴素回溯彻底瘫痪，而从纯随机盘面出发的 Min-Conflicts 仅用 $\mathbf{87}$ \textbf{次单皇后移动（$79.71\,\text{ms}$）}就干净利落地找到零冲突解！（顺带一提，脚本中的教学版 Min-Conflicts 每步用 $O(N^2)$ 双重循环统计冲突，因此 $N=8$ 时常数耗时略高于 MRV+FC；若在工程中维护三个 $O(1)$ 列/双对角线冲突计数数组，即使 $N=10{,}000$ 也可在毫秒级秒杀。）
+\end{itemize}
+
+代码~\ref{lst:csp} 提供了通用二元 CSP 的 \textbf{AC-3 弧相容引擎}以及 $N$ 皇后的 \textbf{Min-Conflicts 局部搜索}的完整可运行 Python 实现。
+
+\begin{lstlisting}[caption={通用二元 CSP 的 AC-3 弧相容算法与 $N$ 皇后 Min-Conflicts 完整实现},label={lst:csp}]
+from collections import deque
+import numpy as np
+
+def revise(domains, xi, xj, constraint_fn):
+    """Prune values in domains[xi] lacking any consistent support in domains[xj]."""
+    revised = False
+    for x in list(domains[xi]):
+        if not any(constraint_fn(xi, x, xj, y) for y in domains[xj]):
+            domains[xi].remove(x)
+            revised = True
+    return revised
+
+def ac3(domains, neighbors, constraint_fn):
+    """Enforce arc consistency in O(e * d^3); returns False on domain wipeout."""
+    queue = deque((xi, xj) for xi in neighbors for xj in neighbors[xi])
+    while queue:
+        xi, xj = queue.popleft()
+        if revise(domains, xi, xj, constraint_fn):
+            if not domains[xi]:
+                return False          # Domain wipeout -> unsatisfiable!
+            for xk in neighbors[xi]:
+                if xk != xj:
+                    queue.append((xk, xi))
+    return True
+
+def solve_min_conflicts(n, max_steps=10000, seed=42):
+    """Solve N-Queens by iteratively moving a conflicted queen to a min-conflict col."""
+    rng = np.random.default_rng(seed)
+    q = rng.integers(0, n, size=n)
+    for step in range(1, max_steps + 1):
+        conf_rows = [
+            r for r in range(n)
+            if any(q[r2] == q[r] or abs(q[r2] - q[r]) == abs(r2 - r)
+                   for r2 in range(n) if r2 != r)
+        ]
+        if not conf_rows:
+            return q, step            # Zero-conflict complete solution found!
+        r = conf_rows[int(rng.integers(0, len(conf_rows)))]
+        counts = [
+            sum(1 for r2 in range(n)
+                if r2 != r and (q[r2] == c or abs(q[r2] - c) == abs(r2 - r)))
+            for c in range(n)
+        ]
+        best = min(counts)
+        best_cols = [c for c, cnt in enumerate(counts) if cnt == best]
+        q[r] = best_cols[int(rng.integers(0, len(best_cols)))]
+    return None, max_steps
+\end{lstlisting}
+
+\begin{insightBox}{局部搜索如何联通深度学习优化与第 5 章 MCMC 采样？}
+请记住模拟退火的 Metropolis 接受公式~\eqref{eq:metropolis}，你很快就会在两条核心主干道上与它重逢：
+\begin{enumerate}
+  \item \textbf{第 5 章的马尔可夫链蒙特卡洛（MCMC）}：把温度固定为 $T=1$，把能量换成负对数概率 $E(s) = -\ln \tilde{P}(s)$，式~\eqref{eq:metropolis} 立刻摇身变为统计采样皇冠上的明珠——\textbf{Metropolis--Hastings 算法}；
+  \item \textbf{第 4--5 卷的随机梯度下降（SGD）与余弦退火}：在深度神经网络的非凸损失地形上，小批量梯度噪声扮演的正是模拟退火中的“热涨落”，而学习率随训练步数衰减（Cosine Annealing）扮演的正是降温过程 $T_k \to 0$，帮助权重越过尖锐局部极小值、落入泛化性能更好的平坦谷底！
+\end{enumerate}
+\end{insightBox}
+
+% ======================================================================
+\section{本章习题}\label{sec:ch3-ex}
+% ======================================================================
+
+\exTier{A 组}{基础概念与启发式判别}
+
+\textbf{3.1} \quad 考察图~\ref{fig:aus-csp} 的澳大利亚地图三着色问题（$D_i=\{\text{R},\text{G},\text{B}\}$）。（1）在全图尚未赋值时，结合 MRV 与度启发式，应当优先选择哪个变量赋值？（2）假设已依次赋值 $\text{WA}=\text{R}$、$\text{NT}=\text{G}$，请列出剩余所有未赋值变量在\textbf{前向检验（FC）}后的剩余值域，并指出下一步按 MRV 应选哪个变量？（3）若此时要为 $\text{Q}$ 从 $\{\text{R},\text{B}\}$ 中挑一个颜色，按照\textbf{最少约束值启发式（LCV）}应优先尝试哪种颜色？说明理由。
+\exHint{计算 $\text{Q}=\text{R}$ 与 $\text{Q}=\text{B}$ 分别会从其未赋值邻居（$\text{SA}, \text{NSW}$）的当前值域中删去多少个值！}
+
+\textbf{3.2} \quad 简述在求解大规模 $N$ 皇后问题（如 $N=500$）时，为什么完整状态局部搜索（Min-Conflicts）在内存与运行速度上远胜朴素回溯？同时指出局部搜索相比系统化回溯（如 MAC）存在哪一项根本理论缺陷。
+\exHint{思考当一个 CSP 实例\textbf{根本无解}时，Min-Conflicts 与模拟退火会如何表现？}
+
+\exTier{B 组}{手工推演与算法追踪}
+
+\textbf{3.3} \quad 设有 4 个变量 $A, B, C, D$，初始值域为 $D_A=\{1,2,3\}$、$D_B=\{1,2,3\}$、$D_C=\{1,2\}$、$D_D=\{1,3\}$，二元约束为 $A > B$、$B \neq C$、$C < D$、$A = D$。请手工运行 \textbf{AC-3 算法}，逐轮写出队头弹出的有向弧、被删除的值域元素以及重新入队的弧，最终给出收束后的各变量值域与全部合法解（并说明为何 $D_B, D_C$ 不会继续缩小）。
+\exHint{先处理最强约束 $A = D$ 会极大加速手工推演——注意 AC-3 对任何合法的初始队列顺序最终得到的弧相容值域是唯一确定的！}
+
+\textbf{3.4} \quad 某模拟退火最小化任务当前状态能量 $E(s) = 12$，随机提出一个较差邻居 $E(s') = 15$（能量上升 $3$）。（1）分别计算当温度 $T = 10$、$T = 2$ 与 $T = 0.5$ 时，Metropolis 准则接受该上坡移动的概率 $p = \exp(-\Delta E_{\text{cost}} / T)$（保留三位有效数字）；（2）若采用指数降温 $T_k = 10 \cdot 0.9^k$，至少经过多少步降温 $k$ 后，接受 $\Delta E_{\text{cost}} = 3$ 的概率会首次低于 $1\%$？
+\exHint{解不等式 $\exp(-3 / T_k) < 0.01 \iff T_k < 3 / \ln 100 \approx 0.6514$。}
+
+\exTier{C 组}{理论证明与复杂度分析}
+
+\textbf{3.5} \quad 证明：对于任意给定的二元 CSP 实例 $(X, D, C)$，无论 AC-3 算法采用何种队列弹出顺序（例如 FIFO 队列、LIFO 栈或优先队列），只要不中途提前终止，其最终输出的弧相容值域集合 $(D_1^*, \dots, D_n^*)$ 是\textbf{唯一确定的}，且包含了原问题所有可行解的投影（即不会误删任何属于真正解的值）。
+\exHint{先用归纳法证明“每次 \texttt{REVISE} 删除的值不可能出现在任何全局解中”；再证明所有弧相容子值域在逐变量并集运算下封闭，故存在唯一的最大弧相容不动点！}
+
+\textbf{3.6} \quad 考虑一个变量数为 $n$、值域大小为 $d$ 的\textbf{树结构二元 CSP}（约束图无环）。请完整写出其两阶段无回溯精确求解算法（后序有向弧相容 + 前序贪心赋值），并严格证明：（1）该算法的正确性（若第一阶段未出现空值域，则第二阶段必然成功构造全局相容解）；（2）其最坏时间复杂度严格为 $O(n d^2)$，比通用 AC-3 的 $O(e d^3)$ 整整低了一个因子 $d$！
+\exHint{在树结构中，每个非根节点只有唯一的父节点；自底向上逐边做一遍 \texttt{REVISE(parent, child)} 后，父节点的变动绝不会反过来影响已处理好的子节点的“下游方向”。}
+
+\exTier{D 组}{代码实现与实验自检}
+
+\textbf{3.7} \quad \textbf{【代码实验：$N$ 皇后三引擎性能对决与 $O(1)$ 冲突加速】}基于 \texttt{code/vol3\_experiments.py} 中的 \texttt{exp3\_nqueens\_csp} 与代码~\ref{lst:csp}：（1）复现表~\ref{tab:nqueens-exp} 中 $N \in \{8, 12, 16, 20, 50\}$ 的朴素回溯、MRV+FC 与 Min-Conflicts 实测结果；（2）为你自己的 Min-Conflicts 实现加入三个 $O(1)$ 冲突计数数组（列计数 \texttt{col\_cnt[c]}、主对角线计数 \texttt{d1\_cnt[r-c+n]} 与副对角线计数 \texttt{d2\_cnt[r+c]}），并挑战求解 $N = 1{,}000$ 皇后！
+\textbf{【数值自检基准】}在 \texttt{seed=42} 下，必须精确复现确定性节点/步数：$N=16$ 时朴素回溯尝试 $\mathbf{160{,}712}$ 节点、MRV+FC 仅尝试 $\mathbf{44}$ 节点（缩减 $\mathbf{3{,}652}$ 倍）；$N=20$ 时 MRV+FC 为 $\mathbf{145}$ 节点；$N=50$ 时 Min-Conflicts 为 $\mathbf{87}$ 步。升级 $O(1)$ 计数器后，$N=1{,}000$ 皇后应在 $1$ 秒以内求解完毕，且必须通过独立校验函数验证所有 $\binom{N}{2}$ 对皇后冲突数为精确 $\mathbf{0}$。
+\exHint{将第 $r$ 行皇后从旧列 $c_{\text{old}}$ 移到新列 $c_{\text{new}}$ 时，只需对旧坐标计数减 $1$、对新坐标计数加 $1$，即可在 $O(N)$ 内完成整行候选列扫描（而非原版的 $O(N^2)$）。}
+
+\textbf{3.8} \quad \textbf{【代码实验：通用 AC-3 与 MAC 求解器验证】}基于代码~\ref{lst:csp} 的 \texttt{ac3} 函数，实现完整的 \textbf{MAC（回溯 + 每步赋值后调用 AC-3）} 求解器，并在以下三个测试用例上运行自动断言校验：
+\begin{enumerate}
+  \item 3 变量严格递增链 $X_1<X_2<X_3$（$D_1=D_2=\{1,2,3\},\, D_3=\{2,3\}$）；
+  \item 3 团 $K_3$ 二着色问题（$A\neq B, B\neq C, A\neq C$，$D_A=D_B=D_C=\{\text{R},\text{B}\}$）；
+  \item 澳大利亚 7 区域三着色问题（图~\ref{fig:aus-csp}），分别测试（a）无初始约束下求全部解的个数；（b）预赋值 $\text{WA}=\text{R},\, \text{Q}=\text{G}$ 后单独调用 AC-3 的返回值。
+\end{enumerate}
+\textbf{【数值自检基准】}用例 1 中单独调用 \texttt{ac3} 必须返回 \texttt{True} 且将值域精确收束为 $D_1=\{1\},\, D_2=\{2\},\, D_3=\{3\}$；用例 2 中单独调用 \texttt{ac3} 必须返回 \texttt{True} 且三者值域大小仍为 $2$（复现不完备反例），而 MAC 求解器必须在仅展开 $1$ 层试探后返回无解；用例 3(a) 中澳大利亚 7 区域 3 着色共有精确 $\mathbf{18}$ 组不同合法解（含塔斯马尼亚岛 3 色自由选择：$6 \times 3 = 18$），用例 3(b) 中仅凭单次 \texttt{ac3}（零回溯）即可瞬间返回 \texttt{False}（\textsf{SA} 值域被清空）。
+\exHint{在回溯进入下一层之前，记得对 \texttt{domains} 做深拷贝 \texttt{\{v: set(d) for v, d in domains.items()\}}，以免失败分支的删减污染兄弟分支！}

@@ -1,0 +1,695 @@
+\chapter[AI 核心概率分布与多元高斯]{AI 核心概率分布与多元高斯分布}
+\label{ch:ch2}
+
+\chapEpigraph{我几乎不知道还有什么东西，能像误差频率定律那样令人惊叹：它在最狂野的混沌之中，悄然主宰着宇宙的秩序。}{弗朗西斯·高尔顿（Francis Galton），《自然遗传》}
+
+\begin{chapIntro}{本章定位：认识人工智能的“概率乐高积木”}
+传统概率教材常按历史顺序罗列十余种分布，却很少回答“神经网络和机器学习算法到底在用哪几种，分别用在哪一层”。事实上，从逻辑回归、Softmax 分类器、大语言模型采样，到变分自编码器（VAE）、高斯过程（GP）与卡尔曼滤波，现代 AI 真正高频依赖的概率分布屈指可数，但对它们的\textbf{几何结构与矩阵运算法则}要求极深。
+
+本章将为你组装一套精炼而完整的 AI 分布工具箱，并将第 1 卷的谱定理与 Cholesky 分解彻底变现为概率几何直觉：
+\begin{enumerate}
+  \item 系统掌握四大离散主力分布（\textbf{Bernoulli、Binomial、Categorical、Poisson}）与四大连续主力分布（\textbf{Uniform、Exponential、Beta、一维高斯}），明确每一种分布在 AI 中的真实岗位，并用图形直观看见 Beta 分布如何刻画“概率的概率”；
+  \item 以第 1 卷的\textbf{实对称阵谱定理 $\Sigma = Q\Lambda Q^T$} 为手术刀，彻底解剖\textbf{多元高斯分布 $\mathcal{N}(\mu, \Sigma)$} 的椭球几何与\textbf{马氏距离（Mahalanobis Distance）}，区分各向同性、对角与全协方差三类结构；
+  \item 掌握多元高斯的\textbf{仿射变换封闭性}，顺势打通\textbf{Cholesky 采样}与第 5 卷深度生成模型的\textbf{重参数化技巧（Reparameterization Trick）}；
+  \item 建立多元高斯的\textbf{边际与条件分布公式}（主线配具体二维算例与实测切片，选读框提供优雅的分块矩阵 Schur 补推导），为线性回归、卡尔曼滤波与高斯过程铺平道路。
+\end{enumerate}
+\end{chapIntro}
+
+% =========================================================================
+\section{离散主力分布：Bernoulli、Binomial、Categorical 与 Poisson}
+\label{sec:ch2-discrete}
+
+当模型的输出是类别标签、词表索引或事件计数时，我们需要离散概率分布来建模。表 \ref{tab:ch2-discrete} 汇总了 AI 中最常出现的四个离散主力分布及其核心指标，随后逐一剖析它们的推导与工程角色。
+
+\begin{table}[htbp]
+  \centering
+  \caption{人工智能四大离散主力分布速查表}
+  \label{tab:ch2-discrete}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{23mm}p{20mm}p{33mm}p{15mm}p{17mm}X@{}}
+    \toprule
+    \textbf{分布名称} & \textbf{记号与支撑} & \textbf{概率质量函数（PMF）} & $\E[X]$ & $\Var(X)$ & \textbf{AI 核心岗位} \\
+    \midrule
+    \textbf{Bernoulli} & $\mathrm{Bern}(p)$ $x\in\{0,1\}$ & $p^x(1-p)^{1-x}$ & $p$ & $p(1-p)$ & 二分类标签（逻辑回归 / BCE）、Dropout 随机掩码 \\
+    \textbf{Binomial} & $\mathrm{Bin}(n,p)$ $k\in\{0,\dots,n\}$ & $\binom{n}{k}p^k(1-p)^{n-k}$ & $np$ & $np(1-p)$ & 测试集答对题数、A/B 测试点击次数统计 \\
+    \textbf{Categorical} & $\mathrm{Cat}(\pi)$ $y\in\{e_1,\dots,e_K\}$ & $\prod_{k=1}^K \pi_k^{y_k}$ & $\pi$（向量） & $\diag(\pi)-\pi\pi^T$ & 多分类 Softmax 输出、大语言模型下一词元分布 \\
+    \textbf{Poisson} & $\mathrm{Pois}(\lambda)$ $k\in\N$ & $e^{-\lambda}\dfrac{\lambda^k}{k!}$ & $\lambda$ & $\lambda$ & 单位时间请求/点击计数建模、泊松回归 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Bernoulli 与 Binomial：从单次试验到独立求和}
+
+\textbf{（1）Bernoulli 分布} $\mathrm{Bern}(p)$（$p \in [0, 1]$）描述最简单的“是/否”随机事件：$X=1$ 的概率为 $p$，$X=0$ 的概率为 $1-p$。它的 PMF 可以写成极其紧凑的指数形式：
+\begin{equation}
+  p(x) = p^x (1 - p)^{1 - x}, \qquad x \in \{0, 1\}. \label{eq:ch2-bern}
+\end{equation}
+这个写法并非炫技——第 5、6 章对它取负对数 $-\log p(x) = -\bigl[x\log p + (1-x)\log(1-p)\bigr]$ 时，\textbf{二元交叉熵损失（Binary Cross-Entropy, BCE）}会原封不动地跳出来！直接由定义立得期望与方差：
+\[
+  \E[X] = 1\cdot p + 0\cdot(1-p) = p, \qquad
+  \E[X^2] = 1^2\cdot p + 0^2\cdot(1-p) = p \;\implies\; \Var(X) = p - p^2 = p(1 - p).
+\]
+观察方差函数 $p(1-p)$：在 $p=0$ 或 $p=1$（结果确定）时方差为 $0$；在 $p=0.5$（最不确定）时方差达到最大值 $1/4$。在深度学习中，\textbf{Dropout} 正则化层正是按 $\mathrm{Bern}(1 - p_{\text{drop}})$ 为每个神经元生成 $0/1$ 随机掩码。
+
+\textbf{（2）Binomial 分布} $\mathrm{Bin}(n, p)$ 描述 $n$ 次\textbf{独立同分布（i.i.d.）} $\mathrm{Bern}(p)$ 试验的总成功次数 $S_n = \sum_{i=1}^n X_i$。若用组合恒等式直接求 $\sum_{k=0}^n k\binom{n}{k}p^k(1-p)^{n-k}$ 相当繁琐，但借助第 1 章的\textbf{期望线性性}与独立变量方差可加性，只需两行即可秒杀：
+\[
+  \E[S_n] = \sum_{i=1}^n \E[X_i] = np, \qquad
+  \Var(S_n) = \sum_{i=1}^n \Var(X_i) = np(1 - p).
+\]
+例如，若一个分类器在单条独立测试样本上的真实准确率为 $p = 0.85$，在 $n = 180$ 条测试样本上答对的题数就服从 $\mathrm{Bin}(180, 0.85)$，均值 $153$ 题，标准差 $\sqrt{180\times 0.85\times 0.15} \approx 4.79$ 题（对应准确率标准误约 $2.66\%$，第 5 章 Bootstrap 实测恰为 $2.63\%$！）。
+
+\subsection{Categorical 与 Poisson：多分类 Softmax 与稀疏计数}
+
+\textbf{（3）Categorical 分布（范畴分布）} $\mathrm{Cat}(\pi_1, \dots, \pi_K)$ 是 Bernoulli 分布向 $K$ 个互斥类别的自然推广，其中概率向量 $\pi = (\pi_1, \dots, \pi_K)^T$ 满足 $\pi_k \ge 0$ 且 $\sum_{k=1}^K \pi_k = 1$（位于 $K-1$ 维概率单纯形 $\Delta^{K-1}$ 上）。在机器学习中，我们通常把类别标签表示为\textbf{独热向量（One-Hot Vector）} $y \in \{0, 1\}^K$（仅真实类别所在分量为 $1$，其余为 $0$），从而 PMF 可统一写作：
+\begin{equation}
+  p(y) = \prod_{k=1}^K \pi_k^{y_k}, \qquad -\log p(y) = -\sum_{k=1}^K y_k \log \pi_k. \label{eq:ch2-cat}
+\end{equation}
+请牢记式 \eqref{eq:ch2-cat} 右边那一项——它就是贯穿所有多分类神经网络与大语言模型训练的\textbf{多类交叉熵损失}！当把 $n$ 次独立的 $\mathrm{Cat}(\pi)$ 试验向量相加，就得到\textbf{多项分布（Multinomial）}，常用于词袋模型（Bag-of-Words）统计文本词频。
+
+\textbf{（4）Poisson 分布} $\mathrm{Pois}(\lambda)$（速率参数 $\lambda > 0$）描述固定时间或空间窗口内稀有独立事件的发生次数（如每秒 API 请求数、单位面积缺陷数），PMF 为 $p(k) = e^{-\lambda}\frac{\lambda^k}{k!}$（$k=0, 1, 2, \dots$）。它是二项分布 $\mathrm{Bin}(n, \lambda/n)$ 在 $n \to \infty$、事件发生概率极小而平均次数保持为 $\lambda$ 时的极限。利用泰勒级数 $e^\lambda = \sum_{k=0}^\infty \frac{\lambda^k}{k!}$ 容易验证：
+\[
+  \E[X] = \sum_{k=1}^\infty k e^{-\lambda}\frac{\lambda^k}{k!} = \lambda e^{-\lambda}\sum_{k=1}^\infty \frac{\lambda^{k-1}}{(k-1)!} = \lambda, \qquad
+  \E[X(X-1)] = \lambda^2 \;\implies\; \Var(X) = \lambda.
+\]
+期望与方差严格相等（$\E[X] = \Var(X) = \lambda$）是识别数据是否近似服从 Poisson 分布的快捷试金石。
+
+\begin{insightBox}{现代神经网络不是在“猜答案”，而是在输出分布的参数}
+初学者常误以为分类神经网络输出的是一个硬邦邦的类别编号（如“猫”）。实际上，无论是二分类的 Sigmoid 输出 $p_\theta(x) \in (0,1)$，还是多分类与大语言模型的 Softmax 输出 $\pi_\theta(x) \in \Delta^{K-1}$，网络输出的都是\textbf{概率分布的参数}——分别定义了一个 $\mathrm{Bern}(p_\theta(x))$ 或 $\mathrm{Cat}(\pi_\theta(x))$ 分布！只有输出合法的概率分布，我们才能在第 4--6 章用极大似然估计（MLE）和交叉熵损失对其进行端到端梯度训练，并在推理时量化预测置信度。
+\end{insightBox}
+
+% =========================================================================
+\section{连续主力分布：Uniform、Exponential、Beta 与一维高斯}
+\label{sec:ch2-continuous}
+
+当需要建模连续参数、等待时间、先验概率权重或真实世界的连续测量值时，我们转向四大连续主力分布（表 \ref{tab:ch2-continuous}）。
+
+\begin{table}[htbp]
+  \centering
+  \caption{人工智能四大连续主力分布速查表}
+  \label{tab:ch2-continuous}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{21mm}p{19mm}p{33mm}p{14mm}p{26mm}X@{}}
+    \toprule
+    \textbf{分布名称} & \textbf{记号与支撑} & \textbf{概率密度函数（PDF）} & $\E[X]$ & $\Var(X)$ & \textbf{AI 核心岗位} \\
+    \midrule
+    \textbf{Uniform} & $\mathcal{U}(a,b)$ $x\in[a,b]$ & $\dfrac{1}{b-a}$ & $\dfrac{a+b}{2}$ & $\dfrac{(b-a)^2}{12}$ & 神经网络权重初始化（Xavier/He）、随机超参搜索 \\
+    \textbf{Exponential} & $\mathrm{Exp}(\lambda)$ $x\ge 0$ & $\lambda e^{-\lambda x}$ & $\dfrac{1}{\lambda}$ & $\dfrac{1}{\lambda^2}$ & 等待时间/生存分析、Gumbel-Max 与重采样构造 \\
+    \textbf{Beta} & $\mathrm{Beta}(\alpha,\beta)$ $x\in(0,1)$ & $\dfrac{x^{\alpha-1}(1-x)^{\beta-1}}{B(\alpha,\beta)}$ & $\dfrac{\alpha}{\alpha+\beta}$ & $\frac{\alpha\beta}{(\alpha+\beta)^2(\alpha+\beta+1)}$ & 概率 $p$ 的先验分布、Beta-Bernoulli 共轭、Thompson 采样 \\
+    \textbf{1D Gaussian} & $\mathcal{N}(\mu,\sigma^2)$ $x\in\R$ & $\dfrac{1}{\sqrt{2\pi}\sigma}\exp\!\left(-\dfrac{(x-\mu)^2}{2\sigma^2}\right)$ & $\mu$ & $\sigma^2$ & 回归噪声、权重 $L_2$ 先验、激活标准化与中心极限 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Uniform 与 Exponential：随机初始化与无记忆性}
+
+\textbf{（1）Uniform 分布} $\mathcal{U}(a, b)$ 在区间 $[a, b]$ 上均匀铺开概率质量，是所有计算机伪随机数生成器（\texttt{rng.random()} 产出 $\mathcal{U}(0, 1)$）的源头。在深度学习中，为了防止深层网络前向信号爆炸或消失，Xavier 初始化把线性层权重从 $\mathcal{U}(-r, r)$ 采样，并利用方差公式 $\Var = r^2 / 3$ 精确控制每层输出方差保持稳定。
+
+\textbf{（2）Exponential 分布} $\mathrm{Exp}(\lambda)$（$\lambda > 0$）描述 Poisson 过程中相邻两次事件的时间间隔，其生存函数（右尾概率）极简：$\Prob(X > t) = \int_t^\infty \lambda e^{-\lambda x}\,dx = e^{-\lambda t}$。由此立得其独一无二的\textbf{无记忆性（Memoryless Property）}：对任意 $s, t \ge 0$，
+\[
+  \Prob(X > s + t \mid X > s) = \frac{\Prob(X > s + t)}{\Prob(X > s)} = \frac{e^{-\lambda(s+t)}}{e^{-\lambda s}} = e^{-\lambda t} = \Prob(X > t).
+\]
+也就是说，如果一台服务器的无故障间隔服从指数分布，那么它“已经平稳运行了 $s$ 小时”这一事实，并不会让它未来还能撑过 $t$ 小时的概率变高或变低。
+
+\subsection{Beta 分布：刻画“关于概率的不确定性”}
+
+传统工科概率课几乎不讲 Beta 分布，但在贝叶斯机器学习、推荐系统探索-利用（Multi-Armed Bandit）和第 5 章的 MAP 估计中，Beta 分布是不可或缺的主角。为什么需要它？因为当我们想给一枚硬币的正面概率 $p \in (0, 1)$ 赋予一个\textbf{先验概率分布}时，支撑集必须恰好落在开区间 $(0, 1)$ 上！
+
+\begin{defBox}
+\begin{definition}[Beta 分布]
+\label{def:ch2-beta}
+设形状参数 $\alpha > 0,\; \beta > 0$。若连续随机变量 $X \in (0, 1)$ 的概率密度函数为
+\begin{equation}
+  p(x \mid \alpha, \beta) = \frac{1}{B(\alpha, \beta)}\, x^{\alpha - 1}(1 - x)^{\beta - 1}, \qquad x \in (0, 1), \label{eq:ch2-beta}
+\end{equation}
+其中归一化常数（Beta 函数）$B(\alpha, \beta) := \int_0^1 t^{\alpha-1}(1-t)^{\beta-1}\,dt = \frac{\Gamma(\alpha)\Gamma(\beta)}{\Gamma(\alpha+\beta)}$（对正整数有 $\Gamma(n) = (n-1)!$），则称 $X \sim \mathrm{Beta}(\alpha, \beta)$。其均值与方差分别为：
+\begin{equation}
+  \E[X] = \frac{\alpha}{\alpha + \beta}, \qquad
+  \Var(X) = \frac{\alpha\beta}{(\alpha+\beta)^2(\alpha+\beta+1)}. \label{eq:ch2-beta-moments}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+把式 \eqref{eq:ch2-beta} 的核 $x^{\alpha-1}(1-x)^{\beta-1}$ 与二项分布似然 $p^k(1-p)^{n-k}$ 放在一起看，你会立刻恍然大悟：\textbf{$\alpha - 1$ 和 $\beta - 1$ 恰好扮演了“先验伪计数（pseudo-counts）”的角色}——相当于在正式做实验前，我们已经在脑海里预设看到了 $\alpha - 1$ 次成功和 $\beta - 1$ 次失败！总强度 $\alpha + \beta$ 越大，密度峰越尖锐，代表先验信念越笃定（方差按 $\approx 1/(\alpha+\beta)$ 缩小）。
+
+图 \ref{fig:ch2-beta-shapes} 绘制了四组典型参数的 $\mathrm{Beta}(\alpha, \beta)$ 密度曲线，让你一眼看清它极强的形状可塑性：
+\begin{itemize}
+  \item $\mathrm{Beta}(1, 1)$：$p(x)=1$，退化为 $\mathcal{U}(0,1)$，代表“完全无知的均匀先验”；
+  \item $\mathrm{Beta}(2, 2)$：$p(x)=6x(1-x)$，对称钟形，柔和偏好 $p$ 靠近 $0.5$ 而避开极端值 $0$ 和 $1$；
+  \item $\mathrm{Beta}(5, 2)$：$p(x)=30x^4(1-x)$，明显右偏（均值 $5/7 \approx 0.714$，峰值在 $x=0.8$），表示先验相信成功率较高；
+  \item $\mathrm{Beta}(0.5, 0.5)$：$p(x)=\frac{1}{\pi\sqrt{x(1-x)}}$，呈 U 形（Jeffreys 无信息先验），认为 $p$ 更可能接近两个极端。
+\end{itemize}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.80\linewidth,
+      height=5.6cm,
+      xlabel={概率参数 $x \in (0, 1)$},
+      ylabel={概率密度 $p(x \mid \alpha, \beta)$},
+      xmin=0, xmax=1,
+      ymin=0, ymax=3.15,
+      xtick={0, 0.2, 0.4, 0.6, 0.8, 1.0},
+      ytick={0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0},
+      grid=major,
+      grid style={dashed, gray!25},
+      legend pos=north west,
+      legend style={at={(0.5,1.035)}, anchor=south, cells={anchor=west}, font=\scriptsize, fill=white, draw=codeborder, rounded corners=1.5pt},
+      tick label style={font=\footnotesize},
+      label style={font=\small\sffamily}
+    ]
+      % Beta(1,1) = 1
+      \addplot[color=slate, thick, dashed, domain=0:1, samples=40] {1.0};
+      \addlegendentry{$\mathrm{Beta}(1, 1)$：均匀无知先验}
+
+      % Beta(2,2) = 6 x (1-x)
+      \addplot[color=teal, very thick, domain=0:1, samples=100] {6*x*(1-x)};
+      \addlegendentry{$\mathrm{Beta}(2, 2)$：对称中庸先验（峰值 $1.5$）}
+
+      % Beta(5,2) = 30 x^4 (1-x)
+      \addplot[color=navy, very thick, domain=0:1, samples=120] {30*(x^4)*(1-x)};
+      \addlegendentry{$\mathrm{Beta}(5, 2)$：偏高先验（均值 $5/7$，峰值 $x=0.8$）}
+
+      % Beta(0.5, 0.5) = 1 / (pi * sqrt(x*(1-x)))
+      \addplot[color=ochre, thick, dotted, domain=0.015:0.985, samples=140] {1.0 / (3.14159265 * sqrt(x*(1-x)))};
+      \addlegendentry{$\mathrm{Beta}(0.5, 0.5)$：U 形极端偏好先验}
+
+      % Peak annotation for Beta(5,2)
+      \addplot[only marks, mark=*, mark size=2pt, color=navy] coordinates {(0.8, 2.4576)};
+      \node[anchor=east, font=\scriptsize\sffamily, color=navy, fill=white, fill opacity=0.85, text opacity=1, inner sep=1.5pt] at (axis cs:0.75, 2.68) {众数 $x=0.8$};
+      \draw[-{Stealth[length=1.8mm]}, color=navy, thin] (axis cs:0.75, 2.60) -- (axis cs:0.793, 2.48);
+    \end{axis}
+  \end{tikzpicture}
+  \caption{四组典型参数下的 $\mathrm{Beta}(\alpha, \beta)$ 概率密度曲线。仅调节 $(\alpha, \beta)$ 两个正数，就能在 $(0,1)$ 区间上平滑地表达“完全无知”、“中庸对称”、“偏向高成功率”乃至“偏向极端值”等任意先验信念；第 5 章的 Beta-Bernoulli 共轭更新将直接在这条曲线族内部闭环演化。}
+  \label{fig:ch2-beta-shapes}
+\end{figure}
+
+\subsection{一维高斯分布：标准化与 68--95--99.7 经验法则}
+
+一维高斯分布（正态分布）$\mathcal{N}(\mu, \sigma^2)$（均值 $\mu \in \R$，标准差 $\sigma > 0$）是连续世界最核心的基准分布：
+\[
+  p(x \mid \mu, \sigma^2) = \frac{1}{\sqrt{2\pi}\,\sigma} \exp\!\left(-\frac{(x - \mu)^2}{2\sigma^2}\right), \qquad x \in \R.
+\]
+对任意 $X \sim \mathcal{N}(\mu, \sigma^2)$，做\textbf{标准化（Z-score 变换）} $Z := \frac{X - \mu}{\sigma}$ 总能将其拉回标准正态分布 $\mathcal{N}(0, 1)$（反过来 $X = \mu + \sigma Z$）。记忆三条极其实用的置信区间概率（68--95--99.7 法则），能让你一眼心算模型误差的合理波动范围：
+\[
+  \Prob(|X-\mu|\le \sigma) \approx 68.27\%, \qquad
+  \Prob(|X-\mu|\le 2\sigma) \approx 95.45\%, \qquad
+  \Prob(|X-\mu|\le 3\sigma) \approx 99.73\%.
+\]
+高斯分布之所以在 AI 与统计学中占据统治地位，源于三大支柱：第 3 章将证明大量独立小扰动之和趋近高斯（\textbf{中心极限定理}）；第 4 章将证明在给定均值与方差的所有连续分布中，高斯具有最大熵（\textbf{最大熵原理}）；而接下来两节将揭示它在高维空间中无可替代的解析优雅性。
+
+% =========================================================================
+\section{多元高斯分布 $\mathcal{N}(\mu, \Sigma)$：谱定理下的椭球几何与马氏距离}
+\label{sec:ch2-mvg-geom}
+
+现实中的 AI 样本几乎从不是孤立的一维标量，而是存在复杂协同关系的 $d$ 维特征向量（如图像隐变量、机器人状态向量、金融资产收益）。把一维高斯的标量方差 $\sigma^2 > 0$ 升级为对称正定协方差矩阵 $\Sigma \succ 0$，便得到高维连续概率建模的绝对支柱——\textbf{多元高斯分布（Multivariate Gaussian, MVG）}。
+
+\begin{defBox}
+\begin{definition}[多元高斯分布 $\mathcal{N}(\mu, \Sigma)$]
+\label{def:ch2-mvg}
+设均值向量 $\mu \in \R^d$，协方差矩阵 $\Sigma \in \R^{d\times d}$ 为\textbf{实对称正定矩阵}（$\Sigma = \Sigma^T \succ 0$）。若随机向量 $X \in \R^d$ 具有概率密度函数
+\begin{equation}
+  p(x \mid \mu, \Sigma)
+  = \frac{1}{(2\pi)^{d/2}(\det\Sigma)^{1/2}}
+    \exp\!\left(-\frac{1}{2}(x - \mu)^T \Sigma^{-1} (x - \mu)\right), \qquad x \in \R^d,
+  \label{eq:ch2-mvg-pdf}
+\end{equation}
+则称 $X$ 服从 $d$ 维多元高斯分布，记作 $X \sim \mathcal{N}(\mu, \Sigma)$。
+\end{definition}
+\end{defBox}
+
+一眼看去，式 \eqref{eq:ch2-mvg-pdf} 像是一团令人生畏的矩阵指数，其实它完全可以从最简单的标准各向同性高斯 $Z = (Z_1, \dots, Z_d)^T \sim \mathcal{N}(0, I_d)$ 生长出来！因为 $Z_1, \dots, Z_d$ 独立同分布于 $\mathcal{N}(0,1)$，其联合密度就是一维密度的连乘：
+\[
+  p_Z(z) = \prod_{i=1}^d \frac{1}{\sqrt{2\pi}} e^{-z_i^2 / 2} = \frac{1}{(2\pi)^{d/2}} \exp\!\left(-\frac{1}{2} z^T z\right).
+\]
+现在用对称正定平方根 $\Sigma^{1/2}$（第 1 卷第 3 章）对 $Z$ 做仿射拉伸与平移：$X = \mu + \Sigma^{1/2} Z$，反解得 $z = \Sigma^{-1/2}(x - \mu)$。根据多元微积分的变量代换公式，体积拉伸雅可比行列式为 $|\det(\frac{\partial x}{\partial z})| = |\det(\Sigma^{1/2})| = (\det\Sigma)^{1/2}$，而指数上的 $z^T z$ 恰好变成
+\[
+  z^T z = (x - \mu)^T \Sigma^{-1/2} \Sigma^{-1/2} (x - \mu) = (x - \mu)^T \Sigma^{-1} (x - \mu)!
+\]
+这正是式 \eqref{eq:ch2-mvg-pdf} 中归一化因子 $(\det\Sigma)^{-1/2}$ 与二次型 $(x-\mu)^T\Sigma^{-1}(x-\mu)$ 的全部来历！
+
+\subsection{第 1 卷谱定理的巅峰变现：椭球等高面与马氏距离}
+
+现在请出第 1 卷第 3 章的王牌定理——\textbf{实对称矩阵谱定理}！由于 $\Sigma \succ 0$，它必存在正交特征分解
+\[
+  \Sigma = Q \Lambda Q^T = \sum_{i=1}^d \lambda_i q_i q_i^T,
+\]
+其中正交矩阵 $Q = [q_1, \dots, q_d]$（$Q^T Q = I_d$）的列向量是单位正交主轴，$\Lambda = \diag(\lambda_1, \dots, \lambda_d)$ 的特征值全部严格为正（$\lambda_i > 0$），且其逆矩阵即为 $\Sigma^{-1} = Q \Lambda^{-1} Q^T$。
+
+将中心化向量 $x - \mu$ 投影到特征向量构成的新正交坐标系下，记新坐标为 $y := Q^T(x - \mu)$（第 $i$ 个分量 $y_i = q_i^T(x - \mu)$）。立刻把二次型彻底解耦：
+\begin{equation}
+  d_M^2(x, \mu) := (x - \mu)^T \Sigma^{-1} (x - \mu)
+  = (x - \mu)^T Q \Lambda^{-1} Q^T (x - \mu)
+  = y^T \Lambda^{-1} y
+  = \sum_{i=1}^d \frac{y_i^2}{\lambda_i}.
+  \label{eq:ch2-mahalanobis-decouple}
+\end{equation}
+
+\begin{thmBox}
+\begin{proposition}[多元高斯的椭球几何与马氏距离]
+\label{prop:ch2-mvg-ellipsoid}
+设 $X \sim \mathcal{N}(\mu, \Sigma)$（$\Sigma = Q\Lambda Q^T \succ 0$）。定义点 $x$ 到分布中心 $\mu$ 的\textbf{马氏距离（Mahalanobis Distance）}为
+\[
+  d_M(x, \mu) := \sqrt{(x - \mu)^T \Sigma^{-1} (x - \mu)} = \norm{\Sigma^{-1/2}(x - \mu)}_2.
+\]
+则：
+\begin{enumerate}
+  \item 概率密度 $p(x)$ 仅通过 $d_M^2(x, \mu)$ 单调递减地依赖于 $x$；
+  \item 等密度曲面 $\{x \in \R^d : d_M(x, \mu) = c\}$（$c > 0$）是以 $\mu$ 为中心、以特征向量 $q_1, \dots, q_d$ 为主轴方向、各主轴半长为 $c\sqrt{\lambda_1}, \dots, c\sqrt{\lambda_d}$ 的\textbf{$d$ 维超椭球}。
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+马氏距离在异常检测、度量学习与对比表示中极为关键：普通欧氏距离 $\|x-\mu\|_2$ 盲目地认为所有方向同等重要，而马氏距离先用 $\Sigma^{-1/2}$ 把数据“白化”成各向同性球体，再量欧氏距离——等价于\textbf{在每个主轴方向上以“该方向的标准差 $\sqrt{\lambda_i}$”为尺子去衡量偏离程度}！因此，沿着数据天然拉长的长轴偏离 $2$ 个单位可能很常见，但沿着数据紧密压缩的短轴偏离 $2$ 个单位却是极罕见的异常点。
+
+\subsection{三种经典协方差结构与参数量权衡}
+
+在真实高维 AI 模型（如高斯混合模型 GMM、VAE 编码器、扩散模型）中，根据精度与算力的权衡，协方差矩阵 $\Sigma$ 通常取三种层级（图 \ref{fig:ch2-mvg-contours}）：
+\begin{enumerate}
+  \item \textbf{各向同性协方差（Isotropic）} $\Sigma = \sigma^2 I_d$：仅 $1$ 个方差参数，等高线为\textbf{正圆/超球}，各维独立且方差相同；
+  \item \textbf{对角协方差（Diagonal）} $\Sigma = \diag(\sigma_1^2, \dots, \sigma_d^2)$：仅 $d$ 个参数，等高线为\textbf{与坐标轴平行的椭圆}，各维相互独立但尺度不同（VAE 隐空间最常用的参数化方式）；
+  \item \textbf{全协方差（Full Covariance）} $\Sigma \succ 0$：含 $\frac{d(d+1)}{2}$ 个独立参数，等高线为\textbf{任意倾斜的椭圆}，能完整刻画维度之间的线性相关性，但在高维（如 $d = 10{,}000$）时存储与求逆代价高昂。
+\end{enumerate}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[font=\footnotesize\sffamily]
+    % -------- Panel 1: Isotropic --------
+    \begin{scope}[xshift=0cm]
+      \node[font=\small\sffamily\bfseries, color=tealDark] at (0, 2.76) {(a) 各向同性 $\Sigma = \sigma^2 I$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (-2.05, 0) -- (2.15, 0) node[right, font=\scriptsize] {$x_1$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (0, -1.95) -- (0, 2.05) node[above, font=\scriptsize] {$x_2$};
+
+      \fill[tealLight, opacity=0.45] (0,0) circle (1.50cm);
+      \fill[tealLight, opacity=0.70] (0,0) circle (1.00cm);
+      \draw[teal!50, thick] (0,0) circle (1.50cm);
+      \draw[teal, thick] (0,0) circle (1.00cm);
+      \draw[tealDark, very thick] (0,0) circle (0.50cm);
+      \fill[ink] (0,0) circle (1.4pt);
+
+      \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, ochre, thick] (0,0) -- (0.707, 0.707) node[midway, above left, xshift=0pt, yshift=2pt, fill=white, inner sep=0.6pt, font=\scriptsize, text=ochre] {$\sigma$};
+      \node[below, font=\scriptsize, color=slate, align=center] at (0, -2.10) {正圆等高线，各向等方差\\参数量：$1$};
+    \end{scope}
+
+    % -------- Panel 2: Diagonal --------
+    \begin{scope}[xshift=5.3cm]
+      \node[font=\small\sffamily\bfseries, color=navy] at (0, 2.76) {(b) 对角阵 $\Sigma = \diag(\sigma_1^2, \sigma_2^2)$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (-2.15, 0) -- (2.25, 0) node[right, font=\scriptsize] {$x_1$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (0, -1.95) -- (0, 2.05) node[above, font=\scriptsize] {$x_2$};
+
+      \fill[navyLight, opacity=0.55] (0,0) ellipse (1.80cm and 0.75cm);
+      \draw[navy!50, thick] (0,0) ellipse (1.80cm and 0.75cm);
+      \draw[navy, thick] (0,0) ellipse (1.20cm and 0.50cm);
+      \draw[navy, very thick] (0,0) ellipse (0.60cm and 0.25cm);
+      \fill[ink] (0,0) circle (1.4pt);
+
+      \draw[-{Stealth[length=1.6mm]}, ochre, thick] (0,0) -- (1.20, 0) node[below, fill=white, inner sep=0.7pt, pos=0.68, font=\scriptsize, text=ochre] {$\sigma_1$};
+      \draw[-{Stealth[length=1.6mm]}, ochre, thick] (0,0) -- (0, 0.50) node[left, fill=white, inner sep=0.7pt, pos=0.65, font=\scriptsize, text=ochre] {$\sigma_2$};
+      \node[below, font=\scriptsize, color=slate, align=center] at (0, -2.10) {轴对齐椭圆，$X_1 \indep X_2$\\参数量：$d$};
+    \end{scope}
+
+    % -------- Panel 3: Full Covariance --------
+    \begin{scope}[xshift=10.75cm]
+      \node[font=\small\sffamily\bfseries, color=ochre] at (0, 2.76) {(c) 全协方差 $\Sigma = Q\Lambda Q^T$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (-2.15, 0) -- (2.25, 0) node[right, font=\scriptsize] {$x_1$};
+      \draw[-{Stealth[length=1.8mm]}, slate!70] (0, -1.95) -- (0, 2.05) node[above, font=\scriptsize] {$x_2$};
+
+      % Tilted ellipse at 25.1 deg (matching [[4, 1.8],[1.8, 1.0]] aspect ratio ~ 5.5 -> softened slightly for clarity)
+      \begin{scope}[rotate=27]
+        \fill[ochreLight, opacity=0.65] (0,0) ellipse (1.85cm and 0.62cm);
+        \draw[ochre!55, thick] (0,0) ellipse (1.85cm and 0.62cm);
+        \draw[ochre, thick] (0,0) ellipse (1.24cm and 0.42cm);
+        \draw[ochre, very thick] (0,0) ellipse (0.62cm and 0.21cm);
+        % Eigenvectors
+        \draw[-{Stealth[length=2mm]}, tealDark, very thick] (0,0) -- (1.24, 0) node[right, xshift=1pt, yshift=3pt, font=\scriptsize\bfseries, color=tealDark] {$\sqrt{\lambda_1}\,q_1$};
+        \draw[-{Stealth[length=2mm]}, navy, very thick] (0,0) -- (0, 0.42) node[above left, xshift=4pt, yshift=1pt, font=\scriptsize\bfseries, color=navy] {$\sqrt{\lambda_2}\,q_2$};
+      \end{scope}
+      \fill[ink] (0,0) circle (1.4pt);
+      \node[below, font=\scriptsize, color=slate, align=center] at (0, -2.10) {倾斜椭圆，主轴沿特征向量\\参数量：$d(d+1)/2$};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{三种经典协方差结构对应的二维高斯等密度轮廓线（$d_M(x,\mu) = 0.5, 1.0, 1.5$）。全协方差情形中，谱分解 $\Sigma = Q\Lambda Q^T$ 直接指明了倾斜椭圆的正交主轴方向 $q_1, q_2$ 与半轴尺度 $\sqrt{\lambda_1}, \sqrt{\lambda_2}$。}
+  \label{fig:ch2-mvg-contours}
+\end{figure}
+
+\begin{failBox}{奇异协方差矩阵陷阱与“拒绝显式求逆”原则}
+在真实高维场景中，若两列特征线性相关（如同时放进“身高（厘米）”与“身高（米）”），或者样本量少于特征维度（$N < d$），经验协方差矩阵 $\hat{\Sigma}$ 的最小特征值必为 $0$（$\det\hat{\Sigma} = 0$，仅半正定而非正定）。此时 $\hat{\Sigma}^{-1}$ 不存在，高斯密度函数在全空间 $\R^d$ 上退化为一个集中在低维超平面上的奇异分布。
+
+\textbf{两大工程铁律}：（1）当协方差矩阵可能病态或奇异时，添加微量对角正则项 $\Sigma_\epsilon = \Sigma + \epsilon I_d$（称为 \textbf{jitter / 岭平滑}，常见 $\epsilon = 10^{-6}$）确保严格正定；（2）在计算马氏距离 $(x-\mu)^T\Sigma^{-1}(x-\mu)$ 与对数行列式 $\log\det\Sigma$ 时，\textbf{永远不要显式调用 \texttt{np.linalg.inv(Sigma)}}！正确做法是先做 Cholesky 分解 $\Sigma = L L^T$，解下三角方程组 $L v = x - \mu$，立得：
+\[
+  d_M^2(x, \mu) = \|v\|_2^2, \qquad
+  \log\det\Sigma = 2\sum_{i=1}^d \log L_{ii}.
+\]
+此法既快一倍、数值精度高出数个量级，还能彻底避免 $\det\Sigma$ 在高维下溢为 $0$！
+\end{failBox}
+
+% =========================================================================
+\section{仿射封闭性、重参数化技巧与条件/边际高斯分布}
+\label{sec:ch2-affine-cond}
+
+多元高斯之所以成为概率图模型、状态估计与深度生成模型的“万金油”，不仅因为它的密度公式优美，更因为它在\textbf{仿射变换、边际化、条件化}这三大基本运算下\textbf{全部保持封闭——结果依然是精确的多元高斯}！
+
+\subsection{仿射变换封闭性、Cholesky 采样与 VAE 重参数化}
+
+\begin{thmBox}
+\begin{theorem}[多元高斯的仿射变换封闭性]
+\label{thm:ch2-affine}
+设 $X \sim \mathcal{N}(\mu, \Sigma)$（$X \in \R^d$），$A \in \R^{m\times d}$ 为任意确定性矩阵，$b \in \R^m$ 为任意确定性向量，则仿射变换后的随机向量 $Y := A X + b \in \R^m$ 依然服从多元高斯分布：
+\begin{equation}
+  Y = A X + b \;\sim\; \mathcal{N}\bigl(A\mu + b,\; A\Sigma A^T\bigr). \label{eq:ch2-affine}
+\end{equation}
+（当 $A\Sigma A^T$ 仅半正定时，该分布理解为支撑在其列空间上的退化多元高斯分布。）
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}[核心验证（均值、协方差与可逆情形密度）]
+由命题 \ref{prop:ch1-cov-psd}，无需任何额外假设已严格证得 $\E[Y] = A\mu + b$ 与 $\Cov(Y) = A\Sigma A^T$。下面对 $m=d$ 且 $A$ 可逆的情形直接验证密度形式：由反变换 $x = A^{-1}(y - b)$，雅可比行列式为 $|\det(A^{-1})| = |\det A|^{-1}$，代入式 \eqref{eq:ch2-mvg-pdf}：
+\begin{align*}
+  p_Y(y) &= p_X\bigl(A^{-1}(y - b)\bigr)\cdot |\det A|^{-1} \\
+  &= \frac{1}{(2\pi)^{d/2}\bigl(\det(A\Sigma A^T)\bigr)^{1/2}}
+    \exp\!\left(-\frac{1}{2}(y - A\mu - b)^T (A\Sigma A^T)^{-1}(y - A\mu - b)\right),
+\end{align*}
+其中用到了 $(\det\Sigma)^{1/2}|\det A| = (\det(A\Sigma A^T))^{1/2}$ 与 $(A^{-1})^T\Sigma^{-1}A^{-1} = (A\Sigma A^T)^{-1}$。一般非方阵或降秩矩阵 $A$ 的完整证明借助特征函数 $\varphi_X(t) = \E[e^{it^T X}] = \exp(it^T\mu - \frac{1}{2}t^T\Sigma t)$，代入 $\varphi_Y(s) = e^{is^T b}\varphi_X(A^T s)$ 一行即得。
+\end{proof}
+
+定理 \ref{thm:ch2-affine} 直接送给我们人工智能中最常用的两项实战绝技：
+
+\textbf{绝技一：Cholesky 采样（如何从任意 $\mathcal{N}(\mu, \Sigma)$ 生成样本）}。计算机最擅长生成独立标准正态随机数 $Z \sim \mathcal{N}(0, I_d)$。给定任意目标正定协方差阵 $\Sigma \succ 0$，对其做 Cholesky 分解 $\Sigma = L L^T$（$L$ 为对角元全正的下三角矩阵），然后令
+\begin{equation}
+  X = \mu + L Z. \label{eq:ch2-cholesky-sample}
+\end{equation}
+由定理 \ref{thm:ch2-affine}，立即有 $\E[X] = \mu + L\cdot 0 = \mu$，且 $\Cov(X) = L I_d L^T = L L^T = \Sigma$！这正是 \texttt{numpy} 底层生成相关多元高斯样本的标准算法。
+
+\begin{insightBox}{绝技二：第 5 卷 VAE 的重参数化技巧（Reparameterization Trick）}
+在变分自编码器（VAE，第 5 卷）中，编码器网络输出隐变量分布的参数 $\mu_\phi(x) \in \R^d$ 与标准差向量 $\sigma_\phi(x) \in \R_+^d$，随后需要采样 $z \sim \mathcal{N}\bigl(\mu_\phi(x),\; \diag(\sigma_\phi^2(x))\bigr)$ 送入解码器算损失。如果直接把“采样”塞进计算图，反向传播走到随机采样节点就会断链——你无法对随机数发生器求导！
+
+定理 \ref{thm:ch2-affine} 提供了天才般的绕道方案：把随机性抽离成与网络参数 $\phi$ 无关的标准噪声 $\varepsilon \sim \mathcal{N}(0, I_d)$，再通过确定性的仿射变换构造隐变量：
+\[
+  z = \mu_\phi(x) + \sigma_\phi(x) \had \varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I_d).
+\]
+由于每个分量满足 $\Var(\sigma_{\phi,i}\varepsilon_i) = \sigma_{\phi,i}^2$，$z$ 拥有与直接采样\textbf{完全相同的概率分布}；但现在 $z$ 成了参数 $(\mu_\phi, \sigma_\phi)$ 的光滑可微函数（$\frac{\partial z}{\partial \mu_\phi} = I$，$\frac{\partial z}{\partial \sigma_\phi} = \diag(\varepsilon)$），梯度便畅通无阻地穿过采样层回传至编码器！
+\end{insightBox}
+
+\subsection{多元高斯的边际分布与条件分布}
+
+在预测与贝叶斯推断中，我们最常面对这样的问题：已知一个联合高斯向量 $X$ 的一部分分量 $X_2 = x_2$（已观测特征或历史状态），如何精确推断未观测部分 $X_1$（待预测目标或隐藏状态）的概率分布？把 $X \in \R^d$ 按维度切分为两块 $X = \begin{pmatrix} X_1 \\ X_2 \end{pmatrix}$（$X_1 \in \R^{d_1},\; X_2 \in \R^{d_2},\; d_1+d_2=d$），并将均值与协方差矩阵同步分块：
+\[
+  \begin{pmatrix} X_1 \\ X_2 \end{pmatrix}
+  \;\sim\;
+  \mathcal{N}\!\left(
+    \begin{pmatrix} \mu_1 \\ \mu_2 \end{pmatrix},\;
+    \begin{pmatrix} \Sigma_{11} & \Sigma_{12} \\ \Sigma_{21} & \Sigma_{22} \end{pmatrix}
+  \right), \qquad \Sigma_{21} = \Sigma_{12}^T,\; \Sigma \succ 0.
+\]
+
+\begin{thmBox}
+\begin{theorem}[多元高斯的边际分布与条件分布]
+\label{thm:ch2-cond-mvg}
+在上述分块多元高斯模型下：
+\begin{enumerate}
+  \item \textbf{边际分布（Marginal Distribution）}：直接截取对应分块即可，
+  \begin{equation}
+    X_1 \sim \mathcal{N}(\mu_1,\; \Sigma_{11}), \qquad X_2 \sim \mathcal{N}(\mu_2,\; \Sigma_{22}). \label{eq:ch2-marginal}
+  \end{equation}
+  \item \textbf{条件分布（Conditional Distribution）}：给定观测 $X_2 = x_2$ 后，$X_1$ 仍服从精确的多元高斯分布：
+  \begin{equation}
+    X_1 \mid (X_2 = x_2) \;\sim\; \mathcal{N}\bigl(\mu_{1\mid 2},\; \Sigma_{1\mid 2}\bigr), \label{eq:ch2-cond}
+  \end{equation}
+  其中条件均值与条件协方差矩阵分别为：
+  \begin{align}
+    \mu_{1\mid 2} &= \mu_1 + \Sigma_{12}\Sigma_{22}^{-1}(x_2 - \mu_2), \label{eq:ch2-cond-mean} \\
+    \Sigma_{1\mid 2} &= \Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21}. \label{eq:ch2-cond-cov}
+  \end{align}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+边际分布 \eqref{eq:ch2-marginal} 的证明仅需一行：令 $A = \begin{pmatrix} I_{d_1} & 0 \end{pmatrix}$，于是 $X_1 = A X$，直接套用定理 \ref{thm:ch2-affine} 即得 $A\mu = \mu_1$ 与 $A\Sigma A^T = \Sigma_{11}$！
+
+在深入证明条件公式 \eqref{eq:ch2-cond-mean}--\eqref{eq:ch2-cond-cov} 之前，请先静心品味这两条公式揭示的三条深刻直觉（它们将反复出现在卡尔曼滤波、高斯过程与线性回归中）：
+\begin{itemize}
+  \item \textbf{条件均值是观测的线性修正}：未看到 $x_2$ 前，对 $X_1$ 的最佳猜测是先验均值 $\mu_1$；看到 $x_2$ 偏离预期 $\mu_2$ 的“新息（innovation）” $x_2 - \mu_2$ 后，乘以\textbf{增益矩阵} $K := \Sigma_{12}\Sigma_{22}^{-1}$ 对猜测做线性修正。若 $X_1$ 与 $X_2$ 不相关（$\Sigma_{12} = 0$），修正项归零，说明在联合高斯下“不相关 $\implies$ 独立”！
+  \item \textbf{条件方差与具体观测值 $x_2$ 无关}：式 \eqref{eq:ch2-cond-cov} 右侧根本不含 $x_2$！无论 $X_2$ 测出的是 $3$ 还是 $30$，只要知道它落在某个精确值上，残留的不确定度 $\Sigma_{1\mid 2}$ 都是同一个常数矩阵。
+  \item \textbf{观测永不增加不确定性}：由于 $\Sigma_{22} \succ 0$，减去的项 $\Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21} = (\Sigma_{12}\Sigma_{22}^{-1/2})(\Sigma_{12}\Sigma_{22}^{-1/2})^T \succeq 0$，故必有 $\Sigma_{1\mid 2} \preceq \Sigma_{11}$！只要 $X_1$ 与 $X_2$ 存在相关性（$\Sigma_{12} \neq 0$），观测 $X_2$ 就严格压缩 $X_1$ 的方差。
+\end{itemize}
+
+\begin{example}[二维相关高斯的精确条件切片与 50,000 样本实测校验]
+\label{ex:ch2-cond-2d}
+考虑二维联合高斯分布 $X = (X_1, X_2)^T \sim \mathcal{N}(\mu, \Sigma)$，其中：
+\[
+  \mu = \begin{pmatrix} 1.0 \\ 2.0 \end{pmatrix}, \qquad
+  \Sigma = \begin{pmatrix} 4.0 & 1.8 \\ 1.8 & 1.0 \end{pmatrix}.
+\]
+先检查正定性：$\Sigma_{11} = 4.0 > 0$ 且 $\det\Sigma = 4.0\times 1.0 - 1.8^2 = 0.76 > 0$，合法正定！两维相关系数高达 $\rho = \frac{1.8}{\sqrt{4.0}\cdot\sqrt{1.0}} = 0.90$。在没有任何观测前，$X_1$ 的边际分布是 $\mathcal{N}(1.0, 4.0)$（标准差 $\sigma_1 = 2.0$，相当宽泛）。
+
+现在假设我们精确观测到 $X_2 = 3.0$（比均值 $\mu_2 = 2.0$ 高了 $1$ 个单位）。代入式 \eqref{eq:ch2-cond-mean}--\eqref{eq:ch2-cond-cov}：
+\begin{align*}
+  \mu_{1\mid 2} &= 1.0 + \frac{1.8}{1.0}\,(3.0 - 2.0) = \mathbf{2.80}, \\
+  \Var(X_1 \mid X_2 = 3.0) &= 4.0 - \frac{1.8^2}{1.0} = 4.0 - 3.24 = \mathbf{0.76}\quad (\sigma_{1\mid 2} \approx 0.872).
+\end{align*}
+仅仅观测了 $X_2 = 3.0$，对 $X_1$ 的预期中心就从 $1.0$ 精准拉升到 $2.80$，而方差则从 $4.00$ 暴跌至 $0.76$——\textbf{不确定性缩减了整整 $81\%$}（恰好等于 $\rho^2 = 0.90^2 = 0.81$）！
+
+用配套脚本 \texttt{code/vol2\_experiments.py} 通过 Cholesky 因子 $L = \begin{psmallmatrix} 2.0 & 0 \\ 0.9 & \sqrt{0.19} \end{psmallmatrix}$ 独立采样 $50{,}000$ 个二维样本，筛选落在薄条带 $|X_2 - 3.0| < 0.05$ 内的 $n = 1{,}214$ 个样本统计 $X_1$ 的经验均值与方差，实测结果为：
+\[
+  \hat{\mu}_{1\mid 2} = \mathbf{2.775}\;(\text{理论值 } 2.800), \qquad
+  \widehat{\Var}_{1\mid 2} = \mathbf{0.778}\;(\text{理论值 } 0.760).
+\]
+理论公式与大样本几何切片完美吻合（图 \ref{fig:ch2-cond-slice}）。
+\end{example}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[font=\footnotesize\sffamily]
+    % -------- Left Panel: 2D Contour + Horizontal Slice X2 = 3 --------
+    \begin{scope}[xshift=0cm]
+      \node[font=\small\sffamily\bfseries, color=tealDark] at (1.5, 3.95) {(a) 二维联合高斯等高线与切片 $X_2 = 3$};
+
+      % Coordinate mapping: draw in scaled cm: x_draw = 0.72 * x1, y_draw = 0.82 * x2
+      % Axes: x1 in [-3.5, 5.8] -> [-2.52, 4.18], x2 in [-0.2, 4.2] -> [-0.16, 3.44]
+      \draw[-{Stealth[length=2mm]}, slate] (-2.2, 0) -- (4.35, 0) node[right, font=\scriptsize] {$X_1$};
+      \draw[-{Stealth[length=2mm]}, slate] (0, -0.3) -- (0, 3.35) node[above, font=\scriptsize] {$X_2$};
+
+      % Ticks
+      \foreach \x in {-2, 1, 3, 5} {
+        \draw[slate] (0.72*\x, 0.06) -- (0.72*\x, -0.06) node[below, font=\scriptsize] {$\x$};
+      }
+      \foreach \y in {1, 2, 3} {
+        \draw[slate] (0.06, 0.82*\y) -- (-0.06, 0.82*\y) node[left, font=\scriptsize] {$\y$};
+      }
+
+      % Mean (1, 2) -> (0.72, 1.64).
+      % True Sigma = [[4, 1.8],[1.8, 1]]: eigvals = 4.843, 0.157 -> sqrt = 2.201, 0.396, angle 25.1 deg.
+      % Under (0.72, 0.82) scale, plot parametric ellipses directly:
+      % x(t) = mu + c * L * (cos t, sin t)^T with L = [[2, 0],[0.9, 0.4359]]
+      \draw[teal!45, thick, fill=tealLight, fill opacity=0.55, domain=0:360, samples=90, variable=\t]
+        plot ({0.72*(1 + 2.0*(2.0*cos(\t)))}, {0.82*(2 + 2.0*(0.9*cos(\t) + 0.4359*sin(\t)))});
+      \draw[teal, thick, domain=0:360, samples=90, variable=\t]
+        plot ({0.72*(1 + 1.3*(2.0*cos(\t)))}, {0.82*(2 + 1.3*(0.9*cos(\t) + 0.4359*sin(\t)))});
+      \draw[tealDark, very thick, domain=0:360, samples=90, variable=\t]
+        plot ({0.72*(1 + 0.65*(2.0*cos(\t)))}, {0.82*(2 + 0.65*(0.9*cos(\t) + 0.4359*sin(\t)))});
+
+      % Mean dot
+      \fill[tealDark] (0.72, 1.64) circle (2pt);
+      \node[below right, font=\scriptsize, color=tealDark] at (0.37, 0.65) {$\mu=(1,2)^T$};
+
+      % Horizontal slice line X2 = 3.0 -> y_draw = 2.46
+      \draw[ochre, very thick, dashed] (-2.0, 2.46) -- (4.2, 2.46);
+      \node[above left, font=\scriptsize\bfseries, color=ochre] at (4.25, 3.36) {观测切片 $X_2 = 3.0$};
+
+      % Conditional mean point (2.8, 3.0) -> (2.016, 2.46)
+      \fill[ochre] (2.016, 2.46) circle (2.3pt);
+      \draw[ochre, dotted, thick] (2.016, 2.46) -- (2.016, 0);
+      \node[below, font=\scriptsize\bfseries, color=ochre] at (2.016, -0.32) {$\mu_{1\mid 2}=2.8$};
+    \end{scope}
+
+    % -------- Right Panel: Marginal vs Conditional 1D Gaussian PDFs --------
+    \begin{scope}[xshift=6.8cm, yshift=-0.1cm]
+      \begin{axis}[
+        width=7.1cm,
+        height=4.85cm,
+        title={\small\sffamily\bfseries\color{navy}(b) 边际分布 vs 条件切片分布},
+        title style={yshift=-2pt},
+        xlabel={$x_1$},
+        ylabel={密度 $p(x_1)$},
+        xmin=-4, xmax=6.5,
+        ymin=0, ymax=0.73,
+        xtick={-3, -1, 1, 2.8, 5},
+        xticklabels={$-3$, $-1$, $1$, $2.8$, $5$},
+        grid=major,
+        grid style={dashed, gray!25},
+        legend pos=north west,
+        legend style={font=\scriptsize, fill=white, draw=codeborder, rounded corners=1pt},
+        tick label style={font=\scriptsize},
+        label style={font=\scriptsize\sffamily}
+      ]
+        % Marginal N(1, 4): sigma=2
+        \addplot[color=teal, thick, dashed, domain=-4:6.5, samples=100]
+          {exp(-0.5*((x-1.0)/2.0)^2) / (sqrt(2*3.14159)*2.0)};
+        \addlegendentry{边际 $X_1\sim\mathcal{N}(1.0,\,4.00)$}
+
+        % Conditional N(2.8, 0.76): sigma=0.8718
+        \addplot[color=ochre, very thick, domain=-4:6.5, samples=120]
+          {exp(-0.5*((x-2.8)/0.8718)^2) / (sqrt(2*3.14159)*0.8718)};
+        \addlegendentry{条件 $X_1\mid(X_2=3)\sim\mathcal{N}(2.8,\,0.76)$}
+
+        % Vertical guides
+        \draw[teal, dotted] (axis cs:1.0, 0) -- (axis cs:1.0, 0.20);
+        \draw[ochre, dotted] (axis cs:2.8, 0) -- (axis cs:2.8, 0.46);
+      \end{axis}
+    \end{scope}
+  \end{tikzpicture}
+  \caption{例 \ref{ex:ch2-cond-2d} 的几何可视化。（a）沿 $X_2=3.0$ 对倾斜二维高斯椭球作水平切片，切面中心精准右移至 $\mu_{1\mid 2}=2.8$；（b）对比边际密度（虚线，方差 $4.00$）与条件切片密度（实线，方差 $0.76$），直观展示观测相关变量如何同时修正均值并大幅压缩不确定性。}
+  \label{fig:ch2-cond-slice}
+\end{figure}
+
+\begin{extBox}{条件高斯的优雅证明：分块矩阵去相关与 Schur 补}
+很多教材通过繁琐的分块矩阵求逆硬拆二次型来证明定理 \ref{thm:ch2-cond-mvg}，但借助\textbf{线性去相关 + 仿射封闭性}，只需五步就能优雅证完，并自然引出线性代数中的\textbf{Schur 补（Schur Complement）}！
+
+\textbf{第 1 步：构造与 $X_2$ 不相关的残差向量 $U$}。设 $K := \Sigma_{12}\Sigma_{22}^{-1} \in \R^{d_1\times d_2}$，构造块下三角可逆线性变换：
+\[
+  \begin{pmatrix} U \\ X_2 \end{pmatrix}
+  := \begin{pmatrix} I_{d_1} & -K \\ 0 & I_{d_2} \end{pmatrix} \begin{pmatrix} X_1 \\ X_2 \end{pmatrix}
+  = \begin{pmatrix} X_1 - K X_2 \\ X_2 \end{pmatrix}.
+\]
+\textbf{第 2 步：由定理 \ref{thm:ch2-affine} 算联合协方差矩阵}。令变换阵为 $M = \begin{psmallmatrix} I & -K \\ 0 & I \end{psmallmatrix}$，直接做分块矩阵乘法：
+\begin{align*}
+  M \Sigma M^T
+  &= \begin{pmatrix} I & -K \\ 0 & I \end{pmatrix}
+     \begin{pmatrix} \Sigma_{11} & \Sigma_{12} \\ \Sigma_{21} & \Sigma_{22} \end{pmatrix}
+     \begin{pmatrix} I & 0 \\ -K^T & I \end{pmatrix} \\
+  &= \begin{pmatrix} \Sigma_{11} - K\Sigma_{21} & \Sigma_{12} - K\Sigma_{22} \\ \Sigma_{21} & \Sigma_{22} \end{pmatrix}
+     \begin{pmatrix} I & 0 \\ -K^T & I \end{pmatrix}
+   = \begin{pmatrix} \Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21} & 0 \\ 0 & \Sigma_{22} \end{pmatrix}.
+\end{align*}
+右上角 $\Sigma_{12} - K\Sigma_{22} = \Sigma_{12} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{22} = 0$ 彻底消去！左上角留下的矩阵 $\Sigma / \Sigma_{22} := \Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21}$ 正是分块矩阵 $\Sigma$ 关于 $\Sigma_{22}$ 的 \textbf{Schur 补}。
+
+\textbf{第 3 步：联合高斯 + 零协方差 $\implies$ 严格独立}。由于 $(U, X_2)$ 是 $X$ 的仿射变换，它们依然服从联合多元高斯分布，且协方差阵为块对角阵，于是其联合密度完美分解为 $p(u, x_2) = p(u)\,p(x_2)$，即 \textbf{$U \indep X_2$}！同时，$U \sim \mathcal{N}\bigl(\mu_1 - K\mu_2,\; \Sigma / \Sigma_{22}\bigr)$。
+
+\textbf{第 4 步：还原 $X_1$ 并固定 $X_2 = x_2$}。反写 $X_1 = U + K X_2$。在给定 $X_2 = x_2$ 的条件下，$K x_2$ 变成确定性常向量，而 $U$ 与 $X_2$ 独立故分布丝毫不变！因此
+\begin{align*}
+  X_1 \mid (X_2 = x_2) = U + K x_2
+  &\;\sim\; \mathcal{N}\bigl(\mu_1 - K\mu_2 + K x_2,\; \Sigma / \Sigma_{22}\bigr) \\
+  &\;=\; \mathcal{N}\bigl(\mu_1 + \Sigma_{12}\Sigma_{22}^{-1}(x_2 - \mu_2),\; \Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21}\bigr).
+\end{align*}
+顺带一提，对 $M\Sigma M^T = \diag(\Sigma / \Sigma_{22}, \Sigma_{22})$ 两边取行列式，因 $\det M = 1$，立刻附赠一条重要恒等式：$\det\Sigma = (\det\Sigma_{22})\det(\Sigma_{11} - \Sigma_{12}\Sigma_{22}^{-1}\Sigma_{21})$，证明了只要 $\Sigma \succ 0$，条件协方差 $\Sigma_{1\mid 2}$ 必然严格正定！
+\end{extBox}
+
+\subsection{纯 NumPy 实战：Cholesky 采样、无求逆马氏距离与条件切片检验}
+
+代码 \ref{lst:ch2-mvg-code} 完整实现了本章核心算法：用 Cholesky 生成例 \ref{ex:ch2-cond-2d} 的 $50{,}000$ 个二维高斯样本、用 \texttt{np.linalg.solve}（绝不调用 \texttt{inv}）批量计算马氏距离并检验 $\E[d_M^2]=d=2$，以及验证条件切片 $X_1\mid(X_2\approx 3.0)$ 的均值与方差。
+
+\begin{lstlisting}[caption={纯 NumPy 多元高斯 Cholesky 采样、无求逆马氏距离与条件切片实测}, label={lst:ch2-mvg-code}]
+import numpy as np
+
+rng = np.random.default_rng(42)
+mu = np.array([1.0, 2.0])
+Sigma = np.array([[4.0, 1.8],
+                  [1.8, 1.0]])
+
+# 1. Cholesky 采样（对齐 vol2_experiments.py）
+L = np.linalg.cholesky(Sigma)
+Z = rng.normal(size=(50000, 2))
+X = mu + Z @ L.T
+print("Empirical mean:", np.round(X.mean(axis=0), 3))
+print("Empirical cov:\n", np.round(np.cov(X, rowvar=False), 3))
+
+# 2. 无显式求逆的批量马氏距离：解 L @ V = (X - mu)^T
+V = np.linalg.solve(L, (X - mu).T)          # shape (2, 50000)
+d_maha_sq = np.sum(V ** 2, axis=0)          # 平方马氏距离
+log_det = 2.0 * np.sum(np.log(np.diag(L)))  # 稳定的 log det(Sigma)
+print(f"Mean d_M^2 = {d_maha_sq.mean():.3f} (exact d=2.000), log|Sigma| = {log_det:.4f}")
+
+# 3. 条件分布切片 X1 | (X2 ~ 3.0) 验证
+# 理论精确值: mu_{1|2} = 1 + (1.8/1.0)*(3-2) = 2.800, var_{1|2} = 4 - 1.8^2/1 = 0.760
+mask = np.abs(X[:, 1] - 3.0) < 0.05
+print(f"Slice n={mask.sum()}: emp_mean={X[mask, 0].mean():.3f} (exact 2.800), "
+      f"emp_var={X[mask, 0].var():.3f} (exact 0.760)")
+\end{lstlisting}
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch2-exercises}
+
+\exTier{A. 概念辨析与反例查错}{合上书独立作答，精准锁定多元高斯与核心分布的边界条件}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（核心分布与多元高斯概念辨析）} 判断以下四个命题正误；对错误命题给出反例或反驳理由，对正确命题简述依据：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 若随机变量 $X_1 \sim \mathcal{N}(0, 1)$ 且 $X_2 \sim \mathcal{N}(0, 1)$，则二维随机向量 $(X_1, X_2)^T$ 必服从二维联合高斯分布；
+    \item 对任意速率参数 $\lambda > 0$，Poisson 分布 $\mathrm{Pois}(\lambda)$ 的均值与方差恒相等；
+    \item 若随机向量 $(X_1, X_2)^T$ 服从二维联合高斯分布且 $\Cov(X_1, X_2) = 0$，则 $X_1$ 与 $X_2$ 必相互独立；
+    \item 在分块多元高斯条件分布 $X_1 \mid (X_2 = x_2)$ 中，条件协方差矩阵 $\Sigma_{1\mid 2}$ 随观测值 $x_2$ 偏离 $\mu_2$ 越远而增大。
+  \end{enumerate}
+
+  \item \textbf{（非法协方差阵与欧氏 vs 马氏距离反直觉查错）}
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 某同学试图用 $\Sigma = \begin{pmatrix} 1.0 & 1.2 \\ 1.2 & 1.0 \end{pmatrix}$ 作为二维高斯分布的协方差矩阵，请用两种方法（特征值 / 相关系数）迅速指出其错误所在；
+    \item 给定对角高斯 $\mathcal{N}\bigl(0, \diag(16, 1)\bigr)$，比较两点 $a = (4, 0)^T$ 与 $b = (0, 2)^T$ 到原点的欧氏距离、马氏距离及概率密度大小，解释为何“欧氏距离更近的点 $b$ 反而落在了概率密度更低的尾部区域”。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手打通离散分布、Beta 先验与二维高斯条件推断}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（二项评测概率与 Beta 先验手算）}
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 设某二分类器在单条独立测试样本上的准确率为 $p = 0.8$，现抽取 $n = 5$ 条独立测试样本，求答对题数 $S_5$ 的期望、方差，以及“至少答对 $4$ 题”的精确概率 $\Prob(S_5 \ge 4)$；
+    \item 考虑先验分布 $X \sim \mathrm{Beta}(3, 2)$：手算归一化常数 $B(3, 2)$、密度函数显式表达式、均值 $\E[X]$、方差 $\Var(X)$ 与众数（密度极大值点 $x^*$），并解释该分布对应多少次“先验伪计数”。
+  \end{enumerate}
+
+  \item \textbf{（2D 多元高斯椭球主轴与条件分布精确手算）} 给定二维多元高斯分布
+  \[
+    X = \begin{pmatrix} X_1 \\ X_2 \end{pmatrix}
+    \;\sim\;
+    \mathcal{N}\!\left(\begin{pmatrix} 0 \\ 1 \end{pmatrix},\; \begin{pmatrix} 5 & 2 \\ 2 & 2 \end{pmatrix}\right).
+  \]
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 手算协方差矩阵 $\Sigma$ 的全部特征值与单位正交特征向量，指出等密度椭圆 $d_M^2(x, \mu) = 1$ 的长短半轴长度；
+    \item 求点 $x = (2, 3)^T$ 到均值 $\mu$ 的平方马氏距离 $d_M^2(x, \mu)$；
+    \item 若观测到 $X_2 = 3$，求条件分布 $X_1 \mid (X_2 = 3)$ 的精确均值与方差，并计算观测 $X_2$ 带来的方差缩减比例。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{高维高斯理论与深度学习高频用到的核心结论}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（独立高斯之和与样本均值的 $1/\sqrt{n}$ 标准误）}
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 设 $X_1 \sim \mathcal{N}(\mu_1, \Sigma_1)$ 与 $X_2 \sim \mathcal{N}(\mu_2, \Sigma_2)$ 是 $\R^d$ 中相互独立的两个随机向量。先写出拼接向量 $\begin{pmatrix} X_1 \\ X_2 \end{pmatrix} \in \R^{2d}$ 的联合高斯分布，再仅用定理 \ref{thm:ch2-affine}（选取恰当矩阵 $A$）一步证明：$X_1 + X_2 \sim \mathcal{N}(\mu_1 + \mu_2,\; \Sigma_1 + \Sigma_2)$；
+    \item 推广至 $n$ 个独立同分布一维高斯样本 $X_1, \dots, X_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \sigma^2)$，求出样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$ 的精确分布，并指出为何样本量扩大 $4$ 倍才能把估计标准误减半。
+  \end{enumerate}
+  \exHint{第 (1) 问因 $X_1 \indep X_2$，拼接向量的联合协方差矩阵是块对角阵 $\diag(\Sigma_1, \Sigma_2)$；取 $A = \begin{pmatrix} I_d & I_d \end{pmatrix}$ 即可。}
+
+  \item \textbf{（白化等价性与高维高斯薄球壳现象）} 设 $X \sim \mathcal{N}(\mu, \Sigma)$（$X \in \R^d,\; \Sigma \succ 0$），定义白化随机向量 $Z := \Sigma^{-1/2}(X - \mu)$。
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 证明 $Z \sim \mathcal{N}(0, I_d)$，且平方马氏距离满足 $d_M^2(X, \mu) = \|Z\|_2^2 = \sum_{i=1}^d Z_i^2$；
+    \item 利用标准正态四阶矩 $\E[Z_i^4] = 3$，证明 $\E[d_M^2(X, \mu)] = d$ 且 $\Var\bigl(d_M^2(X, \mu)\bigr) = 2d$；
+    \item 结合第 (2) 问解释高维空间的反直觉现象：虽然高斯密度在均值 $\mu$ 处最高，但当维度 $d = 1{,}000$ 时，绝大多数随机样本并不在 $\mu$ 附近，而是聚集在马氏半径约 $\sqrt{d} \approx 31.6$ 的薄球壳上！
+  \end{enumerate}
+  \exHint{对独立的 $Z_i \sim \mathcal{N}(0,1)$，$\Var(Z_i^2) = \E[Z_i^4] - (\E[Z_i^2])^2 = 3 - 1^2 = 2$，再对 $i=1,\dots,d$ 用方差可加性。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用纯 NumPy 验证高维高斯采样、条件推断与异常检测}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（3D 高斯 Cholesky 采样、白化还原与多元条件切片验证）} 设 3 维多元高斯参数为：
+  \[
+    \mu = (1.0, -1.0, 2.0)^T, \qquad
+    \Sigma = \begin{pmatrix} 4.0 & 1.2 & -0.8 \\ 1.2 & 2.0 & 0.6 \\ -0.8 & 0.6 & 1.5 \end{pmatrix}.
+  \]
+  使用 \texttt{np.random.default\_rng(2026)} 通过 Cholesky 分解采样 $N = 200{,}000$ 个三维样本，完成以下三项验证：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 验证经验均值、经验协方差与理论 $\mu, \Sigma$ 的最大绝对误差；
+    \item 通过 \texttt{np.linalg.solve(L, (X - mu).T)} 将样本白化还原为 $W$，计算 $W$ 的经验协方差与平方马氏距离样本均值/方差（对比习题 2.6 的理论值 $d=3$ 与 $2d=6$）；
+    \item 用定理 \ref{thm:ch2-cond-mvg} 精确算出 $X_1 \mid (X_2 = 0.0,\; X_3 = 2.5)$ 的理论条件均值与方差，并与经验薄切片 $\{|X_2 - 0.0|<0.15 \text{ 且 } |X_3 - 2.5|<0.15\}$ 的统计量对照。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,经验协方差与白化协方差的逐元素最大绝对误差均须小于 $0.03$；平方马氏距离均值须落在 $[2.95, 3.05]$、方差落在 $[5.85, 6.15]$；理论条件均值应为 $1.4242$、理论条件方差为 $2.2606$，切片经验均值与方差的绝对偏差均须小于 $0.15$。}
+
+  \item \textbf{（欧氏距离 vs 马氏距离的隐蔽异常检测实战）} 构造二维零均值相关高斯 $\mathcal{N}(0, \Sigma)$，其中 $\Sigma = \begin{psmallmatrix} 4.0 & 1.8 \\ 1.8 & 1.0 \end{psmallmatrix}$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 用 \texttt{np.random.default\_rng(2026)} 生成 $2{,}000$ 个正常样本；
+    \item 求出 $\Sigma$ 最小特征值对应的单位短轴特征向量 $u_{\min}$，沿 $\pm 1.8\,u_{\min}$ 附近（加标准差 $0.05$ 的微小高斯抖动）注入 $20$ 个“欧氏距离很小、但违背变量相关性”的隐蔽异常点；
+    \item \textbf{禁止调用 \texttt{np.linalg.inv}}，仅用 \texttt{np.linalg.cholesky} 与 \texttt{np.linalg.solve} 实现向量化马氏距离；分别按欧氏距离和马氏距离选出得分最高的 $25$ 个候选点，统计两种方法对 $20$ 个隐蔽异常点的召回数量（Recall@25）。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,由于异常点欧氏半径仅约 $1.8$（小于正常长轴标准差 $\sqrt{\lambda_1}\approx 2.20$），欧氏距离的 Recall@25 应接近 $0/20$（$\le 2/20$）；而异常点马氏距离高达 $\approx 4.54$，马氏距离的 Recall@25 必须达到 $20/20$（$100\%$）。}
+\end{enumerate}

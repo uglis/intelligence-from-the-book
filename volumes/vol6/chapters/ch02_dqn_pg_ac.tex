@@ -1,0 +1,542 @@
+\chapter[深度价值、策略梯度与 Actor-Critic]{深度价值学习与策略梯度定理\\（DQN、REINFORCE 与 Actor-Critic）}
+\label{ch:dqn-pg-ac}
+
+\chapEpigraph{凡是我们必须学会去做的事，我们正是通过去做来学会的。}{Aristotle（亚里士多德，《尼各马可伦理学》）}
+
+\begin{chapIntro}{本章导读：告别查表时代，驶入深度强化学习双航道}
+第~\ref{ch:model-free-rl} 章的表格型算法虽然拥有优美的收敛保证，却面临一道无法逾越的维度高墙：一帧 $84 \times 84$ 的灰度游戏画面便有 $256^{7056}$ 种状态，而机械臂的关节位置与角速度更是连续实数向量——地球上所有的原子加起来也存不下一张 $Q[s, a]$ 表。
+
+为了赋予智能体泛化到未知状态的能力，我们必须用参数化神经网络替代查表。然而，神经网络与强化学习的联姻远非“把 $Q$ 表换成 MLP”那般平顺。本章完整勾勒现代深度强化学习的\textbf{两条主航道}：
+\begin{enumerate}
+  \item \textbf{基于价值的深度航道（DQN）}：亲手推导一个两状态反例，看清\textbf{函数逼近 $+$ 自举 $+$ 异策略}组成的“致命三元组”如何令训练指数爆炸；随后剖析 DQN 赖以起死回生的两大稳定器——\textbf{经验回放}与\textbf{目标网络}。
+  \item \textbf{基于策略的梯度航道（Policy Gradient）}：绕开对离散 $\argmax$ 的依赖，直接参数化随机策略 $\pi_\theta(a\mid s)$。完整证明\textbf{策略梯度定理}（揭示为何环境转移核 $P$ 奇迹般地完全消去）与\textbf{基线零偏降方差定理}，并推导统一偏差与方差的 \textbf{Actor-Critic 与广义优势估计 GAE($\lambda$)}。
+  \item \textbf{实测验证}：在带正偏移奖励的 12 步随机控制任务上，用 PyTorch 实测对比无基线 REINFORCE、价值基线 REINFORCE 与 GAE Actor-Critic，亲眼见证基线如何将方差压缩近 $4\times$ 并解锁高效收敛。
+\end{enumerate}
+\end{chapIntro}
+
+\section{价值函数逼近、致命三元组与 DQN}
+\label{sec:dqn-triad}
+
+\subsection{从查表到参数化 $Q_\theta(s, a)$ 与致命三元组}
+
+当状态空间 $\mathcal{S}$ 巨大或连续时，我们引入参数为 $\theta \in \R^d$ 的神经网络 $Q_\theta(s, a)$ 来逼近最优动作价值函数 $Q^*(s, a)$。仿照 Q-Learning，自然想到用随机梯度下降最小化单步贝尔曼均方误差：
+\begin{equation}
+  \mathcal{L}(\theta) = \frac{1}{2}\,\E_{(s, a, r, s') \sim \mathcal{D}}\!\left[\left(y - Q_\theta(s, a)\right)^2\right], \qquad
+  y = r + \gamma \max_{a' \in \mathcal{A}} Q_\theta(s', a').
+  \label{eq:naive-dqn-loss}
+\end{equation}
+在反向传播时，按第 1 章习题~\textbf{6.1.8} 提到的\textbf{半梯度（Semi-Gradient）}约定，我们将目标 $y$ 视作常量（截断对目标中 $\theta$ 的求导），得到更新方向
+\[
+  \theta \leftarrow \theta + \alpha \!\left(r + \gamma \max_{a'} Q_\theta(s', a') - Q_\theta(s, a)\right) \nabla_\theta Q_\theta(s, a).
+\]
+
+然而，如果直接把这套看似天衣无缝的算法丢给神经网络训练，你会震惊地发现：\textbf{即便是在极其简单的环境里，价值估计也会剧烈震荡甚至发散至无穷大！} Sutton 与 Barto 将导致深度价值学习发散的罪魁祸首归纳为\textbf{致命三元组（The Deadly Triad）}：
+\begin{enumerate}
+  \item \textbf{函数逼近（Function Approximation）}：不同状态共享同一套参数 $\theta$；修改 $Q_\theta(s, a)$ 会不可避免地连带改变其他状态 $Q_\theta(s', a')$ 的预测值。
+  \item \textbf{自举（Bootstrapping）}：训练目标 $y$ 依赖于网络自身的后继预测 $Q_\theta(s', a')$，导致监督学习的“标签”本身在每一步都在移动。
+  \item \textbf{异策略训练（Off-Policy Training）}：更新所用的样本分布 $\mu$ 与目标策略所诱导的平稳状态分布不匹配，打破了投影贝尔曼算子的压缩性。
+\end{enumerate}
+
+绝不要以为发散只是深度非线性网络才会遇到的边缘故障——下面的两状态线性反例证明，哪怕只有一个标量参数 $w \in \R$、且真实价值函数完全可以被该模型精确表示，致命三元组依然能让半梯度 TD 指数爆炸！
+
+\begin{thmBox}
+\begin{example}[Tsitsiklis--Van Roy 两状态致命三元组发散反例]
+\label{ex:deadly-triad}
+考虑仅含两个状态的无奖励马尔可夫过程：$s_1 \xrightarrow{r=0} s_2$ 与 $s_2 \xrightarrow{r=0} s_2$（自环），折扣因子 $\gamma = 0.9$。显然真实价值恒为零：$V^*(s_1) = V^*(s_2) = 0$。
+
+我们采用一维线性逼近 $V_w(s) = w\,\phi(s)$，其中特征设为 $\phi(s_1) = 1, \phi(s_2) = 2$。注意最优解 $w^* = 0$ 可以\textbf{零误差}精确表示真值！现在假设在异策略采样下，每步以概率 $p = 0.5$ 采样转移 $(s_1 \to s_2)$、以概率 $1-p = 0.5$ 采样转移 $(s_2 \to s_2)$，执行半梯度 TD(0) 更新 $w \leftarrow w + \alpha [0 + \gamma V_w(s') - V_w(s)] \phi(s)$：
+\begin{itemize}
+  \item 若抽到 $(s_1 \to s_2)$：$\Delta w_1 = \alpha(\gamma \cdot 2w - 1w)\cdot 1 = \alpha(2\gamma - 1) w = 0.8\alpha w$；
+  \item 若抽到 $(s_2 \to s_2)$：$\Delta w_2 = \alpha(\gamma \cdot 2w - 2w)\cdot 2 = 4\alpha(\gamma - 1) w = -0.4\alpha w$。
+\end{itemize}
+取期望更新：
+\[
+  \E[w_{t+1} \mid w_t] = w_t + \frac{1}{2}(0.8\alpha w_t) + \frac{1}{2}(-0.4\alpha w_t) = (1 + 0.2\alpha)\, w_t.
+\]
+只要初值 $w_0 \neq 0$，\textbf{无论学习率 $\alpha > 0$ 选得多么微小}，$|w_t| = (1 + 0.2\alpha)^t |w_0| \to +\infty$ 必然指数发散！
+\end{example}
+\end{thmBox}
+
+反例的物理机制一针见血：在 $(s_1 \to s_2)$ 这一步，$V_w(s_1) = w$ 试图追赶更大的自举目标 $\gamma V_w(s_2) = 1.8w$，于是把权重 $w$ 往大了推；但由于 $s_1$ 与 $s_2$ 共享参数 $w$，且 $\phi(s_2) = 2\phi(s_1)$，把 $w$ 推大后，目标 $\gamma V_w(s_2)$ 跑得比 $V_w(s_1)$ \emph{还要快}！如同追逐自己拉长的影子，正反馈循环瞬间失控。（Baird 著名的 7 状态星形反例正是这一机制的多维版本。）
+
+\subsection{DQN 的两大核心稳定器：经验回放与目标网络}
+
+2013--2015 年，DeepMind 凭借\textbf{深度 Q 网络（Deep Q-Network, DQN）}首次用端到端卷积网络在 Atari 2600 游戏上达到人类专家水平（Mnih et al., 2015）。DQN 并没有在理论上彻底消灭致命三元组，但它用两项极为精妙的工程与算法稳定器，成功驯服了深度异策略自举的烈马：
+
+\begin{defBox}
+\begin{definition}[DQN 的两大核心稳定机制]
+\begin{enumerate}
+  \item \textbf{经验回放（Experience Replay）}：维护一个定容循环缓冲区 $\mathcal{D} = \{(s_i, a_i, r_i, s'_i, d_i)\}_{i=1}^N$（其中 $d_i \in \{0, 1\}$ 为终止标志）。每次梯度更新时，从 $\mathcal{D}$ 中\textbf{均匀随机采样}一个小批量 $\mathcal{B}$ 执行 SGD，带来双重红利：
+  \begin{itemize}
+    \item \emph{打破时间相关性}：在线交互相邻帧高度相似（如连续 30 帧球都在向左飞），直接在线更新会导致网络灾难性遗忘其他状态；随机打乱回放使小批量重新近似满足 SGD 所依赖的独立同分布（i.i.d.）假设。
+    \item \emph{提升样本效率}：因为 Q-Learning 是异策略的，每条昂贵的交互样本可以被反复复用数十次。
+  \end{itemize}
+  \item \textbf{目标网络（Target Network）}：额外维护一份参数延迟同步的副本网络 $Q_{\theta^-}$，在计算贝尔曼目标时彻底冻结 $\theta^-$：
+  \begin{equation}
+    y_i^{\mathrm{DQN}} = r_i + \gamma (1 - d_i) \max_{a' \in \mathcal{A}} Q_{\theta^-}(s'_i, a'), \qquad
+    \mathcal{L}_{\mathrm{DQN}}(\theta) = \frac{1}{|\mathcal{B}|}\sum_{i \in \mathcal{B}} \ell_{\mathrm{Huber}}\!\left(y_i^{\mathrm{DQN}} - Q_\theta(s_i, a_i)\right).
+    \label{eq:dqn-loss}
+  \end{equation}
+  每隔 $C$ 步执行一次硬同步 $\theta^- \leftarrow \theta$（或在连续控制中每步执行 Polyak 软更新 $\theta^- \leftarrow \tau \theta + (1-\tau)\theta^-$，$\tau \approx 0.005$）。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+目标网络的妙处在于它\textbf{暂时切断了“追逐自己影子”的正反馈环}：在两次同步间隔的 $C$ 步里，$y_i^{\mathrm{DQN}}$ 是完全静止的监督回归标签，式~\eqref{eq:dqn-loss} 退化为一个良态的监督学习问题（常配以 Huber 损失以防偶发极端 TD 误差引发梯度爆炸）。
+
+在原始 DQN 之上，两项几乎零额外开销的改进成为现代价值网络标配：
+\begin{itemize}
+  \item \textbf{Double DQN}（van Hasselt et al., 2016）：将第~\ref{ch:model-free-rl} 章的 Double Q-Learning 嫁接到现成的双网络 $(\theta, \theta^-)$ 上——用在线网络 $\theta$ \emph{选动作}，用目标网络 $\theta^-$ \emph{评价值}：
+  \[
+    y_i^{\mathrm{DDQN}} = r_i + \gamma (1 - d_i)\, Q_{\theta^-}\!\left(s'_i,\; \argmax_{a' \in \mathcal{A}} Q_\theta(s'_i, a')\right).
+  \]
+  仅改一行代码，便大幅压制了深层网络中的 Q 值高估泡沫。
+  \item \textbf{Dueling DQN}（Wang et al., 2016）：将网络末层分叉为状态价值头 $V_\theta(s)$ 与优势头 $A_\theta(s, a)$，并减去动作均值以保证分解唯一可辨识：
+  \[
+    Q_\theta(s, a) = V_\theta(s) + \left(A_\theta(s, a) - \frac{1}{|\mathcal{A}|}\sum_{a' \in \mathcal{A}} A_\theta(s, a')\right).
+  \]
+  在许多动作对短期局势影响微弱的状态下，网络不必遍历每个动作也能直接学好整体状态价值 $V_\theta(s)$。
+\end{itemize}
+
+\begin{lstlisting}[caption={Double DQN 核心损失函数与目标网络软更新（简洁 PyTorch 实现）}]
+def ddqn_loss(q_net, target_net, batch, gamma=0.99):
+    s, a, r, ns, done = batch                   # a: (B, 1), done: (B,) in {0.0, 1.0}
+    q_sa = q_net(s).gather(1, a).squeeze(-1)    # 当前 Q_theta(s, a)
+    with torch.no_grad():                       # 关键：彻底阻断目标分支梯度
+        best_a = q_net(ns).argmax(dim=1, keepdim=True)
+        next_q = target_net(ns).gather(1, best_a).squeeze(-1)
+        target = r + gamma * (1.0 - done) * next_q
+    return F.smooth_l1_loss(q_sa, target)       # Huber 损失抑制大 TD 误差震荡
+\end{lstlisting}
+
+\section{策略梯度定理：完整严格证明与 REINFORCE}
+\label{sec:pg-theorem}
+
+\subsection{为什么需要直接优化策略 $\pi_\theta(a \mid s)$？}
+
+尽管 DQN 家族在 Atari 离散动作游戏中大放异彩，价值学习范式在面对现代 AI 的两大主战场——\textbf{连续物理控制}与\textbf{大语言模型生成}——时却捉襟见肘：
+\begin{enumerate}
+  \item \textbf{高维或连续动作空间中无法求解 $\max_a Q_\theta(s, a)$}：如果机械臂动作是 $\R^{20}$ 的连续力矩向量，或大语言模型每步需从 $10^5$ 词表中自回归生成整段推理链，每步训练都去对一个非凸神经网络求 $\argmax_a$ 在计算上完全不可行。
+  \item \textbf{无法自然表示最优随机策略}：在剪刀石头布或存在感知混淆的部分可观测迷宫中，任何确定性贪心策略都会被对手读穿或陷入死循环，唯有随机策略才是最优解。
+  \item \textbf{策略优化的平滑性}：在价值法中，网络参数 $\theta$ 的微小扰动可能导致 $\argmax_a Q_\theta(s, a)$ 发生剧烈跳变；而直接参数化平滑概率分布 $\pi_\theta(a \mid s)$（如离散 Softmax 或连续高斯分布 $\mathcal{N}(\mu_\theta(s), \Sigma_\theta)$）时，策略概率随 $\theta$ 连续可微，天然契合梯度上升。
+\end{enumerate}
+
+\subsection{策略梯度定理的完整推导}
+
+设参数化随机策略为 $\pi_\theta(a \mid s)$。在有限视野 $T$ 的回合制 MDP 中，一条完整轨迹 $\tau = (s_0, a_0, r_0, \dots,\allowbreak s_{T-1}, a_{T-1}, r_{T-1}, s_T)$ 由初始分布 $\rho_0(s_0)$、策略 $\pi_\theta$ 与环境转移核 $P$ 共同生成，其联合概率密度/质量为
+\begin{equation}
+  p_\theta(\tau) = \rho_0(s_0) \prod_{t=0}^{T-1} \pi_\theta(a_t \mid s_t)\, P(s_{t+1} \mid s_t, a_t).
+  \label{eq:traj-prob}
+\end{equation}
+记整条轨迹的总（折扣）回报为 $R(\tau) = \sum_{t=0}^{T-1} \gamma^t r_t$（不失一般性，在无折扣有限视野下取 $\gamma = 1$）。策略优化的目标是最大化期望回报：
+\[
+  J(\theta) = \E_{\tau \sim p_\theta}[R(\tau)] = \int p_\theta(\tau)\, R(\tau)\,\mathrm{d}\tau.
+\]
+
+初看之下，求 $\nabla_\theta J(\theta)$ 似乎是不可能完成的任务：参数 $\theta$ 不仅直接决定策略如何选动作，还通过未知的黑盒环境转移核 $P$ 间接改变了未来访问到哪些状态！但下面这条被誉为现代强化学习“核心引擎”的定理证明：\textbf{未知的 $\rho_0$ 与 $P$ 会在对数求导的瞬间奇迹般地全部抵消！}
+
+\begin{thmBox}
+\begin{theorem}[策略梯度定理（Policy Gradient Theorem）与因果性形式]
+\label{thm:pg-theorem}
+假设对所有合法轨迹 $\tau$，$\pi_\theta(a_t \mid s_t) > 0$ 且关于 $\theta$ 连续可微，并满足积分与求导可交换的常规正则条件。则目标函数 $J(\theta) = \E_{\tau \sim p_\theta}[R(\tau)]$ 的精确梯度为：
+\begin{equation}
+  \nabla_\theta J(\theta)
+  = \E_{\tau \sim p_\theta}\!\left[\left(\sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\right) R(\tau)\right].
+  \label{eq:pg-raw}
+\end{equation}
+进一步利用时间因果性（当前动作 $a_t$ 无法影响过去时刻 $t' < t$ 已发生的奖励 $r_{t'}$），式~\eqref{eq:pg-raw} 可精确化简为\textbf{未来回报（Reward-to-Go）形式}与\textbf{动作价值形式}：
+\begin{align}
+  \nabla_\theta J(\theta)
+  &= \E_{\tau \sim p_\theta}\!\left[\sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, G_t\right]
+  \label{eq:pg-rtg} \\
+  &= \E_{\tau \sim p_\theta}\!\left[\sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, Q^{\pi_\theta}(s_t, a_t)\right],
+  \label{eq:pg-q}
+\end{align}
+其中 $G_t = \sum_{k=t}^{T-1} \gamma^{k-t} r_k$（当目标本身带 $\gamma^t$ 折扣时，式~\eqref{eq:pg-rtg} 中 $G_t$ 外层对应因子 $\gamma^t$，工程中常省略该折扣因子以保持各步更新尺度一致）。
+\end{theorem}
+\begin{proof}
+\textbf{第一步：对数导数技巧（Log-Derivative Trick / Score Function）}。由于 $(\ln f(\theta))' = \frac{f'(\theta)}{f(\theta)}$，恒有 $\nabla_\theta p_\theta(\tau) = p_\theta(\tau)\,\nabla_\theta \ln p_\theta(\tau)$。将其代入目标梯度：
+\begin{align*}
+  \nabla_\theta J(\theta)
+  &= \nabla_\theta \int p_\theta(\tau)\, R(\tau)\,\mathrm{d}\tau
+   = \int \nabla_\theta p_\theta(\tau)\, R(\tau)\,\mathrm{d}\tau \\
+  &= \int p_\theta(\tau)\, \nabla_\theta \ln p_\theta(\tau)\, R(\tau)\,\mathrm{d}\tau
+   = \E_{\tau \sim p_\theta}\!\left[\nabla_\theta \ln p_\theta(\tau)\, R(\tau)\right].
+\end{align*}
+
+\textbf{第二步：环境动力学彻底消去}。对式~\eqref{eq:traj-prob} 两边取自然对数，乘积化为求和：
+\[
+  \ln p_\theta(\tau) = \underbrace{\ln \rho_0(s_0)}_{\text{不含 }\theta}
+  + \sum_{t=0}^{T-1} \ln \pi_\theta(a_t \mid s_t)
+  + \sum_{t=0}^{T-1} \underbrace{\ln P(s_{t+1} \mid s_t, a_t)}_{\text{不含 }\theta}.
+\]
+对 $\theta$ 求梯度，所有与环境机制有关的 $\ln \rho_0$ 与 $\ln P$ 项求导恒为零，只剩下策略自身：
+\[
+  \nabla_\theta \ln p_\theta(\tau) = \sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t).
+\]
+代回第一步，即得式~\eqref{eq:pg-raw}！这解释了为什么我们\textbf{完全不需要环境可微，甚至无需知晓环境模型}，仅凭采样轨迹就能无偏估计精确的策略梯度。
+
+\textbf{第三步：利用因果性削去过去奖励（令 $\gamma = 1$ 为例，带 $\gamma$ 时同理）}。将式~\eqref{eq:pg-raw} 按双重求和展开：
+\[
+  \nabla_\theta J(\theta) = \sum_{t=0}^{T-1} \sum_{t'=0}^{T-1} \E_{\tau \sim p_\theta}\!\left[\nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, r_{t'}\right].
+\]
+考察任意满足 $t' < t$ 的“过去奖励项”。记时刻 $t$ 决策前的历史为 $h_t = (s_0, a_0, r_0, \dots, s_t)$，则 $r_{t'}$ 在给定 $h_t$ 下已是完全确定的常量。应用重期望公式（先对 $a_t \sim \pi_\theta(\cdot \mid s_t)$ 求条件期望）：
+\begin{align*}
+  \E_{\tau}\!\left[\nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, r_{t'}\right]
+  &= \E_{h_t}\!\left[r_{t'}\, \E_{a_t \sim \pi_\theta(\cdot \mid s_t)}\!\left[\nabla_\theta \ln \pi_\theta(a_t \mid s_t)\right]\right] \\
+  &= \E_{h_t}\!\left[r_{t'} \sum_{a_t} \pi_\theta(a_t \mid s_t) \frac{\nabla_\theta \pi_\theta(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}\right] \\
+  &= \E_{h_t}\!\left[r_{t'}\, \nabla_\theta \!\left(\sum_{a_t} \pi_\theta(a_t \mid s_t)\right)\right]
+   = \E_{h_t}\!\left[r_{t'} \cdot \nabla_\theta(1)\right] = 0.
+\end{align*}
+因此所有 $t' < t$ 的项在期望下精确为零，只剩 $t' \ge t$ 的未来回报之和 $G_t = \sum_{t'=t}^{T-1} r_{t'}$，即证式~\eqref{eq:pg-rtg}。
+
+\textbf{第四步：条件期望化为 $Q^{\pi_\theta}$}。在式~\eqref{eq:pg-rtg} 中对每项条件于 $(s_t, a_t)$ 再取重期望，由定义 $\E[G_t \mid s_t, a_t] = Q^{\pi_\theta}(s_t, a_t)$，立得式~\eqref{eq:pg-q}。
+\end{proof}
+\end{thmBox}
+
+用单批采样轨迹 $\tau^{(1)}, \dots, \tau^{(M)}$ 的经验均值替换式~\eqref{eq:pg-rtg} 中的期望，执行梯度上升
+\[
+  \theta \leftarrow \theta + \alpha \cdot \frac{1}{M}\sum_{i=1}^M \sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta\!\left(a_t^{(i)} \mid s_t^{(i)}\right) G_t^{(i)},
+\]
+就得到了 Williams（1992）提出的经典蒙特卡洛策略梯度算法——\textbf{REINFORCE}。
+
+它的直观几何含义异常迷人：$\nabla_\theta \ln \pi_\theta(a_t \mid s_t)$ 指向“提高动作 $a_t$ 出现对数概率”的方向。若某条轨迹的未来回报 $G_t$ 高，我们就沿着该方向大力拉升 $a_t$ 的概率；若 $G_t$ 为负，就压低 $a_t$ 的概率。本质上，REINFORCE 就像一场\textbf{由未来回报 $G_t$ 加权的极大似然分类学习}！
+
+\section{基线零偏降方差定理与优势函数}
+\label{sec:pg-baseline}
+
+然而，朴素 REINFORCE 在实际训练中常常慢如蜗牛甚至剧烈抖动。究其原因，看看下面这个极其简单的思想实验：
+
+假设某任务中无论你做得好坏，每条轨迹的奖励都整体平移了 $+1000$（好动作拿 $+1002$，烂动作拿 $+998$）。虽然最优策略丝毫未变，但朴素 REINFORCE 看到 $+998$ 是个巨大的正数，仍会疯狂\emph{调高}烂动作的概率！它只能寄希望于好动作被拉升得比烂动作“稍微多那么 $0.4\%$”，而在有限样本采样噪声面前，这种微弱差值瞬间就被 $+1000$ 带来的巨大梯度方差彻底淹没！
+
+解决这一痛点的关键无比优雅：\textbf{从 $G_t$ 中减去一个仅依赖状态 $s_t$ 的基线（Baseline）$b(s_t)$}，改看动作“比平均水平好多少”！我们必须先证明：这个减法\textbf{丝毫不会引入任何梯度偏差}。
+
+\begin{thmBox}
+\begin{theorem}[状态基线的零偏性（Zero-Bias Baseline Theorem）]
+\label{thm:baseline-unbiased}
+设 $b: \mathcal{S} \to \R$ 是\textbf{仅依赖于状态 $s_t$（而不依赖于当前动作 $a_t$）}的任意确定性函数。则对任意状态 $s_t$ 均有
+\begin{equation}
+  \E_{a_t \sim \pi_\theta(\cdot \mid s_t)}\!\left[\nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, b(s_t)\right] = 0.
+  \label{eq:baseline-zero}
+\end{equation}
+因而带基线的策略梯度与原策略梯度完全相等（严格无偏）：
+\begin{equation}
+  \nabla_\theta J(\theta)
+  = \E_{\tau \sim p_\theta}\!\left[\sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\,\big(G_t - b(s_t)\big)\right].
+  \label{eq:pg-baseline}
+\end{equation}
+\end{theorem}
+\begin{proof}
+由于 $b(s_t)$ 不含动作 $a_t$，在关于 $a_t \sim \pi_\theta(\cdot \mid s_t)$ 求期望时可直接提至期望之外：
+\begin{align*}
+  \E_{a_t \sim \pi_\theta(\cdot \mid s_t)}\!\left[\nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, b(s_t)\right]
+  &= b(s_t) \sum_{a_t \in \mathcal{A}} \pi_\theta(a_t \mid s_t)\, \frac{\nabla_\theta \pi_\theta(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)} \\
+  &= b(s_t)\, \nabla_\theta \!\left(\sum_{a_t \in \mathcal{A}} \pi_\theta(a_t \mid s_t)\right)
+   = b(s_t)\, \nabla_\theta(1) = 0.
+\end{align*}
+（对于连续动作空间，将求和换为积分 $\int \pi_\theta(a_t\mid s_t)\,\mathrm{d}a_t = 1$，证明完全相同。）再由重期望公式对外层轨迹分布取期望，即知减去 $b(s_t)$ 后式~\eqref{eq:pg-baseline} 的期望与式~\eqref{eq:pg-rtg} 精确相等。
+\end{proof}
+\end{thmBox}
+
+那么，什么是最好的基线 $b(s_t)$？在状态 $s_t$ 处，我们可以对梯度估计量 $g_b = \nabla_\theta \ln \pi_\theta(a \mid s)(G - b)$ 的方差求极小值（见下面命题与习题~\textbf{6.2.4}）：当一维参数导数记作 $u(a) = \partial_\theta \ln \pi_\theta(a\mid s)$ 时，方差
+\[
+  \Var(g_b) = \E\!\left[u(a)^2 (G - b)^2\right] - \big(\E[u(a) G]\big)^2
+\]
+关于 $b$ 求导置零，得理论最优基线为梯度平方加权期望 $b^* = \frac{\E[u(a)^2 G]}{\E[u(a)^2]}$。在多维参数下逐维加权过于繁琐，而\textbf{直接取状态价值函数 $b(s_t) = V^{\pi_\theta}(s_t) = \E[G_t \mid s_t]$} 既与 $b^*$ 极为接近，又催生了强化学习中最核心的评价量——\textbf{优势函数（Advantage Function）}：
+\begin{equation}
+  A^{\pi_\theta}(s_t, a_t) := Q^{\pi_\theta}(s_t, a_t) - V^{\pi_\theta}(s_t).
+  \label{eq:advantage-def}
+\end{equation}
+将 $b(s_t) = V^{\pi_\theta}(s_t)$ 代入式~\eqref{eq:pg-q}，策略梯度呈现出最富直觉的黄金形态：
+\[
+  \nabla_\theta J(\theta) = \E_{\tau \sim p_\theta}\!\left[\sum_{t=0}^{T-1} \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, A^{\pi_\theta}(s_t, a_t)\right].
+\]
+此时，无论奖励被整体平移 $+1000$ 还是 $-1000$，常量偏移会在 $Q - V$ 中精确抵消！唯有表现\textbf{优于当前状态平均水平}的动作（$A > 0$）被奖励提权，表现\textbf{逊于平均水平}的动作（$A < 0$）被惩罚降权。
+
+\section{Actor-Critic 架构与广义优势估计 GAE($\lambda$)}
+\label{sec:actor-critic-gae}
+
+\subsection{从蒙特卡洛基线迈向自举 Actor-Critic}
+
+在带基线的 REINFORCE 中，我们额外训练一个价值网络 $V_\phi(s)$ 拟合经验回报 $G_t$（最小化 $\frac{1}{2}(V_\phi(s_t) - G_t)^2$），并用 $G_t - V_\phi(s_t)$ 估计优势。这虽已大幅降低由奖励偏移带来的方差，但 $G_t$ 本身仍是整条完整轨迹的蒙特卡洛回报——依然受困于长视野累积噪声且无法每步在线更新。
+
+如果我们在优势估计中\textbf{彻底引入第~\ref{ch:model-free-rl} 章的 TD 自举思想}，用单步观测加后继价值估计 $r_t + \gamma V_\phi(s_{t+1})$ 替代完整回报 $G_t$，会得到什么？正是单步 TD 误差：
+\begin{equation}
+  \delta_t^V := r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t).
+  \label{eq:ac-td-error}
+\end{equation}
+检验一下它在 $V_\phi = V^{\pi_\theta}$ 时的条件期望：
+\[
+  \E\!\left[\delta_t^V \mid s_t, a_t\right]
+  = \E\!\left[r_t + \gamma V^{\pi_\theta}(s_{t+1}) \mid s_t, a_t\right] - V^{\pi_\theta}(s_t)
+  = Q^{\pi_\theta}(s_t, a_t) - V^{\pi_\theta}(s_t) = A^{\pi_\theta}(s_t, a_t).
+\]
+这是一个令人拍案叫绝的巧合：\textbf{当价值网络准确时，单步 TD 误差 $\delta_t^V$ 本身就是优势函数 $A^{\pi_\theta}(s_t, a_t)$ 的无偏估计，而且完全不需要额外拟合高维的 $Q_\phi(s, a)$，只需学一个标量输出的状态价值网 $V_\phi(s)$ 即可！}
+
+由此诞生了现代深度强化学习的双核引擎——\textbf{Actor-Critic（演员--评论家）架构}（见图~\ref{fig:actor-critic}）：
+\begin{itemize}
+  \item \textbf{Actor（演员 $\pi_\theta$）}：负责根据状态 $s_t$ 输出策略分布并采样动作 $a_t$，沿着 Critic 给出的优势信号 $\hat{A}_t$ 执行策略梯度上升 $\theta \leftarrow \theta + \alpha_\theta \nabla_\theta \ln \pi_\theta(a_t \mid s_t)\, \hat{A}_t$。
+  \item \textbf{Critic（评论家 $V_\phi$）}：负责评估每个状态的长期价值，利用时序差分目标更新自身参数 $\phi$，从而为 Actor 持续提供低方差、可在线步进的“打分反馈”。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.92\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=2mm, draw=#1, very thick, fill=#1!10,
+              minimum width=3.6cm, minimum height=1.25cm, align=center, font=\sffamily\small, text=ink},
+  env/.style={rectangle, rounded corners=2mm, draw=slate, very thick, fill=codebg,
+              minimum width=4.0cm, minimum height=1.25cm, align=center, font=\sffamily\small, text=ink},
+  arr/.style={-{Stealth[length=2.3mm]}, thick, #1},
+  lbl/.style={font=\scriptsize\sffamily, color=ink, fill=white, inner sep=1.5pt}
+]
+  \node[box=teal] (actor) at (-4.25, 1.55) {\textbf{\color{tealDark}Actor（演员）}\\策略网络 $\pi_\theta(a \mid s)$};
+  \node[box=navy] (critic) at (4.25, 1.55) {\textbf{\color{navy}Critic（评论家）}\\价值网络 $V_\phi(s)$};
+  \node[env] (env) at (0, -1.65) {\textbf{环境（Environment）}\\动态转移 $P(s' \mid s, a)$ 与奖励 $r_t$};
+
+  % Actor -> Env (action a_t)
+  \draw[arr=teal] (actor.south) |- ([yshift=2mm]env.west)
+    node[lbl, pos=0.23, right=1mm] {采样动作 $a_t \sim \pi_\theta(\cdot \mid s_t)$};
+
+  % Env -> Critic (r_t, s_{t+1})
+  \draw[arr=slate] ([yshift=2mm]env.east) -| (critic.south)
+    node[lbl, pos=0.75, right=1mm] {反馈奖励 $r_t$ 与新状态 $s_{t+1}$};
+
+  % Env -> Actor (state s_t)
+  \draw[arr=slate, dashed] ([yshift=-2.5mm]env.west) -- ([xshift=-5mm,yshift=-2.5mm]actor.west |- env.west) |- (actor.west)
+    node[lbl, pos=0.25, left=1mm] {观测状态 $s_t$};
+
+  % Critic -> Actor (TD error / GAE advantage)
+  \draw[arr=ochre, very thick] (critic.west) -- (actor.east)
+    node[lbl, midway, above=2pt, text=ochre] {\textbf{优势信号 $\delta_t$ / $\hat{A}_t^{\mathrm{GAE}}$（\texttt{.detach()}）}}
+    node[lbl, midway, below=2pt, text=slate] {驱动策略梯度 $\nabla_\theta \ln \pi_\theta \cdot \hat{A}_t$};
+
+  % Critic self-update loop
+  \draw[arr=navy, dashed] (critic.north) .. controls +(0, 0.85) and +(1.3, 0.85) .. (critic.north east)
+    node[lbl, pos=0.5, above=1.5pt, text=navy] {最小化 TD / 回归误差更新 $\phi$};
+\end{tikzpicture}}
+\caption{Actor-Critic 闭环反馈架构。Actor 负责与环境交互决策，Critic 实时提供价值评估并产出 TD 误差 $\delta_t$ 或广义优势估计 $\hat{A}_t^{\mathrm{GAE}}$；注意传给 Actor 的优势信号必须阻断梯度（\texttt{.detach()}），以免策略损失反向污染 Critic 参数。}
+\label{fig:actor-critic}
+\end{figure}
+
+\subsection{广义优势估计 GAE($\lambda$) 的严格推导}
+
+单步 TD 误差 $\delta_t^V$ 虽然方差极低，但在训练前期 Critic 尚未准确（$V_\phi \neq V^\pi$）时会引入较大自举偏差；反之，完整回报减基线 $G_t - V_\phi(s_t)$ 虽然严格无偏，却方差高企。有没有一根平滑旋钮，能让我们在“单步 TD”与“完整 MC”之间自由调节偏差与方差？
+
+Schulman 等人（2016）提出的\textbf{广义优势估计（Generalized Advantage Estimation, GAE）}给出了堪称完美的答案。对任意步数 $k \ge 1$，定义 $k$-步截断优势估计量：
+\begin{align*}
+  \hat{A}_t^{(1)} &= \delta_t^V = -V_\phi(s_t) + r_t + \gamma V_\phi(s_{t+1}), \\
+  \hat{A}_t^{(2)} &= \delta_t^V + \gamma \delta_{t+1}^V = -V_\phi(s_t) + r_t + \gamma r_{t+1} + \gamma^2 V_\phi(s_{t+2}), \\
+  &\;\;\vdots \\
+  \hat{A}_t^{(k)} &= \sum_{l=0}^{k-1} \gamma^l \delta_{t+l}^V = -V_\phi(s_t) + \sum_{l=0}^{k-1} \gamma^l r_{t+l} + \gamma^k V_\phi(s_{t+k}).
+\end{align*}
+随着 $k$ 增大，偏差因末端项的 $\gamma^k$ 因子呈指数衰减，而方差因累加更多随机奖励而递增；当 $k \to \infty$ 时，$\hat{A}_t^{(\infty)} = G_t - V_\phi(s_t)$ 退化为无偏的带基线蒙特卡洛优势。
+
+\begin{thmBox}
+\begin{theorem}[GAE($\gamma, \lambda$) 的几何加权展开与递推公式]
+\label{thm:gae}
+对衰减参数 $\lambda \in [0, 1]$，将所有 $k$-步优势估计量按几何权重 $(1-\lambda)\lambda^{k-1}$ 加权平均，定义广义优势估计 $\hat{A}_t^{\mathrm{GAE}(\gamma,\lambda)} := (1 - \lambda)\sum_{k=1}^{\infty} \lambda^{k-1} \hat{A}_t^{(k)}$。则它精确化简为单步 TD 误差的指数衰减加权和：
+\begin{equation}
+  \hat{A}_t^{\mathrm{GAE}(\gamma,\lambda)} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}^V,
+  \label{eq:gae-sum}
+\end{equation}
+并在有限视野回合中满足 $O(T)$ 时间复杂度的反向线性递推：
+\begin{equation}
+  \hat{A}_t^{\mathrm{GAE}} = \delta_t^V + \gamma \lambda (1 - d_t)\, \hat{A}_{t+1}^{\mathrm{GAE}} \qquad (\hat{A}_T^{\mathrm{GAE}} = 0).
+  \label{eq:gae-rec}
+\end{equation}
+\end{theorem}
+\begin{proof}
+将 $\hat{A}_t^{(k)} = \sum_{l=0}^{k-1} \gamma^l \delta_{t+l}^V$ 代入定义并交换二重求和次序（下标满足 $0 \le l \le k-1 \iff k \ge l+1$）：
+\begin{align*}
+  \hat{A}_t^{\mathrm{GAE}(\gamma,\lambda)}
+  &= (1 - \lambda) \sum_{k=1}^{\infty} \lambda^{k-1} \sum_{l=0}^{k-1} \gamma^l \delta_{t+l}^V \\
+  &= (1 - \lambda) \sum_{l=0}^{\infty} \gamma^l \delta_{t+l}^V \left(\sum_{k=l+1}^{\infty} \lambda^{k-1}\right) \\
+  &= (1 - \lambda) \sum_{l=0}^{\infty} \gamma^l \delta_{t+l}^V \cdot \frac{\lambda^l}{1 - \lambda}
+   = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}^V.
+\end{align*}
+从式~\eqref{eq:gae-sum} 提出首项 $l=0$，对余项令 $l' = l - 1$，立即得到递推式 $\hat{A}_t^{\mathrm{GAE}} = \delta_t^V + \gamma\lambda \hat{A}_{t+1}^{\mathrm{GAE}}$；若 $s_{t+1}$ 为回合终止态（$d_t = 1$），则跨回合不再传导，乘以 $(1 - d_t)$ 截断即得式~\eqref{eq:gae-rec}。
+\end{proof}
+\end{thmBox}
+
+检查两个极端端点，尽显数学统一之美：
+\begin{itemize}
+  \item 当 $\lambda = 0$ 时（约定 $0^0 = 1$），$\hat{A}_t^{\mathrm{GAE}(\gamma, 0)} = \delta_t^V = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$，完全退化为单步 TD Actor-Critic（低方差、有自举偏差）；
+  \item 当 $\lambda = 1$ 时，$\hat{A}_t^{\mathrm{GAE}(\gamma, 1)} = \sum_{l=0}^{\infty} \gamma^l \delta_{t+l}^V = G_t - V_\phi(s_t)$（中间全部 $V_\phi(s_{t+l})$ 首尾相消！），完全退化为无偏的蒙特卡洛基线优势（零偏差、高方差）。
+\end{itemize}
+现代深度强化学习（包括第~\ref{ch:trpo-ppo-grpo} 章的 PPO 与第 4 章的 RLHF）几乎普遍选用 $\lambda \in [0.90, 0.98]$，它在几乎不损失无偏性的同时大幅压平了策略梯度方差。
+
+\section{实测验证：基线降方差与 GAE Actor-Critic}
+\label{sec:exp-pg-baseline}
+
+理论告诉我们：当奖励带有正偏移时，无基线 REINFORCE 会因巨大方差陷入泥潭，而引入价值基线与 GAE 应立竿见影地提速稳盘。下面我们在配套脚本 \texttt{code/vol6\_experiments.py} 的 \texttt{exp2\_pg\_baseline\_ac()} 中进行严格对照实测：
+\begin{itemize}
+  \item \textbf{任务环境}：12 步随机一维目标跟踪控制。每回合初始位置 $x_0 \sim \mathrm{Uniform}(-1, 1)$；智能体每步选择向左（$-0.25$）或向右（$+0.25$）并叠加高斯扰动 $\xi_t \sim \mathcal{N}(0, 0.04^2)$，位置截断在 $[-1.5, 1.5]$。
+  \item \textbf{正偏移奖励设计}：$r_t = \mathbf{4.0} + (1.0 - |x_{t+1}|)$，折扣因子 $\gamma = 0.95$。注意每步的 $+4.0$ 偏移不改变最优控制律（始终向原点 $0$ 靠拢），却把总回报推高到 $50$--$58$ 区间，专门用于放大检验基线的降方差威力。
+  \item \textbf{网络与统计}：Actor 与 Critic 均为单隐层 MLP（$2 \to 16 \to \text{Tanh} \to \text{out}$），Adam 优化器（Actor 学习率 $0.015$，Critic 学习率 $0.03$），全部 3 种算法均跨 12 组独立随机种子运行 250 回合。
+\end{itemize}
+
+\begin{lstlisting}[caption={REINFORCE+基线与 Actor-Critic+GAE($\lambda=0.9$) 核心更新（摘自 \texttt{vol6\_experiments.py}）}]
+if mode == "reinforce":
+    loss_p = -(logps_t * Gs_t).mean()
+    opt_p.zero_grad(); loss_p.backward(); opt_p.step()
+elif mode == "baseline":
+    vals = val_net(states_t).squeeze(-1)
+    adv = Gs_t - vals.detach()            # 必须 .detach()，防止策略梯度回流 Critic
+    loss_p = -(logps_t * adv).mean()
+    loss_v = F.mse_loss(vals, Gs_t)
+    opt_p.zero_grad(); loss_p.backward(); opt_p.step()
+    opt_v.zero_grad(); loss_v.backward(); opt_v.step()
+else:  # Actor-Critic + GAE(gamma=0.95, lambda=0.90)
+    vals = val_net(states_t).squeeze(-1)
+    next_vals = torch.cat([vals[1:].detach(), torch.zeros(1)])
+    deltas = rews_t + 0.95 * next_vals - vals.detach()
+    advs, gae = [], 0.0
+    for d in reversed(deltas.tolist()):   # 按式 (2.10) 反向递推计算 GAE
+        gae = d + 0.95 * 0.90 * gae
+        advs.insert(0, gae)
+    adv = torch.tensor(advs, dtype=torch.float32)
+    loss_p = -(logps_t * adv).mean()
+    loss_v = F.mse_loss(vals, adv + vals.detach())  # lambda-回报目标
+    opt_p.zero_grad(); loss_p.backward(); opt_p.step()
+    opt_v.zero_grad(); loss_v.backward(); opt_v.step()
+\end{lstlisting}
+
+图~\ref{fig:pg-baseline} 直接读取实测记录文件 \texttt{data/pg\_baseline.csv}，对比了 250 回合内三种方法的平均总回报轨迹：
+\begin{itemize}
+  \item \textbf{无基线 REINFORCE}：起步阶段虽略有爬升，但从第 70 回合起就因 $+4.0$ 奖励偏移引起的剧烈梯度方差在 $52$ 附近原地打转；最后 30 回合均值仅停留在 \textbf{52.16（$\pm 5.02$）}，跨种子波动极大。
+  \item \textbf{REINFORCE $+$ 价值基线}：减去 $V_\phi(s_t)$ 后，正偏移噪声瞬间消失，策略稳定收敛至原点附近，最后 30 回合均值跃升至 \textbf{56.13（$\pm 2.55$）}——标准差直接腰斩，意味着\textbf{方差被压缩了近 $4\times$}（$5.02^2 / 2.55^2 \approx 3.88$）！
+  \item \textbf{Actor-Critic $+$ GAE($\lambda=0.9$)}：凭借低方差的时序差分优势信号，前中期爬升速度最快（第 115 回合即达 $54.59$，领先纯 MC 基线 $0.65$ 分），最后 30 回合均值稳定在 \textbf{55.80（$\pm 3.16$）}，且天然具备向更长视野、持续交互任务无缝扩展的能力。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.90\linewidth, height=6.4cm,
+    xlabel={训练回合数（Episode）},
+    ylabel={回合总回报（10 回合均值，12 种子）},
+    xmin=0, xmax=260, ymin=50.0, ymax=57.0,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.03,0.96)}, anchor=north west, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, very thick, dashed, mark=triangle*, mark size=1.8pt]
+      table[x=ep, y=reinforce, col sep=comma]{data/pg_baseline.csv};
+    \addlegendentry{REINFORCE 无基线（终段 $52.16 \pm 5.02$）}
+
+    \addplot[teal, very thick, mark=*, mark size=1.6pt]
+      table[x=ep, y=baseline, col sep=comma]{data/pg_baseline.csv};
+    \addlegendentry{REINFORCE $+$ 价值基线（终段 $56.13 \pm 2.55$）}
+
+    \addplot[navy, very thick, mark=square*, mark size=1.5pt]
+      table[x=ep, y=ac, col sep=comma]{data/pg_baseline.csv};
+    \addlegendentry{Actor-Critic $+$ GAE($\lambda=0.9$)（终段 $55.80 \pm 3.16$）}
+  \end{axis}
+\end{tikzpicture}
+\caption{带 $+4.0$ 正偏移奖励的 12 步随机目标跟踪实测曲线（读取自 \texttt{data/pg\_baseline.csv}）。减去状态价值基线将标准差减半（方差压缩约 $4\times$），彻底释放了策略梯度的收敛潜力；GAE($\lambda=0.9$) 在前中期收敛最快。}
+\label{fig:pg-baseline}
+\end{figure}
+
+\begin{failBox}{策略梯度与 Actor-Critic 编码中的两大高频致命错误}
+\begin{enumerate}
+  \item \textbf{忘记对优势项 \texttt{adv}（或 \texttt{vals}）调用 \texttt{.detach()}}：在 Actor 损失 \texttt{loss\_p = -(logps * (Gs - vals)).mean()} 中，如果漏写了 \texttt{vals.detach()}，并且把 Actor 和 Critic 合并在同一个 \texttt{loss\_total = loss\_p + 0.5 * loss\_v} 里一起反向传播，那么 \texttt{loss\_p} 会产生一条流向 Critic 参数 $\phi$ 的非法梯度 $+\ln\pi_\theta \cdot \nabla_\phi V_\phi(s)$！它试图通过扭曲 $V_\phi$ 来人为压低伪损失，彻底毁掉价值估计。务必始终保证进入 Actor 损失的优势张量处于 \texttt{no\_grad} 或 \texttt{.detach()} 状态。
+  \item \textbf{误用依赖动作 $a_t$ 的基线 $b(s_t, a_t)$}：回看定理~\ref{thm:baseline-unbiased} 的证明——关键一步是将 $b(s_t)$ 提到 $\sum_{a_t}$ 之外！如果基线同时依赖动作 $a_t$（例如误把 $Q_\phi(s_t, a_t)$ 直接当作基线减去，却不补加对应的解析修正项），则 $\sum_{a_t} \nabla_\theta \pi_\theta(a_t\mid s_t)\, b(s_t, a_t) \neq 0$，\textbf{无偏性瞬间破裂}，策略梯度可能指向完全错误的方向！
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{熵正则化与最大熵强化学习（Soft Actor-Critic, SAC）}
+在实际训练中，策略梯度容易出现\textbf{过早熵坍缩（Premature Entropy Collapse）}：一旦策略在早期偶遇一条还不错的轨迹，梯度上升会迅速把该动作的概率推近 $1$，策略退化为确定性策略，彻底丧失后续探索更优解的能力。
+
+最简单有效的对策是在策略目标中加入\textbf{策略熵正则项}：
+\[
+  J_{\mathrm{ent}}(\theta) = \E_{\tau \sim p_\theta}\!\left[\sum_{t=0}^{T-1} \gamma^t \Big(r_t + \alpha\, \mathcal{H}\big(\pi_\theta(\cdot \mid s_t)\big)\Big)\right], \qquad
+  \mathcal{H}(\pi) = -\E_{a \sim \pi}[\ln \pi(a \mid s)],
+\]
+其中温度系数 $\alpha > 0$ 控制探索权重。它鼓励智能体在“拿高分”的同时尽可能保持行为的多样性与随机性。
+
+进一步将这一最大熵目标与\textbf{异策略双 Q 网络（Clipped Double Q，取 $\min(Q_{\phi_1}, Q_{\phi_2})$ 抑制高估）}以及\textbf{重参数化技巧（Reparameterization Trick，$a = \tanh(\mu_\theta(s) + \sigma_\theta(s)\odot \varepsilon)$）}结合，便诞生了连续控制领域的王者算法——\textbf{Soft Actor-Critic（SAC，Haarnoja et al., 2018）}。SAC 既有异策略经验回放带来的极高样本效率，又因最大熵目标而对超参数高度稳健，是当今机器人仿真与真机连续控制的绝对主力之一。
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章搭建起现代深度强化学习的两座主桥：
+\begin{itemize}
+  \item \textbf{深度价值路线（DQN 家族）}：通过两状态线性反例揭示“函数逼近 $+$ 自举 $+$ 异策略”致命三元组的发散根源；用经验回放打散时间相关性、用冻结目标网络切断追影正反馈，再以 Double DQN 与 Dueling DQN 精修偏差与结构。
+  \item \textbf{深度策略路线（Policy Gradient $\to$ Actor-Critic $\to$ GAE）}：利用对数导数技巧完整证明了策略梯度定理，让黑盒环境动力学 $P(s'\mid s,a)$ 精确消去；证明了任意状态基线的严格零偏性，引出优势函数 $A^\pi = Q^\pi - V^\pi$（实测将回报方差压缩近 $4\times$）；最后通过广义优势估计 $\hat{A}_t^{\mathrm{GAE}} = \sum_{l=0}^\infty (\gamma\lambda)^l \delta_{t+l}^V$ 优雅统一了低方差 TD 与零偏差 MC。
+\end{itemize}
+
+然而，Actor-Critic 与 REINFORCE 共同背负着一个沉重的效率枷锁：\textbf{它们是严格同策略的——辛辛苦苦与环境交互采来的一批轨迹，只敢做一步梯度上升，然后就必须全部扔进垃圾桶！} 如果我们试图把同一批样本拿来重复更新 10 轮，会发生什么？下一章，我们将直面策略崩塌的悬崖，推导出统治现代深度强化学习与大语言模型后训练的两大核心算法——\textbf{近端策略优化（PPO）与群体相对策略优化（GRPO）}。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与公式手算}{夯实策略梯度公式、对数导数与 GAE 递推}
+
+\begin{enumerate}
+  \item[\textbf{6.2.1}] \textbf{Softmax 策略与高斯策略的 Score Function 解析推导}：
+  \begin{enumerate}
+    \item 设离散 Softmax 策略 $\pi_\theta(a \mid s) = \frac{\exp(\theta^\top \phi(s, a))}{\sum_{a'} \exp(\theta^\top \phi(s, a'))}$，求证其对数梯度（Score Function）具有极其简洁的“特征减期望特征”形式：
+    \[
+      \nabla_\theta \ln \pi_\theta(a \mid s) = \phi(s, a) - \E_{a' \sim \pi_\theta(\cdot \mid s)}\!\left[\phi(s, a')\right].
+    \]
+    \item 设一维高斯策略 $\pi_\theta(a \mid s) = \mathcal{N}\!\left(a \mid \mu_\theta(s), \sigma^2\right)$（标准差 $\sigma > 0$ 为常数），求 $\nabla_\theta \ln \pi_\theta(a \mid s)$，并解释其直观更新方向。
+  \end{enumerate}
+  \exHint{(a) 对 $\ln \pi_\theta(a\mid s) = \theta^\top\phi(s,a) - \ln \sum_{a'}\exp(\theta^\top\phi(s,a'))$ 求梯度即可；(b) $\nabla_\theta \ln \pi_\theta = \frac{a - \mu_\theta(s)}{\sigma^2}\nabla_\theta \mu_\theta(s)$，好动作会把均值拉向 $a$。}
+
+  \item[\textbf{6.2.2}] \textbf{三步轨迹的 GAE($\lambda$) 手算}：某 3 步回合结束于终止态 $s_3$（$V(s_3) = 0$），奖励序列为 $(r_0, r_1, r_2) = (1, 0, 5)$，Critic 估值 $(V(s_0), V(s_1), V(s_2)) = (2.0, 2.5, 4.0)$，取 $\gamma = 0.9$。
+  \begin{enumerate}
+    \item 计算单步 TD 误差 $\delta_0, \delta_1, \delta_2$；
+    \item 分别计算 $\lambda = 0$、$\lambda = 0.5$ 与 $\lambda = 1$ 时三个时刻的 $\hat{A}_t^{\mathrm{GAE}}$，并验证 $\lambda = 1$ 的结果恰好等于 $G_t - V(s_t)$。
+  \end{enumerate}
+  \exHint{利用式~\eqref{eq:gae-rec} 从 $t=2$ 倒推回 $t=0$，注意 $t=2$ 到达终止态，故 $\delta_2 = r_2 + 0 - V(s_2) = 1.0$ 且 $\hat{A}_2 = \delta_2$。}
+\end{enumerate}
+
+\exTier{B 层：严谨数学证明}{掌握最优方差基线与无穷视野策略梯度}
+
+\begin{enumerate}
+  \item[\textbf{6.2.3}] \textbf{单步标量策略的最优最小方差基线}：考虑单状态上下文赌博机问题，策略 $\pi_\theta(a)$ 仅含单个标量参数 $\theta \in \R$，记 $u(a) = \frac{\partial}{\partial\theta}\ln \pi_\theta(a)$，随机奖励为 $R(a)$，定义带常数基线 $b$ 的策略梯度估计量 $g(b) = u(a)\big(R(a) - b\big)$。
+  \begin{enumerate}
+    \item 证明 $\Var(g(b))$ 是关于 $b$ 的严格凸二次函数（假设 $\E[u(a)^2] > 0$）；
+    \item 求出使 $\Var(g(b))$ 达到全局极小的最优基线 $b^*$ 的闭合表达式，并说明为何 $b^*$ 一般略微不同于期望奖励 $\E[R(a)]$，但在何种条件下二者恰好重合。
+  \end{enumerate}
+  \exHint{因 $\E[g(b)]$ 与 $b$ 无关，极小化方差等价于极小化二阶矩 $\E[u(a)^2(R(a) - b)^2]$；求导置零得 $b^* = \frac{\E[u(a)^2 R(a)]}{\E[u(a)^2]}$。}
+
+  \item[\textbf{6.2.4}] \textbf{强化学习中的“因果性降方差”定量验证}：在一个两步独立赌博机（$s_0 \to s_1 \to \mathsf{T}$，两步奖励独立且 $r_0 \sim \mathcal{N}(\mu_0, \sigma_0^2)$ 与动作 $a_1$ 无关）中，证明对时刻 $t=1$ 的策略梯度估计量，采用完整回合回报 $g_{\mathrm{full}} = u_1(r_0 + r_1)$ 与采用未来回报 $g_{\mathrm{rtg}} = u_1 r_1$ 具有完全相同的期望，而方差之差精确满足
+  \[
+    \Var(g_{\mathrm{full}}) - \Var(g_{\mathrm{rtg}}) = \E[u_1^2]\,\E[r_0^2] + 2\mu_0\,\E[u_1^2 r_1].
+  \]
+  据此说明：当 $\mu_0 = 0$（或对 $r_1$ 减去最优基线 $b^*$ 后）时，方差之差严格化简为 $\E[u_1^2]\,\sigma_0^2 \ge 0$；而在一般 $\mu_0 \neq 0$ 时交叉项会产生何种影响。
+  \exHint{利用 $r_0$ 与 $(u_1, r_1)$ 独立且 $\E[u_1] = 0$，直接展开 $\E[u_1^2(r_0 + r_1)^2] - \E[u_1^2 r_1^2] = \E[u_1^2]\E[r_0^2] + 2\E[r_0]\E[u_1^2 r_1]$；当对 $r_1$ 引入习题~\textbf{6.2.3} 的最优基线 $b^* = \E[u_1^2 r_1]/\E[u_1^2]$ 后，$\E[u_1^2(r_1 - b^*)] = 0$，交叉项彻底消失！}
+\end{enumerate}
+
+\exTier{C 层：机制剖析与反例设计}{辨识致命三元组、目标网络频率与高估诊断}
+
+\begin{enumerate}
+  \item[\textbf{6.2.5}] \textbf{致命三元组的拆解实验（基于例~\ref{ex:deadly-triad}）}：回到例~\ref{ex:deadly-triad} 的两状态线性逼近发散反例（$\gamma = 0.9, \phi(s_1)=1, \phi(s_2)=2$）。
+  \begin{enumerate}
+    \item \textbf{去掉“异策略”}：若改按真实马尔可夫链的同策略平稳分布采样（从 $s_1$ 走一步即永久留在 $s_2$，平稳分布 $d(s_1) = 0, d(s_2) = 1$），或任意足够小的 $p = \Prob(s_1)$，求使半梯度 TD 保持收敛的采样概率阈值 $p_{\max}$；
+    \item \textbf{去掉“自举”}：若改用蒙特卡洛目标（真实回报恒为 $0$），验证任意 $p \in [0, 1]$ 与任意小步长 $\alpha > 0$ 下 $w_t$ 均指数收敛至 $0$。
+  \end{enumerate}
+  \exHint{令期望增量系数 $p(2\gamma - 1) + 4(1-p)(\gamma - 1) < 0$，代入 $\gamma=0.9$ 解得 $p < 1/3$。这直观展示了同策略分布为何能抑制半梯度发散。}
+
+  \item[\textbf{6.2.6}] \textbf{DQN 目标网络更新周期 $C$ 的两难权衡}：如果把 DQN 中目标网络同步频率设为 $C = 1$（每步立刻同步 $\theta^- \leftarrow \theta$），算法退化为什么？反之，如果把 $C$ 设得极大（如 $C = 10^6$ 步才同步一次），又会引发什么问题？请从偏差传播速度与训练稳定性两个维度给出定量分析。
+  \exHint{$C=1$ 退化为无目标网络的原始半梯度 Q-Learning（易受致命三元组震荡）；$C$ 过大时，多步奖励信息每 $C$ 步才能向前传导一格（类似价值迭代的慢速外循环），导致样本效率暴跌。}
+\end{enumerate}
+
+\exTier{D 层：编程实验与系统延伸}{动手复现基线效应与体验 Bug 后果}
+
+\begin{enumerate}
+  \item[\textbf{6.2.7}] \textbf{编程实验：验证 \texttt{.detach()} 缺失与奖励平移对 REINFORCE 的冲击}：修改配套脚本里的 \texttt{exp2\_pg\_\allowbreak baseline\_ac()}（位于 \texttt{code/\allowbreak vol6\_\allowbreak experiments.py}）：
+  \begin{enumerate}
+    \item 将奖励偏移量从 $+4.0$ 分别改为 $0.0$ 与 $+20.0$，比较无基线 REINFORCE 与带基线 REINFORCE 在终段 30 回合的表现，验证带基线版本对常量偏移的近乎完全不变性；
+    \item 在 \texttt{baseline} 分支中故意合并优化器并删去 \texttt{vals.detach()}，观察 250 回合内的回报曲线与 Critic 的 MSE 损失如何崩坏。
+  \end{enumerate}
+  \exHint{当偏移增至 $+20.0$ 时，无基线 REINFORCE 几乎完全无法学出有效策略，而带基线版本在 Critic 适应偏移后仍能稳定收敛。}
+
+  \item[\textbf{6.2.8}] \textbf{从普通 Actor-Critic 走向多轮样本复用的困境预览}：在 \texttt{exp2\_pg\_baseline\_ac()} 的 \texttt{ac} 分支中，每采集 1 条回合只执行 1 次 \texttt{opt\_p.step()}。尝试把 \texttt{loss\_p = -(logps\_t * adv).mean()} 的梯度上升在\textbf{同一批轨迹}上循环执行 10 次（重新前向计算 \texttt{logps\_t}），观察策略回报与策略熵的变化。思考：为什么直接重算对数概率做多轮更新会彻底摧毁策略？这需要怎样的数学修正（提示：第~\ref{ch:trpo-ppo-grpo} 章的重要性采样与裁剪信任域）？
+  \exHint{旧轨迹中某次正优势动作若被连续拉高 10 步，其概率会冲向 $1.0$，策略瞬间坍缩；且随着 $\pi_\theta$ 偏离采样策略 $\pi_{\theta_{\mathrm{old}}}$，未加校正的梯度已不再是 $J(\theta)$ 的无偏梯度。}
+\end{enumerate}

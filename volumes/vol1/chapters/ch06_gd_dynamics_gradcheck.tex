@@ -1,0 +1,640 @@
+\chapter[二次型梯度下降与有限差分校验]{优化初体验：二次型梯度下降动力学\\与有限差分校验}
+\label{ch:gd-dynamics-gradcheck}
+
+\chapEpigraph{第一原则是你绝不能欺骗自己——而你自己正是最容易被骗的人。}{理查德·费曼（Richard Feynman），《草包族科学》（1974）}
+
+\begin{chapIntro}{本章定位}
+至此，我们已经攒齐了第 1 卷的全部核心部件：第 1 章的 NumPy 向量化、第 2 章的线性最小二乘、第 3 章的实对称矩阵谱定理与条件数、第 4 章的奇异值视角，以及第 5 章的多元梯度与矩阵微分。本章将把这五大部件拧成一台完整运转的机器——\textbf{迭代优化的起点：梯度下降（Gradient Descent）}。我们不提前涉足第 4 卷的一般凸优化抽象收敛证明，而是用第 3 章的谱定理\textbf{精确解开二次型梯度下降的动力学全貌}：看清步长门槛 $0 < \eta < 2/\lambda_{\max}$、最优步长 $\eta^*$、病态条件数如何制造锯齿震荡、为什么 Z-score 特征标准化能瞬间把条件数砍掉近 80 万倍，以及如何用\textbf{有限差分梯度校验}为未来所有手写梯度代码装上终极安全网。
+\end{chapIntro}
+
+% ====================================================================
+\section{为什么解析解不够用？从正规方程走向梯度下降}
+\label{sec:ch6-why-gd}
+
+第 2 章里我们用正规方程 $X^T X w = X^T y$（或 \texttt{np.linalg.lstsq}）一步就拿到了线性回归的精确最优权重 $w^*$。读者可能会自然发问：既然能一步算出解析解，为什么现代 AI 几乎清一色采用看似“笨拙”的迭代算法——\textbf{梯度下降}？
+\begin{equation}\label{eq:ch6-gd-update}
+  w_{t+1} = w_t - \eta\, \nabla f(w_t), \qquad t = 0, 1, 2, \dots
+\end{equation}
+其中 $\eta > 0$ 称为\textbf{步长（Step Size）}或\textbf{学习率（Learning Rate）}。答案来自计算规模与模型表达力两个无法绕开的现实约束（表~\ref{tab:ch6-closed-vs-gd}）：
+
+\begin{table}[htbp]
+\centering
+\caption{解析求解（正规方程 / QR / SVD）与迭代一阶方法（梯度下降）的本质对比}
+\label{tab:ch6-closed-vs-gd}
+\small
+\begin{tabularx}{\linewidth}{@{}p{24mm}p{58mm}X@{}}
+\toprule
+\textbf{对比维度} & \textbf{解析解（正规方程 / \texttt{lstsq}）} & \textbf{梯度下降（Full-batch / Mini-batch）} \\
+\midrule
+适用目标函数 & \textbf{仅限}线性二次目标（如普通/岭线性回归） & \textbf{任意}可微目标（第 2 卷逻辑回归、第 5 卷深层网络均无闭式解） \\
+单步时间复杂度 & 一次性 $O(ND^2 + D^3)$ & 全批量单步 $O(ND)$；小批量（Mini-batch）仅 $O(BD)$ \\
+显存 / 内存占用 & 需构造 $D\times D$ 矩阵 $X^T X$（$D=10^5$ 时占 80 GB） & 仅需存参数与梯度 $O(D)$（$D=10^5$ 仅占 0.8 MB） \\
+高维可扩展性 & 当 $D > 10^4$ 时 $O(D^3)$ 彻底不可行 & 可扩展至百亿参数大模型（只需一阶梯度） \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+在给出一般理论之前，我们先按第 1 卷一贯的传统，在一个极简二维椭圆碗上\textbf{亲手推演前 3 步梯度下降}——亲眼目睹步长选得稍大时，算法是如何原地爆炸的。
+
+\begin{example}[二维二次型上 3 步梯度下降的亲手追踪]\label{ex:ch6-hand-trace}
+考虑最小化二次型函数
+\[
+  f(w_1, w_2) = \frac{1}{2}\big(w_1^2 + 10 w_2^2\big) = \frac{1}{2} w^T Q w,
+  \qquad Q = \begin{bmatrix} 1 & 0 \\ 0 & 10 \end{bmatrix},
+\]
+其唯一全局极小点显然为 $w^* = (0, 0)^T$，最小值 $f(w^*) = 0$。梯度为 $\nabla f(w) = Qw = (w_1,\, 10w_2)^T$，因此单步更新公式为
+\[
+  w_{t+1,1} = (1 - \eta) w_{t,1},
+  \qquad
+  w_{t+1,2} = (1 - 10\eta) w_{t,2}.
+\]
+固定初值 $w_0 = (1, 1)^T$（初始损失 $f(w_0) = 5.5$），分别试探两种步长：
+\begin{itemize}
+  \item \textbf{保守步长 $\eta = 0.05$}：乘子为 $1-\eta = 0.95$，$1-10\eta = 0.50$。两个坐标都单调向 $0$ 收缩；
+  \item \textbf{冒进步长 $\eta = 0.21$}：乘子为 $1-\eta = 0.79$，$1-10\eta = \mathbf{-1.10}$！注意第二维乘子绝对值大于 $1$ 且带负号，每一步都跨过谷底并被放大 $1.1$ 倍！
+\end{itemize}
+表~\ref{tab:ch6-hand-trace} 完整列出了 $t=0,1,2,3$ 的精确数值：
+\end{example}
+
+\begin{table}[htbp]
+\centering
+\caption{例~\ref{ex:ch6-hand-trace} 中 $f(w)=\frac{1}{2}(w_1^2+10w_2^2)$ 从 $w_0=(1,1)^T$ 出发的前 3 步手算对比}
+\label{tab:ch6-hand-trace}
+\small
+\begin{tabular}{@{}crrrrrr@{}}
+\toprule
+& \multicolumn{3}{c}{$\eta = 0.05$（稳定收敛）} & \multicolumn{3}{c}{$\eta = 0.21$（沿陡轴剧烈发散）} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+步数 $t$ & $w_{t,1}$ & $w_{t,2}$ & $f(w_t)$ & $w_{t,1}$ & $w_{t,2}$ & $f(w_t)$ \\
+\midrule
+$0$ & $1.0000$ & $1.0000$ & $5.5000$ & $1.0000$ & $1.0000$ & $5.5000$ \\
+$1$ & $0.9500$ & $0.5000$ & $1.7013$ & $0.7900$ & $-1.1000$ & $6.3621$ \\
+$2$ & $0.9025$ & $0.2500$ & $0.7198$ & $0.6241$ & $+1.2100$ & $7.5153$ \\
+$3$ & $0.8574$ & $0.1250$ & $0.4457$ & $0.4930$ & $-1.3310$ & $8.9793$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+看看表~\ref{tab:ch6-hand-trace} 中蕴含的两个深刻信号：
+\begin{enumerate}
+  \item 在 $\eta = 0.21$ 下，尽管平缓轴 $w_{t,1}$ 正在乖乖衰减（$1 \to 0.79 \to 0.624 \to 0.493$），但陡峭轴 $w_{t,2}$ 正以 $(-1.1)^t$ 左右反弹并指数级爆炸，拉着总损失 $f(w_t)$ 一路飙升！临界点恰好卡在 $1 - 10\eta = -1 \iff \eta = 0.20 = 2/\lambda_{\max}$。
+  \item 在 $\eta = 0.05$ 下，第 3 步之后 $w_{3,2} = 0.125$ 已经很快贴近谷底，但平缓轴 $w_{3,1} = 0.8574$ 却依然蜗牛般爬行——这就是为什么 $\eta$ 不能太小、也不能太大的两难困境。
+\end{enumerate}
+
+% ====================================================================
+\section{二次型梯度下降的精确谱动力学}
+\label{sec:ch6-spectral-gd}
+
+例~\ref{ex:ch6-hand-trace} 中的矩阵 $Q = \diag(1, 10)$ 恰好是对角阵，坐标轴天然解耦。如果 $Q$ 是一般的实对称正定矩阵（例如旋转过后的倾斜椭圆碗，或线性回归的 Hessian 矩阵 $Q = \frac{1}{N}X^T X$），各分量彼此纠缠，我们还能如此干净地分析每一步迭代吗？
+
+答案是肯定的——这正是第 3 章\textbf{实对称矩阵谱定理}在本卷最华丽的一次应用！
+
+\subsection{特征坐标解耦与收敛/最优步长定理}
+
+考虑一般正定二次型目标函数：
+\begin{equation}\label{eq:ch6-quad-obj}
+  f(w) = \frac{1}{2} w^T Q w - b^T w + c,
+\end{equation}
+其中 $Q \in \R^{d\times d}$ 为实对称正定矩阵（$Q = Q^T \succ 0$），$b\in\R^d$，$c\in\R$。由第 5.4 节矩阵求导公式得 $\nabla f(w) = Qw - b$，Hessian 为常矩阵 $H_f(w) = Q \succ 0$。因 $Q$ 正定可逆，函数存在唯一全局极小点 $w^* = Q^{-1} b$（满足 $Qw^* = b$）。
+
+记 $Q$ 的特征值从大到小排列为
+\[
+  \lambda_{\max} = \lambda_1 \ge \lambda_2 \ge \dots \ge \lambda_d = \lambda_{\min} > 0,
+\]
+并记第 3 章定义的对称正定矩阵\textbf{条件数}为 $\cond \coloneqq \cond_2(Q) = \dfrac{\lambda_{\max}}{\lambda_{\min}} \ge 1$。
+
+\begin{thmBox}
+\begin{theorem}[二次型梯度下降的精确谱收敛与最优步长定理]\label{thm:ch6-gd-spectral}
+对式~\eqref{eq:ch6-quad-obj} 中的正定二次型 $f(w)$（$Q=Q^T\succ 0$），从任意初值 $w_0\in\R^d$ 运行固定步长梯度下降 $w_{t+1} = w_t - \eta(Qw_t - b)$。记参数误差向量 $e_t \coloneqq w_t - w^*$，并记谱分解 $Q = V\Lambda V^T$（$V$ 正交，$\Lambda = \diag(\lambda_1,\dots,\lambda_d)$），令特征坐标误差为 $z_t \coloneqq V^T e_t$。则：
+\begin{enumerate}
+  \item \textbf{精确解耦递推}：对每个特征方向 $i = 1, \dots, d$，误差分量独立按等比数列演化：
+  \begin{equation}\label{eq:ch6-eigen-recur}
+    (z_t)_i = (1 - \eta \lambda_i)^t\, (z_0)_i, \qquad \norm{e_t}_2 = \norm{z_t}_2 \le \rho(\eta)^t \norm{e_0}_2,
+  \end{equation}
+  其中单步最坏收缩因子定义为 $\rho(\eta) \coloneqq \max_{1\le i\le d} \abs{1 - \eta \lambda_i}$。
+  \item \textbf{收敛的充要步长条件}：梯度下降对\textbf{所有}初值 $w_0\in\R^d$ 均收敛到 $w^*$，当且仅当
+  \begin{equation}\label{eq:ch6-eta-bound}
+    0 < \eta < \frac{2}{\lambda_{\max}}.
+  \end{equation}
+  \item \textbf{最优固定步长与最快线性收缩率}：在区间 $(0, 2/\lambda_{\max})$ 内，使最坏收缩因子 $\rho(\eta)$ 达到全局最小的最优固定步长及其收缩因子为
+  \begin{equation}\label{eq:ch6-eta-opt}
+    \eta^* = \frac{2}{\lambda_{\max} + \lambda_{\min}},
+    \qquad
+    \rho^* = \rho(\eta^*) = \frac{\lambda_{\max} - \lambda_{\min}}{\lambda_{\max} + \lambda_{\min}}
+           = \frac{\cond - 1}{\cond + 1}.
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{(1)} 利用 $b = Q w^*$，将梯度改写为 $\nabla f(w_t) = Qw_t - Qw^* = Q e_t$。在更新式 $w_{t+1} = w_t - \eta \nabla f(w_t)$ 两边同时减去 $w^*$，得误差线性递推：
+\[
+  e_{t+1} = e_t - \eta Q e_t = (I - \eta Q) e_t.
+\]
+代入第 3 章的实对称矩阵谱分解 $Q = V\Lambda V^T$（$V^T V = V V^T = I$），在两边同时左乘 $V^T$：
+\[
+  z_{t+1} = V^T e_{t+1} = V^T (V V^T - \eta V\Lambda V^T) e_t = (I - \eta \Lambda) V^T e_t = (I - \eta \Lambda) z_t.
+\]
+因为 $I - \eta\Lambda = \diag(1-\eta\lambda_1, \dots, 1-\eta\lambda_d)$ 是对角阵，各个分量彻底解耦，递推 $t$ 步即得 $(z_t)_i = (1-\eta\lambda_i)^t (z_0)_i$。又因正交变换保 $\ell_2$ 范数，故
+\[
+  \norm{e_t}_2^2 = \norm{z_t}_2^2 = \sum_{i=1}^d (1-\eta\lambda_i)^{2t} (z_0)_i^2
+  \le \rho(\eta)^{2t} \sum_{i=1}^d (z_0)_i^2 = \rho(\eta)^{2t} \norm{e_0}_2^2,
+\]
+开方即得式~\eqref{eq:ch6-eigen-recur}。顺带可得目标函数值误差满足 $f(w_t) - f(w^*) = \frac{1}{2}e_t^T Q e_t = \frac{1}{2}\sum_i \lambda_i (1-\eta\lambda_i)^{2t}(z_0)_i^2 \le \rho(\eta)^{2t}\big(f(w_0)-f(w^*)\big)$。
+
+\textbf{(2)} 序列 $e_t \to 0$ 对任意 $w_0\in\R^d$（即任意 $z_0\in\R^d$）均成立，当且仅当每个特征方向的公比绝对值严格小于 $1$：
+\[
+  \forall\, i\in\{1,\dots,d\},\quad \abs{1 - \eta\lambda_i} < 1
+  \iff -1 < 1 - \eta\lambda_i < 1
+  \iff 0 < \eta < \frac{2}{\lambda_i}.
+\]
+对所有 $i$ 同时成立，取决于右侧最紧的那个上界 $\min_i (2/\lambda_i) = 2/\lambda_{\max}$，故充要条件为 $0 < \eta < 2/\lambda_{\max}$。
+
+\textbf{(3)} 固定 $\eta > 0$，函数 $\lambda \mapsto |1 - \eta\lambda|$ 在区间 $[\lambda_{\min}, \lambda_{\max}]$ 上是一个先减后增的 V 形折线（凸函数），其最大值必定在两个端点 $\lambda_{\min}$ 或 $\lambda_{\max}$ 处取得：
+\[
+  \rho(\eta) = \max\Big\{\abs{1 - \eta\lambda_{\min}},\; \abs{1 - \eta\lambda_{\max}}\Big\}.
+\]
+当 $\eta$ 从 $0$ 增大时，$1 - \eta\lambda_{\min}$ 单调递减，而 $\eta\lambda_{\max} - 1$ 单调递增。两条直线的交点恰使两者相等：
+\[
+  1 - \eta^*\lambda_{\min} = \eta^*\lambda_{\max} - 1
+  \implies \eta^* = \frac{2}{\lambda_{\max} + \lambda_{\min}}.
+\]
+容易验证此时两者的共同取值即为最小值：
+\[
+  \rho(\eta^*) = 1 - \frac{2\lambda_{\min}}{\lambda_{\max} + \lambda_{\min}}
+               = \frac{\lambda_{\max} - \lambda_{\min}}{\lambda_{\max} + \lambda_{\min}}
+               = \frac{\cond - 1}{\cond + 1}.
+\]
+若 $\eta < \eta^*$，则 $1 - \eta\lambda_{\min} > \rho^*$；若 $\eta > \eta^*$，则 $\eta\lambda_{\max} - 1 > \rho^*$。因此 $\eta^*$ 是唯一的最优固定步长。
+\end{proof}
+
+\subsection{实测曲线与窄谷锯齿几何图景}
+
+把定理~\ref{thm:ch6-gd-spectral} 代回例~\ref{ex:ch6-hand-trace} 中的 $Q = \diag(1, 10)$（$\lambda_{\max}=10, \lambda_{\min}=1, \cond=10$）：
+\begin{itemize}
+  \item 收敛上限：$2/\lambda_{\max} = 0.20$；
+  \item 最优步长：$\eta^* = \frac{2}{10+1} = \frac{2}{11} \approx 0.1818$，最优单步参数收缩率 $\rho^* = \frac{10-1}{10+1} = \frac{9}{11} \approx 0.8182$，因此每步函数值精确衰减 $(\frac{9}{11})^2 \approx 0.6694$ 倍！
+\end{itemize}
+
+图~\ref{fig:ch6-gd-dynamics} 左侧基于本卷脚本 \texttt{code/vol1\_experiments.py} 生成的实测数据（\texttt{data/gd\_rates.csv}）绘制了半对数收敛曲线，右侧展示了在椭圆等高线上的真实迭代轨迹：
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[c]{0.52\linewidth}
+\centering
+\begin{tikzpicture}
+\begin{semilogyaxis}[
+  width=0.97\linewidth,
+  height=5.25cm,
+  xlabel={迭代步数 $t$},
+  ylabel={目标函数值 $f(w_t)$（对数刻度）},
+  xmin=-0.6, xmax=30.6,
+  ymin=1e-5, ymax=2e3,
+  grid=both,
+  grid style={line width=0.25pt, draw=slate!20},
+  major grid style={line width=0.4pt, draw=slate!35},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize},
+  legend style={font=\scriptsize, legend columns=2, at={(0.5,1.025)}, anchor=south,
+    fill=white, fill opacity=0.9, draw=codeborder, inner sep=2pt},
+  legend cell align=left
+]
+  \addplot[navy, thick, mark=none]
+    table[col sep=comma, x=t, y=eta005]{data/gd_rates.csv};
+  \addlegendentry{$\eta=0.05$（过保守）}
+
+  \addplot[teal, very thick, mark=*, mark size=1.1pt, mark repeat=3]
+    table[col sep=comma, x=t, y=etaopt]{data/gd_rates.csv};
+  \addlegendentry{$\eta^*=2/11$（最优）}
+
+  \addplot[plum, thick, dashed]
+    table[col sep=comma, x=t, y=eta0195]{data/gd_rates.csv};
+  \addlegendentry{$\eta=0.195$（临近震荡）}
+
+  \addplot[ochre, very thick, mark=triangle*, mark size=1.3pt, mark repeat=3]
+    table[col sep=comma, x=t, y=eta021]{data/gd_rates.csv};
+  \addlegendentry{$\eta=0.21 > 2/\lambda_{\max}$（发散）}
+\end{semilogyaxis}
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.47\linewidth}
+\centering
+\begin{tikzpicture}[xscale=2.35, yscale=1.62]
+  % Axes
+  \draw[-{Stealth[length=2mm]}, slate!65, thin] (-0.28,0) -- (1.42,0) node[right, font=\scriptsize, ink] {$w_1$};
+  \draw[-{Stealth[length=2mm]}, slate!65, thin] (0,-1.45) -- (0,1.45) node[above, font=\scriptsize, ink] {$w_2$};
+
+  % Ellipses w1^2 + 10 w2^2 = c
+  \begin{scope}
+    \clip (-0.25,-1.38) rectangle (1.36,1.38);
+    \foreach \c/\col in {0.8/tealLine, 2.5/tealLine, 5.5/tealLine, 11.0/teal} {
+      \draw[\col, thin] (0,0) ellipse ({sqrt(\c)} and {sqrt(\c/10)});
+    }
+  \end{scope}
+
+  % Minimum
+  \fill[tealDark] (0,0) circle (1.1pt) node[below left, font=\tiny, tealDark] {$w^*$};
+
+  % Trajectory eta* = 2/11 (rho = 9/11 = 0.818)
+  \draw[teal, very thick, -{Stealth[length=1.7mm]}] (1.000, 1.000) -- (0.818, -0.818);
+  \draw[teal, very thick, -{Stealth[length=1.7mm]}] (0.818, -0.818) -- (0.669, 0.669);
+  \draw[teal, very thick, -{Stealth[length=1.7mm]}] (0.669, 0.669) -- (0.548, -0.548);
+  \draw[teal, very thick, -{Stealth[length=1.7mm]}] (0.548, -0.548) -- (0.448, 0.448);
+  \draw[teal, very thick, -{Stealth[length=1.7mm]}] (0.448, 0.448) -- (0.367, -0.367);
+  \fill[teal] (0.818,-0.818) circle (0.9pt) (0.669,0.669) circle (0.9pt)
+              (0.548,-0.548) circle (0.9pt) (0.448,0.448) circle (0.9pt);
+
+  % Trajectory eta = 0.21 (diverging): (1,1) -> (0.79,-1.10) -> (0.624, 1.21) -> (0.493, -1.331)
+  \draw[ochre, thick, dashed, -{Stealth[length=1.7mm]}] (1.000, 1.000) -- (0.790, -1.100);
+  \draw[ochre, thick, dashed, -{Stealth[length=1.7mm]}] (0.790, -1.100) -- (0.624, 1.210);
+  \draw[ochre, thick, dashed, -{Stealth[length=1.7mm]}] (0.624, 1.210) -- (0.493, -1.331);
+  \fill[ochre] (0.790,-1.100) circle (0.9pt) (0.624,1.210) circle (0.9pt) (0.493,-1.331) circle (0.9pt);
+
+  % Start point
+  \fill[ink] (1.000, 1.000) circle (1.3pt) node[above right, font=\scriptsize, ink] {$w_0=(1,1)$};
+
+  % Clean non-overlapping annotations
+  \node[font=\scriptsize, tealDark, align=left, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt]
+    at (1.37, 0.39) {$\eta^*=2/11$\\锯齿收敛};
+  \node[font=\scriptsize, ochre, align=left, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt]
+    at (1.08, -1.18) {$\eta=0.21$\\越振越远};
+\end{tikzpicture}
+\end{minipage}
+\caption{二次型 $f(w)=\frac{1}{2}(w_1^2+10w_2^2)$ 上梯度下降的实测动力学与几何轨迹。\textbf{左图}（\texttt{data/gd\_rates.csv} 实测）：最优步长 $\eta^*=2/11$ 在半对数图上呈现最陡直线（$t=30$ 时降至 $3.2\times 10^{-5}$）；$\eta=0.05$ 与 $\eta=0.195$ 均受限于各自较慢一侧的收缩率；而 $\eta=0.21$ 越过 $2/\lambda_{\max}=0.20$ 红线后呈指数发散。\textbf{右图}：椭圆窄谷上的锯齿收敛 vs 越振越远。}
+\label{fig:ch6-gd-dynamics}
+\end{figure}
+
+\begin{insightBox}{大条件数为什么是梯度下降的头号天敌？}
+观察最优收缩率 $\rho^* = \frac{\cond - 1}{\cond + 1} = 1 - \frac{2}{\cond + 1}$：
+\begin{itemize}
+  \item 当 $\cond = 1$（正圆形等高线）时，$\rho^* = 0$，梯度直接指向圆心，\textbf{一步精准到位}！
+  \item 当 $\cond = 10^4$（极扁的狭长山谷）时，$\rho^* \approx 0.9998$：陡峭方向 $\lambda_{\max}$ 死死封死了步长上限（$\eta < 2/\lambda_{\max}$），导致沿平缓谷底 $\lambda_{\min}$ 方向的每步推进幅度被压榨到不足 $0.02\%$！
+\end{itemize}
+把误差压缩到 $10^{-6}$ 所需的迭代步数大致与条件数 $\cond$ \textbf{成正比}（$t \propto \cond$）。这直接解释了为什么第 5 卷深度神经网络极度依赖 BatchNorm / LayerNorm（动态改善每层特征条件数）与 Adam（按坐标自适应缩放步长）！
+\end{insightBox}
+
+% ====================================================================
+\section{条件数、特征标准化与 Mini-batch SGD 直觉}
+\label{sec:ch6-scaling-sgd}
+
+上一节的理论绝不是纸上谈兵。在真实机器学习数据中，不同特征的量纲常常相差千倍万倍——例如房价预测中“房屋年收入”量级在 $10^5$、“卧室个数”量级在 $1$；或者传感器数据中一个通道标准差为 $100$，另一个通道标准差为 $0.1$。这对线性回归的梯度下降意味着什么？
+
+\subsection{实测：Z-score 特征标准化把条件数砍掉近 80 万倍}
+
+考虑 \texttt{code/vol1\_experiments.py} 中的实测实验：生成 $N=200$ 个二维样本，特征 $x_1 \sim \mathcal{N}(0, 100^2)$、$x_2 \sim \mathcal{N}(0, 0.1^2)$，拼成设计矩阵 $X_{\text{raw}} \in \R^{200\times 2}$。回忆第 5.4 节，线性回归 MSE 的 Hessian 矩阵正是 $H = \frac{1}{N} X^T X$。
+
+现在对每一列特征执行 \textbf{Z-score 标准化（Standardization）}：
+\begin{equation}\label{eq:ch6-zscore}
+  \tilde{x}_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j},
+  \qquad
+  \mu_j = \frac{1}{N}\sum_{i=1}^N x_{ij},
+  \quad
+  \sigma_j = \sqrt{\frac{1}{N}\sum_{i=1}^N (x_{ij} - \mu_j)^2}.
+\end{equation}
+对比标准化前后 Hessian 矩阵 $H = \frac{1}{N}X^T X$ 的本机实测指标（表~\ref{tab:ch6-scaling}）：
+
+\begin{table}[htbp]
+\centering
+\caption{特征量纲失衡 vs Z-score 标准化的线性回归 Hessian 条件数与收敛步数实测对比（$N=200$）}
+\label{tab:ch6-scaling}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{特征预处理方式} & \textbf{Hessian 条件数 $\cond(H)$} & \textbf{最优收缩率 $\rho^* = \frac{\cond-1}{\cond+1}$} & \textbf{误差降 $10^{-6}$ 最坏步数} \\
+\midrule
+原始特征 $X_{\text{raw}}$ & $8.22 \times 10^{5}$ & $0.9999976$ & 约 \textbf{568 万步} \\
+Z-score 标准化 $X_{\text{std}}$ & $\mathbf{1.036}$ & $\mathbf{0.0174}$ & 仅 \textbf{4 步} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+仅仅一行两秒钟的 Z-score 预处理，就把 Hessian 条件数从 \textbf{$8.22\times 10^5$} 暴降到 \textbf{$1.036$}（改善了近 \textbf{79.4 万倍}！），把等高线从一根几乎贴成直线的“针”瞬间拉回接近完美的圆碗，最坏收敛步数从\textbf{五百多万步骤降至 4 步}！
+
+\subsubsection{训练完后如何还原原始特征上的权重与偏置？}
+在实际部署时，若想直接拿原始未缩放特征 $x$ 做预测，只需把标准化变换代入预测式并展开整理即可。设我们在标准化特征上训练出了模型 $\hat{y} = \tilde{b} + \sum_{j=1}^d \tilde{w}_j \tilde{x}_j$，将 $\tilde{x}_j = (x_j - \mu_j)/\sigma_j$ 代入：
+\[
+  \hat{y} = \tilde{b} + \sum_{j=1}^d \tilde{w}_j \frac{x_j - \mu_j}{\sigma_j}
+          = \underbrace{\left(\tilde{b} - \sum_{j=1}^d \frac{\tilde{w}_j \mu_j}{\sigma_j}\right)}_{b}
+            + \sum_{j=1}^d \underbrace{\left(\frac{\tilde{w}_j}{\sigma_j}\right)}_{w_j} x_j.
+\]
+于是原始坐标系下的等价权重与偏置为
+\begin{equation}\label{eq:ch6-recover-w}
+  w_j = \frac{\tilde{w}_j}{\sigma_j},
+  \qquad
+  b = \tilde{b} - \sum_{j=1}^d \frac{\tilde{w}_j \mu_j}{\sigma_j}.
+\end{equation}
+请牢记一条第 2 卷还将反复强调的工程红线：\textbf{均值 $\mu_j$ 与标准差 $\sigma_j$ 只能从训练集计算}，验证集和测试集必须原封不动套用训练集保存下来的 $(\mu_j, \sigma_j)$，绝不能把测试集统计量混入预处理中（防止数据泄露）。
+
+\subsection{从全批量梯度下降到 Mini-batch SGD 的直觉}
+
+全批量梯度下降（Full-batch GD）每走一步都要对全部 $N$ 条样本求和：
+\[
+  \nabla f(w) = \frac{1}{N} \sum_{i=1}^N \nabla \ell_i(w),
+\]
+单步开销为 $O(ND)$。当训练集规模达到 $N = 10^6$ 甚至 $10^9$（如现代图像与语料库）时，全批量算完一次梯度要扫描几十 GB 数据，但参数只挪动了区区一小步——且相邻样本往往高度冗余，前 64 条样本算出的平均梯度方向其实已经与全集梯度八九不离十！
+
+\textbf{小批量随机梯度下降（Mini-batch SGD）}顺势而生：每一步仅随机抽取一小批样本 $\mathcal{B}_t \subset \{1,\dots,N\}$（批量大小 $B = |\mathcal{B}_t|$ 通常取 $32, 64, 128, 256$），用小批量平均梯度代替真实全梯度：
+\begin{equation}\label{eq:ch6-sgd}
+  g_{\mathcal{B}_t}(w_t) = \frac{1}{B} \sum_{i\in\mathcal{B}_t} \nabla \ell_i(w_t),
+  \qquad
+  w_{t+1} = w_t - \eta_t\, g_{\mathcal{B}_t}(w_t).
+\end{equation}
+初读时只需把握 Mini-batch SGD 的三条核心直觉（关于凸目标下随机梯度的精确收敛率证明留待第 4 卷系统展开）：
+\begin{enumerate}
+  \item \textbf{方向平均无偏}：若每个样本等概率被抽入 $\mathcal{B}_t$，则随机梯度在平均意义上等于真实全梯度（$\E[g_{\mathcal{B}_t}(w)] = \nabla f(w)$），总体趋势依然朝向谷底。
+  \item \textbf{以小噪声换取极速更新}：全批量走 1 步的时间，Mini-batch SGD 已经更新了 $N/B$ 步，早期下降速度往往快几个数量级。
+  \item \textbf{谷底随机抖动与应对手段}：即使参数已经走到最优解 $w^*$ 附近，单个小批量的梯度 $g_{\mathcal{B}_t}(w^*)$ 依然不为零，因此固定步长 $\eta$ 下参数会在谷底附近持续小幅“嗡嗡震荡”。工程上常用的两大化解手段是\textbf{学习率衰减}（如 $\eta_t = \eta_0 / (1 + \alpha t)$，越靠近谷底步子迈得越小）以及引入\textbf{动量（Momentum）}（对历史梯度做指数滑动平均 $v_{t+1} = \beta v_t + g_{\mathcal{B}_t}$，既平滑随机抖动，又在狭长山谷的平缓轴上累积速度）。
+\end{enumerate}
+
+代码~\ref{lst:ch6-gd-sgd} 给出完整可运行的纯 NumPy 实现：对量纲悬殊 1000 倍的数据做 Z-score 标准化，分别用全批量 GD 和 Mini-batch SGD 求解线性回归，并按式~\eqref{eq:ch6-recover-w} 还原原始权重，与 \texttt{np.linalg.lstsq} 精确核对！
+
+\begin{lstlisting}[caption={标准化全批量 GD 与 Mini-batch SGD 线性回归（对比 \texttt{lstsq} 校验）},label={lst:ch6-gd-sgd}]
+import numpy as np
+
+rng = np.random.default_rng(7)
+N, D = 200, 2
+X_raw = np.column_stack([rng.normal(0, 100.0, N), rng.normal(0, 0.1, N)])
+w_true, b_true = np.array([0.03, -4.0]), 1.5
+y = X_raw @ w_true + b_true + rng.normal(0, 0.2, N)
+
+# 1. 解析解参考 (np.linalg.lstsq)
+X_aug = np.column_stack([X_raw, np.ones(N)])
+theta_ls, *_ = np.linalg.lstsq(X_aug, y, rcond=None)
+w_ls, b_ls = theta_ls[:D], theta_ls[D]
+
+# 2. Z-score 标准化（仅用训练集统计量）
+mu, sigma = X_raw.mean(axis=0), X_raw.std(axis=0)
+X_std = (X_raw - mu) / sigma
+
+# 3. 标准化后的全批量梯度下降
+w_s, b_s, eta = np.zeros(D), 0.0, 0.2
+for _ in range(150):
+    err = X_std @ w_s + b_s - y
+    w_s -= eta * (X_std.T @ err) / N
+    b_s -= eta * np.mean(err)
+
+w_rec = w_s / sigma
+b_rec = b_s - np.dot(w_s, mu / sigma)
+assert np.allclose(w_rec, w_ls, atol=1e-6) and np.isclose(b_rec, b_ls, atol=1e-6)
+
+# 4. 带学习率衰减的 Mini-batch SGD
+w_sgd, b_sgd, B = np.zeros(D), 0.0, 32
+for epoch in range(100):
+    perm = rng.permutation(N)
+    lr = 0.15 / (1.0 + 0.08 * epoch)
+    for start in range(0, N, B):
+        idx = perm[start:start + B]
+        err = X_std[idx] @ w_sgd + b_sgd - y[idx]
+        w_sgd -= lr * (X_std[idx].T @ err) / len(idx)
+        b_sgd -= lr * np.mean(err)
+
+w_sgd_rec = w_sgd / sigma
+b_sgd_rec = b_sgd - np.dot(w_sgd, mu / sigma)
+rel_err = np.linalg.norm(w_sgd_rec - w_ls) / np.linalg.norm(w_ls)
+assert rel_err < 1e-2  # 实测相对误差 ~ 3.0e-3
+\end{lstlisting}
+
+% ====================================================================
+\section{写梯度代码不出错的终极防线：有限差分梯度校验}
+\label{sec:ch6-gradcheck}
+
+从第 2 卷手写逻辑/Softmax 回归，到第 5 卷手写自动微分与反向传播，你会无数次把纸上的矩阵微积分公式敲成 NumPy 代码。梯度代码有一个令所有工程师头皮发麻的特点：\textbf{即使写错了一个转置、漏了一个系数 $2$ 或广播错了轴，损失函数往往仍然会“看起来在慢慢下降”，把 Bug 悄无声息地藏起来！}
+
+怎么在 3 秒钟内 100\% 确信自己写的解析梯度函数 \texttt{grad\_f(w)} 分毫不差？答案是 Stanford CS231n 与工业界公认的终极防线——\textbf{中心有限差分梯度校验（Finite-Difference Gradient Checking）}。
+
+\subsection{为什么中心差分比前向差分精确整整一个阶次？}
+
+固定参数向量 $w\in\R^d$ 和第 $i$ 个标准基向量 $e_i$，考虑沿第 $i$ 坐标轴的一元切片函数 $g(\epsilon) \coloneqq f(w + \epsilon e_i)$（设 $f$ 三阶连续可微）。比较两种数值逼近偏导数 $\frac{\partial f}{\partial w_i}(w) = g'(0)$ 的公式：
+
+\begin{thmBox}
+\begin{proposition}[前向差分 $O(\epsilon)$ vs 中心差分 $O(\epsilon^2)$ 截断误差]\label{prop:ch6-fd-order}
+对三阶连续可微函数 $f:\R^d\to\R$ 与微小步长 $\epsilon > 0$，记 $D_i^{\text{fwd}}$ 为前向差分、$D_i^{\text{cen}}$ 为中心差分：
+\begin{align}
+  D_i^{\text{fwd}}(w;\epsilon) &\coloneqq \frac{f(w + \epsilon e_i) - f(w)}{\epsilon}
+    = \frac{\partial f}{\partial w_i}(w) + \frac{1}{2}\frac{\partial^2 f}{\partial w_i^2}(w)\,\epsilon + O(\epsilon^2), \label{eq:ch6-fwd-diff}\\
+  D_i^{\text{cen}}(w;\epsilon) &\coloneqq \frac{f(w + \epsilon e_i) - f(w - \epsilon e_i)}{2\epsilon}
+    = \frac{\partial f}{\partial w_i}(w) + \frac{1}{6}\frac{\partial^3 f}{\partial w_i^3}(w)\,\epsilon^2 + O(\epsilon^4). \label{eq:ch6-cen-diff}
+\end{align}
+中心差分通过正负对称相减，\textbf{精确消去了二阶截断误差项}，将精度从 $O(\epsilon)$ 提升为 $O(\epsilon^2)$。
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+对 $g(\epsilon) = f(w+\epsilon e_i)$ 在 $0$ 处做三阶 Taylor 展开：
+\begin{align*}
+  g(+\epsilon) &= g(0) + g'(0)\epsilon + \frac{1}{2}g''(0)\epsilon^2 + \frac{1}{6}g'''(0)\epsilon^3 + O(\epsilon^4), \\
+  g(-\epsilon) &= g(0) - g'(0)\epsilon + \frac{1}{2}g''(0)\epsilon^2 - \frac{1}{6}g'''(0)\epsilon^3 + O(\epsilon^4).
+\end{align*}
+第一式减 $g(0)$ 后除以 $\epsilon$ 立即得前向差分式~\eqref{eq:ch6-fwd-diff}（主误差项为 $\frac{1}{2}g''(0)\epsilon$）。将第一式减去第二式，常数项 $g(0)$ 与偶次项 $\frac{1}{2}g''(0)\epsilon^2$ 完美抵消，得
+\[
+  g(+\epsilon) - g(-\epsilon) = 2 g'(0)\epsilon + \frac{1}{3}g'''(0)\epsilon^3 + O(\epsilon^4),
+\]
+两边同除以 $2\epsilon$ 即得中心差分式~\eqref{eq:ch6-cen-diff}。
+\end{proof}
+
+\subsection{浮点舍入与截断误差的博弈：经典 V 形误差曲线}
+
+既然中心差分截断误差是 $O(\epsilon^2)$，那是不是把 $\epsilon$ 设成 $10^{-14}$ 越小越好？\textbf{绝对不是！}在计算机 IEEE-754 双精度浮点数（\texttt{float64}，机器精度 $u \approx 2.22\times 10^{-16}$）下，每次函数求值都会携带量级约 $u|f(w)|$ 的舍入误差。当 $\epsilon$ 极小时，分子 $f(w+\epsilon e_i) - f(w-\epsilon e_i)$ 发生\textbf{大数相减的灾难性消去}，再除以极小的 $2\epsilon$，舍入误差被放大为 $O(u/\epsilon)$！
+
+因此总数值误差呈现截断误差与舍入误差的拔河：
+\[
+  \text{总误差}_{\text{cen}}(\epsilon) \approx C_1 \epsilon^2 + C_2 \frac{u}{\epsilon}.
+\]
+对 $\epsilon$ 求导令其为零，立即算出 \texttt{float64} 下中心差分的理论最优步长：
+\[
+  \epsilon^*_{\text{cen}} \sim u^{1/3} \approx (2.22\times 10^{-16})^{1/3} \approx 6\times 10^{-6} \;\;(\text{工程常用 } 10^{-5}),
+\]
+此时最低误差可达 $O(u^{2/3}) \approx 10^{-11}$！同理，前向差分平衡 $O(\epsilon)$ 与 $O(u/\epsilon)$ 的最优步长在 $\epsilon^*_{\text{fwd}} \sim u^{1/2} \approx 10^{-8}$，最低误差仅能到达 $O(u^{1/2}) \approx 10^{-8}$——精度比中心差分足足差了 3 个数量级！
+
+图~\ref{fig:ch6-gradcheck} 展示了 \texttt{code/vol1\_experiments.py} 对光滑非线性函数 $f(w) = \ln(1 + e^{a^T w}) + \frac{1}{4}\norm{w}_2^4$（$w\in\R^{10}$）的本机实测 V 形双对数曲线（读取自 \texttt{data/gradcheck\_eps.csv}）：
+\begin{itemize}
+  \item 在黄金步长 $\epsilon = 10^{-5}$ 处：前向差分相对误差为 $8.27\times 10^{-6}$，而中心差分相对误差低至 $\mathbf{2.62\times 10^{-11}}$，精度拉开近\textbf{六个数量级}！
+  \item 当步长过小滑向 $\epsilon = 10^{-12}$ 时：浮点舍入误差接管全局，两者误差双双恶化到 $\sim 10^{-4}$！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=0.86\linewidth,
+  height=6.5cm,
+  xlabel={有限差分扰动步长 $\epsilon$（对数刻度）},
+  ylabel={梯度相对误差 $\norm{g_{\text{num}} - g_{\text{ana}}}_2 / \norm{g_{\text{ana}}}_2$},
+  xmin=7e-15, xmax=1.5e-1,
+  ymin=1e-12, ymax=2e-1,
+  grid=both,
+  grid style={line width=0.25pt, draw=slate!20},
+  major grid style={line width=0.4pt, draw=slate!35},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize},
+  legend style={font=\footnotesize, at={(0.03,0.05)}, anchor=south west,
+    fill=white, fill opacity=0.92, draw=codeborder, inner sep=3pt},
+  legend cell align=left
+]
+  \addplot[ochre, very thick, mark=square*, mark size=1.8pt]
+    table[col sep=comma, x=eps, y=fwd_err]{data/gradcheck_eps.csv};
+  \addlegendentry{前向差分 $O(\epsilon)$（右支斜率 $+1$）}
+
+  \addplot[teal, very thick, mark=*, mark size=2.0pt]
+    table[col sep=comma, x=eps, y=cen_err]{data/gradcheck_eps.csv};
+  \addlegendentry{中心差分 $O(\epsilon^2)$（右支斜率 $+2$）}
+
+  % Vertical reference line at eps = 1e-5
+  \draw[navy, dashed, thick] (axis cs:1e-5, 1e-12) -- (axis cs:1e-5, 1e-1);
+  \node[font=\scriptsize\sffamily, navy, anchor=south west, align=left,
+    fill=white, fill opacity=0.92, text opacity=1, inner sep=1.5pt]
+    at (axis cs:3.8e-5, 1.9e-12) {黄金步长 $\epsilon=10^{-5}$\\中心差分 $2.62\times 10^{-11}$};
+
+  % Regime labels
+  \node[font=\scriptsize\sffamily, slate, align=center, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt]
+    at (axis cs:4e-11, 2.5e-3) {浮点舍入主导区\\$O(u/\epsilon)$（斜率 $-1$）};
+  \node[font=\scriptsize\sffamily, slate, align=center, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt]
+    at (axis cs:8e-6, 2.5e-3) {Taylor 截断主导区\\中心差分快得多};
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{\texttt{data/gradcheck\_eps.csv} 实测有限差分 V 形误差曲线（\texttt{float64}）：左侧为浮点消去舍入误差主导区，右侧为 Taylor 截断误差主导区；$\epsilon=10^{-5}$ 是中心差分的黄金甜蜜点，可将校验精度压低至 $10^{-11}$ 量级。}
+\label{fig:ch6-gradcheck}
+\end{figure}
+
+\subsection{可直接复用到第 2--5 卷的通用梯度校验工具}
+
+代码~\ref{lst:ch6-gradcheck} 实现了支持任意形状（向量、矩阵、高维张量）参数的 \texttt{numerical\_gradient} 与 \texttt{check\_gradient}，并立即拿它检验第 5.4 节推导的神经网络层梯度 $\nabla_W\big(\frac{1}{2}\norm{\tanh(WX)-Y}_F^2\big) = \big((A-Y)\had(1-A^2)\big)X^T$（本机实测相对误差低至 $5.01\times 10^{-11}$！）。
+
+\begin{lstlisting}[caption={通用中心差分梯度校验工具（支持任意维度 NumPy 张量）},label={lst:ch6-gradcheck}]
+import numpy as np
+
+def numerical_gradient(f, w, eps=1e-5):
+    """用中心有限差分计算标量函数 f 对任意形状数组 w 的数值梯度。"""
+    w = np.asarray(w, dtype=np.float64).copy()
+    grad = np.zeros_like(w)
+    it = np.nditer(w, flags=["multi_index"])
+    while not it.finished:
+        idx = it.multi_index
+        old_val = w[idx]
+        w[idx] = old_val + eps
+        fp = f(w)
+        w[idx] = old_val - eps
+        fm = f(w)
+        w[idx] = old_val
+        grad[idx] = (fp - fm) / (2.0 * eps)
+        it.iternext()
+    return grad
+
+def check_gradient(f, grad_f, w, eps=1e-5, tol=1e-7):
+    """校验解析梯度 grad_f(w) 的形状与数值正确性，返回 (相对误差, 是否通过)。"""
+    g_ana = np.asarray(grad_f(w), dtype=np.float64)
+    g_num = numerical_gradient(f, w, eps=eps)
+    assert g_ana.shape == w.shape, f"Shape mismatch: {g_ana.shape} vs {w.shape}"
+    denom = max(np.linalg.norm(g_ana) + np.linalg.norm(g_num), 1e-12)
+    rel_err = float(np.linalg.norm(g_ana - g_num) / denom)
+    return rel_err, rel_err < tol
+
+# 实战校验第 5.4 节神经网络层反向传播公式：L(W) = 0.5 * ||tanh(W @ X) - Y||_F^2
+rng = np.random.default_rng(123)
+W0 = rng.normal(size=(3, 4))
+X0 = rng.normal(size=(4, 5))
+Y0 = rng.normal(size=(3, 5))
+
+f_layer = lambda W: 0.5 * float(np.sum((np.tanh(W @ X0) - Y0) ** 2))
+def grad_layer(W):
+    A = np.tanh(W @ X0)
+    dZ = (A - Y0) * (1.0 - A ** 2)   # Hadamard 穿过激活层
+    return dZ @ X0.T                  # 迹技巧穿过线性层
+
+rel_err, passed = check_gradient(f_layer, grad_layer, W0)
+assert passed  # 实测 rel_err = 5.01e-11
+\end{lstlisting}
+
+\begin{failBox}{做梯度校验时的三大避坑铁律}
+\begin{enumerate}
+  \item \textbf{必须使用 \texttt{float64}，绝不用 \texttt{float32}}：\texttt{float32} 的机器精度仅 $u\approx 1.19\times 10^{-7}$，中心差分最低误差只能卡在 $10^{-4}$ 附近，根本分不清代码有没有写错！
+  \item \textbf{避开不可微折点（Kinks）}：如果函数包含 $\operatorname{ReLU}(z)=\max(0,z)$ 或 $|z|$，当某个分量恰好落在 $z=0$ 附近 $|z|<\epsilon$ 时，$w+\epsilon e_i$ 与 $w-\epsilon e_i$ 会跨过折点两侧，导致数值差分与解析梯度出现假警报。校验时请用小规模随机高斯权重并避开零点。
+  \item \textbf{只在小尺寸张量上做单元测试}：对 $D$ 维参数做中心差分需要调用前向函数 $2D$ 次，千万不要在正式训练循环里跑梯度校验！正确做法是在 $D\sim 10$--$50$ 的迷你测试数据上跑通 \texttt{check\_gradient}（相对误差 $<10^{-7}$），再放心地把同一套解析梯度代码投入大规模训练。
+\end{enumerate}
+\end{failBox}
+
+% ====================================================================
+\section{全卷收束与第 2 卷预告}
+\label{sec:ch6-wrapup}
+
+回顾第 1 卷走过的六章阶梯，我们已经把大一数理与 C 语言基础彻底升级为现代人工智能的\textbf{确定性计算语言}：
+\begin{itemize}
+  \item \textbf{第 1 章（语言与算力）}：打通 Python/NumPy 向量化、广播排错与矩阵乘法四视角（尤其是外积与张量批处理）；
+  \item \textbf{第 2 章（几何与回归）}：掌握高维近正交直觉、四大子空间正交投影，并亲手跑出线性最小二乘与岭回归；
+  \item \textbf{第 3--4 章（谱分解与降维）}：用实对称谱定理看穿 PSD 矩阵与条件数 $\cond$，用 SVD 与 PCA 揭示数据压缩和最小范数解的几何本质；
+  \item \textbf{第 5--6 章（微积分与优化闭环）}：建立 Jacobian 反向 VJP 与矩阵微分迹技巧，通过二次型谱动力学理解步长阈值、特征标准化与 Mini-batch SGD，并装备好有限差分梯度校验武器。
+\end{itemize}
+
+\begin{insightBox}{为什么要迈向第 2 卷：《AI 概率论、数理统计、信息论与首个回归/分类闭环》？}
+第 1 卷已经能优雅地拟合数据并运行梯度下降，但三个根本问题在确定性线代与微积分框架内\textbf{无法回答}：
+\begin{enumerate}
+  \item \textbf{为什么回归用平方损失、岭回归加 $L_2$ 惩罚？}第 2 卷将用\textbf{极大似然估计（MLE）与最大后验估计（MAP）}揭示：最小二乘等价于高斯噪声假设下的 MLE，而 $L_2$ 岭回归正是权重服从高斯先验时的 MAP！
+  \item \textbf{如何处理“是/否”与多分类问题？}面对离散类别标签，平方损失不再合适；我们需要概率分布、\textbf{信息熵、交叉熵与 KL 散度}，从而自然导出\textbf{逻辑回归与 Softmax 分类}。
+  \item \textbf{如何量化模型泛化可靠性？}第 2 卷将把概率统计工具与本卷的梯度下降、有限差分校验合流，用纯 NumPy 打造一套完整的回归/分类训练、交叉验证与精确评测闭环！
+\end{enumerate}
+\end{insightBox}
+
+% ====================================================================
+\section{本章习题}
+\label{sec:ch6-exercises}
+
+\exTier{A. 概念辨析与反例查错}{戳破调参与预处理中最常见的直觉误区}
+\begin{enumerate}[label=\textbf{6.\arabic*}]
+  \item \textbf{判断正误并纠错}：
+  (a) “梯度下降在每一步都沿当前负梯度方向移动，因此只要步长 $\eta > 0$，目标函数值 $f(w_{t+1})$ 就一定小于 $f(w_t)$。”
+  (b) “在用中心有限差分做梯度校验时，步长 $\epsilon$ 越小结果越准确，因此取 $\epsilon = 10^{-14}$ 远优于 $\epsilon = 10^{-5}$。”
+  请判断真假，并分别用本章的具体例子或误差机理说明原因。
+
+  \item \textbf{特征标准化与数据泄露排错}：某同学在做线性回归实验时写了如下代码：先对包含训练集和测试集的整个数据矩阵 \texttt{X\_all} 计算整体均值与标准差 \texttt{mu, sigma} 并标准化，再划分训练集与测试集；训练得到权重 \texttt{w\_std} 后，在部署上线时直接把原始未缩放特征 \texttt{x\_new} 乘以 \texttt{w\_std} 输出预测值。请指出这段流程中的\textbf{两处严重错误}，并写出正确做法。
+\end{enumerate}
+
+\exTier{B. 具体小例手算}{亲手算通步长阈值、最优收缩率与权重还原}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{非对角二次型的步长红线与最优收敛率}：设二次型函数 $f(w) = \frac{1}{2}w^T Q w - b^T w$，其中
+  \[
+    Q = \begin{bmatrix} 5 & 3 \\ 3 & 5 \end{bmatrix}, \qquad b = \begin{bmatrix} 8 \\ 8 \end{bmatrix}.
+  \]
+  (a) 求 $Q$ 的特征值 $\lambda_{\max}, \lambda_{\min}$、条件数 $\cond(Q)$ 与唯一极小值点 $w^*$；
+  (b) 求梯度下降对任意初值都收敛的最大允许步长上限 $\eta_{\max} = 2/\lambda_{\max}$、最优固定步长 $\eta^*$ 及最优单步误差收缩因子 $\rho^*$；
+  (c) 若从 $w_0 = (0, 0)^T$ 出发，分别手算采用最优步长 $\eta^*$ 与步长 $\eta = 1/8$ 时的第一步结果 $w_1$，并从特征坐标角度解释为何 $\eta = 1/8$ 竟能\textbf{一步直接命中} $w^*$（提示：观察 $e_0 = w_0 - w^*$ 落在 $Q$ 的哪一个特征方向上！）。
+
+  \item \textbf{标准化后的权重还原计算}：某房价线性回归模型包含两个原始特征 $x_1$（面积，训练集均值 $\mu_1 = 100$，标准差 $\sigma_1 = 25$）和 $x_2$（房龄，均值 $\mu_2 = 10$，标准差 $\sigma_2 = 5$）。在 Z-score 标准化特征上运行梯度下降得到模型 $\hat{y} = 300 + 50\tilde{x}_1 - 15\tilde{x}_2$。请按式~\eqref{eq:ch6-recover-w} 手算出等价的原始特征线性模型 $\hat{y} = b + w_1 x_1 + w_2 x_2$，并用一条具体样本 $(x_1, x_2) = (125, 5)$ 验证两个表达式预测值完全相等。
+\end{enumerate}
+
+\exTier{C. AI 核心推演与实用证明}{夯实数值分析与优化动力学的推导功底}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{带 $L_2$ 正则化对 Hessian 条件数的改善证明}：设线性回归的原始 Hessian 矩阵 $H_0 = \frac{1}{N}X^T X \succeq 0$ 的最大与最小特征值分别为 $\lambda_{\max} > \lambda_{\min} > 0$（条件数 $\cond_0 = \lambda_{\max}/\lambda_{\min}$）。现加入岭回归正则项 $\frac{\alpha}{2}\norm{w}_2^2$（$\alpha > 0$），新 Hessian 变为 $H_\alpha = H_0 + \alpha I$。
+  证明：新条件数 $\cond(H_\alpha) = \dfrac{\lambda_{\max}+\alpha}{\lambda_{\min}+\alpha}$ 严格小于 $\cond_0$，并说明随着 $\alpha$ 增大，梯度下降的最优单步收缩因子 $\rho^*(\alpha)$ 严格单调减小（即正则化不仅抑制过拟合，还同时加速梯度下降收敛！）。
+  \exHint{由第 3 章谱映射性质，$H_0 + \alpha I$ 的特征值为 $\lambda_i + \alpha$；直接作差 $\cond_0 - \cond(H_\alpha) = \frac{\alpha(\lambda_{\max}-\lambda_{\min})}{\lambda_{\min}(\lambda_{\min}+\alpha)} > 0$。}
+
+  \item \textbf{中心差分最优步长 $\epsilon^* \sim u^{1/3}$ 的定量推导}：设函数值计算引入的绝对浮点舍入误差上界为 $M u$（其中 $u\approx 2.22\times 10^{-16}$ 为双精度机器精度），三阶导数绝对值上界为 $K = |g'''(0)| > 0$。结合命题~\ref{prop:ch6-fd-order} 写出中心差分总误差上界
+  \[
+    E(\epsilon) = \frac{K}{6}\epsilon^2 + \frac{M u}{\epsilon}.
+  \]
+  求使 $E(\epsilon)$ 最小的最优步长 $\epsilon^*$ 及最小误差 $E(\epsilon^*)$ 的显式表达式；当 $K \sim M \sim 1$ 时估算 $\epsilon^*$ 与 $E(\epsilon^*)$ 的数量级，并与图~\ref{fig:ch6-gradcheck} 中的实测底部对比。
+  \exHint{令 $E'(\epsilon) = \frac{K}{3}\epsilon - \frac{M u}{\epsilon^2} = 0$ 解出 $\epsilon^* = (3Mu/K)^{1/3}$，再代回 $E(\epsilon^*)$。}
+\end{enumerate}
+
+\exTier{D. 可自检编程实验}{动手验证病态加速与完整梯度校验闭环}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{复现特征标准化对梯度下降的加速奇迹}：使用固定随机种子生成 $N=300$、特征维度 $D=3$ 的合成回归数据，三个特征标准差分别取 $(1000, 1, 0.01)$，真实权重 $w_{\text{true}} = (0.002, 3.0, -50.0)^T$、偏置 $b_{\text{true}} = 1.0$，叠加标准差 $0.1$ 的高斯噪声。
+  \begin{enumerate}[label=(\alph*)]
+    \item 计算原始 Hessian $\frac{1}{N}X_{\text{raw}}^T X_{\text{raw}}$ 与 Z-score 标准化 Hessian $\frac{1}{N}X_{\text{std}}^T X_{\text{std}}$ 的条件数；
+    \item 对标准化特征分别按理论最优步长 $\eta^* = 2/(\lambda_{\max}+\lambda_{\min})$ 与手动步长 $\eta = 0.2$ 运行全批量梯度下降 100 步，并还原原始权重 $(w_{\text{rec}}, b_{\text{rec}})$。
+  \end{enumerate}
+  \textbf{自检标准}：断言原始条件数 $> 10^8$、标准化条件数 $< 2.0$，且用最优步长 $\eta^*$ 迭代 30 步内还原后的权重满足 $\norm{w_{\text{rec}} - w_{\text{ls}}}_2 / \norm{w_{\text{ls}}}_2 < 10^{-8}$（$w_{\text{ls}}$ 为 \texttt{np.linalg.lstsq} 参考解）。
+  \exHint{加入偏置项一起做标准化矩阵时，可以把 $\tilde{X}_{\text{aug}} = [X_{\text{std}},\, \mathbf{1}]$ 作为整体设计矩阵计算 $\frac{1}{N}\tilde{X}_{\text{aug}}^T \tilde{X}_{\text{aug}}$ 的最大最小特征值，直接给出含偏置的精确最优步长 $\eta^*$！}
+
+  \item \textbf{用中心差分校验岭回归与 Softplus 损失梯度}：编写解析梯度并调用代码~\ref{lst:ch6-gradcheck} 中的 \texttt{check\_gradient}，对以下两个第 2 卷高频损失函数完成自动化梯度校验（取 $N=40, D=8$ 随机 \texttt{float64} 数据）：
+  \begin{enumerate}[label=(\alph*)]
+    \item 岭回归损失：$L_1(w) = \frac{1}{2N}\norm{Xw - y}_2^2 + \frac{\lambda}{2}\norm{w}_2^2$（$\lambda = 0.5$）；
+    \item 二分类对数损失（逻辑回归雏形，标签 $y_i\in\{0,1\}$）：
+    \[
+      L_2(w) = \frac{1}{N}\sum_{i=1}^N \Big(\ln\big(1 + e^{x_i^T w}\big) - y_i (x_i^T w)\Big) + \frac{\lambda}{2}\norm{w}_2^2,
+    \]
+    提示：其解析梯度为 $\nabla_w L_2(w) = \frac{1}{N}X^T(\sigma(Xw) - y) + \lambda w$（其中 $\sigma(z)=1/(1+e^{-z})$），计算 $\ln(1+e^z)$ 时请使用数值稳定的 \texttt{np.logaddexp(0.0, z)}！
+  \end{enumerate}
+  \textbf{自检标准}：两个损失函数在 $\epsilon = 10^{-5}$ 下的相对误差均需严格小于 $10^{-9}$；同时故意把梯度中的一个符号改错（例如把 $\lambda w$ 写成 $-\lambda w$），验证你的 \texttt{check\_gradient} 能立刻报警返回 \texttt{passed == False}。
+  \exHint{这就是第 2 卷逻辑回归的核心梯度公式！养成“每写完一个新损失函数立刻跑一遍 \texttt{check\_gradient}”的习惯，未来手写神经网络能省下无数小时排错时间。}
+\end{enumerate}

@@ -1,0 +1,690 @@
+\chapter[凸分析与一阶优化收敛率]{凸分析与一阶优化收敛率理论}\label{ch:v4-convex}
+
+\chapEpigraph{事实上，优化问题的真正分水岭并不在于线性与非线性，而在于凸与非凸。}{R. Tyrrell Rockafellar（1993）}
+
+\begin{chapIntro}{本章导读：从“沿着负梯度走”到“精确预报收敛步数”}
+在第 1 卷与第 2 卷中，我们已经多次使用梯度下降（Gradient Descent, GD）去最小化线性回归的均方误差或逻辑回归的交叉熵损失。然而当时的理解仍停留在局部直觉上：“负梯度是最速下降方向，所以只要步长别太大，慢慢走总能走到谷底。”
+
+本章将把这一经验直觉升级为一套严密的定量理论。我们将依次回答四个核心问题：
+\begin{enumerate}
+  \item \textbf{何时“停下来”就意味着全局最优？}——通过凸集、凸函数与一阶/二阶等价刻画，严格证明凸优化不存在“陷阱局部极小点”。
+  \item \textbf{步长 $\eta$ 究竟可以取多大？每走一步至少能下降多少？}——利用 $L$-光滑条件证明\textbf{下降引理}（Descent Lemma），定量导出步长阈值 $\eta = 1/L$ 与经典 $O(1/T)$ 亚线性收敛率。
+  \item \textbf{为什么加上一个看似普通的 $L_2$ 正则项 $\frac{\lambda}{2}\norm{w}_2^2$，收敛会从“蜗牛爬”变成指数飞跃？}——建立 $\mu$-强凸与 Polyak-\L{}ojasiewicz（PL）不等式，证明线性收敛率 $(1-\mu/L)^T$，并揭示条件数 $\kappa = L/\mu$ 的统治地位。
+  \item \textbf{当条件数 $\kappa \approx 10^3$ 时如何破局？}——剖析动量法（Heavy-Ball）与 Nesterov 加速梯度（NAG）将依赖从 $\kappa$ 压缩至 $\sqrt{\kappa}$ 的几何机理，并在真实病态逻辑回归数据上用纯 NumPy 代码验证。
+\end{enumerate}
+\end{chapIntro}
+
+% ============================================================
+\section{病态地形的警钟：为什么梯度下降会剧烈“之字形”震荡？}
+% ============================================================
+
+在引入任何抽象定义之前，我们先看一个在机器学习中最常见、却最令人困惑的失败现象。
+
+\begin{recallBox}{与第 1 卷和第 2 卷的衔接}
+在第 1 卷第 5--6 章我们学过：对称正定矩阵 $A \in \R^{d\times d}$ 的特征值 $\lambda_{\max}(A) \ge \dots \ge \lambda_{\min}(A) > 0$ 决定了二次型 $x^\top A x$ 在各个主轴方向上的弯曲程度，其比值 $\kappa(A) = \lambda_{\max}(A)/\lambda_{\min}(A)$ 称为\textbf{条件数}。在第 2 卷第 5 章中，我们通过极大似然导出了逻辑回归的负对数似然损失。今天我们要看看，一旦输入特征的量纲相差一个数量级（比如身高以米计、年薪以元计），梯度下降会遭遇怎样的灾难。
+\end{recallBox}
+
+\begin{example}[二维狭长山谷上的之字形停滞]\label{ex:v4-ch1-zigzag}
+考虑极简的二维强凸二次函数
+\[
+  f(x_1, x_2) = \frac{1}{2}\left(x_1^2 + 100 x_2^2\right),
+\]
+其唯一全局极小点显然为 $x^* = (0,0)^\top$，$f^* = 0$。梯度为 $\nabla f(x) = (x_1,\, 100x_2)^\top$，海森矩阵为 $\nabla^2 f(x) = \diag(1, 100)$，最小曲率 $\mu = 1$，最大曲率 $L = 100$，条件数 $\kappa = L/\mu = 100$。
+
+从起点 $x_0 = (10, 1)^\top$ 出发，执行固定步长梯度下降 $x_{t+1} = x_t - \eta \nabla f(x_t)$，两个坐标完全解耦：
+\[
+  x_{t,1} = (1 - \eta)^t \cdot 10, \qquad x_{t,2} = (1 - 100\eta)^t \cdot 1.
+\]
+为了避免 $x_{t,2}$ 爆炸发散，我们必须要求 $|1 - 100\eta| < 1$，即步长存在刚性上限 $\eta < \frac{2}{100} = 0.02$：
+\begin{itemize}
+  \item 若贪心地取 $\eta = 0.025$，则 $x_{t,2} = (-1.5)^t$，仅 10 步后 $|x_{10,2}| \approx 57.7$，迅速数值溢出！
+  \item 若保守地取理论安全步长 $\eta = 1/L = 0.01$，则 $x_{t,2}$ 在第 1 步就直接归零，但平坦方向 $x_{t,1} = 0.99^t \cdot 10$ 每步只收缩 $1\%$；要让 $x_{t,1}$ 衰减到 $0.01$，需要 $0.99^t \le 10^{-3}$，即 $t \ge \frac{\ln 1000}{0.01} \approx 688$ 步！
+  \item 若取接近上限的 $\eta = 0.019$，则 $1 - 100\eta = -0.9$，$x_{t,2}$ 在山谷两侧剧烈正负震荡，呈现典型的“之字形（zig-zag）”轨迹，而沿山谷底部的推进依然缓慢。
+\end{itemize}
+\end{example}
+
+例~\ref{ex:v4-ch1-zigzag} 揭示了一个极其深刻的普适规律：\textbf{在无加速的一阶梯度下降中，最陡峭的方向（最大曲率 $L$）强行锁死了全局允许的最大步长 $\eta \lesssim 1/L$，而最平坦的方向（最小曲率 $\mu$）又强行拖慢了全局收敛的进度。} 在多维逻辑回归或深度网络中，只要不同特征尺度的跨度达到 $15$ 倍，设计矩阵 $X^\top X$ 的特征值跨度就会达到 $15^2 = 225$ 倍乃至上千倍——这正是我们需要一套严格凸分析与收敛率理论的直接动因。
+
+% ============================================================
+\section{凸集与凸函数：无陷阱地形的数学刻画}
+% ============================================================
+
+对于一般光滑非凸函数，满足 $\nabla f(x) = 0$ 的驻点可能是局部极小点、局部极大点，甚至是鞍点（Saddle Point）；一阶算法一旦陷入次优驻点，仅凭局部梯度信息无法察觉远方还有更深的谷底。Rockafellar 在本章卷首语中一针见血地指出：优化问题的真正难易边界在于\textbf{凸性（Convexity）}。
+
+\subsection{凸集与常见可行域}
+
+\begin{defBox}
+\begin{definition}[凸集]\label{def:v4-convex-set}
+集合 $C \subseteq \R^d$ 称为\textbf{凸集（Convex Set）}，如果对任意两点 $x, y \in C$ 和任意 $\theta \in [0, 1]$，连接两点的线段完全落入 $C$ 中：
+\[
+  \theta x + (1-\theta) y \in C.
+\]
+\end{definition}
+\end{defBox}
+
+在经典机器学习与优化中，我们频繁遇到以下五类基本凸集（均可直接用定义~\ref{def:v4-convex-set} 一行验证）：
+\begin{enumerate}
+  \item \textbf{超平面与闭半空间}：$\{x \in \R^d : a^\top x = b\}$ 与 $\{x \in \R^d : a^\top x \le b\}$（第 4 章 SVM 线性分类间隔的基础几何构件）。
+  \item \textbf{范数球}：对任意范数 $\norm{\cdot}$（如 $\ell_1, \ell_2, \ell_\infty$），球体 $\{x : \norm{x - x_0} \le r\}$ 都是凸集，因为由三角不等式与齐次性有 $\norm{\theta x + (1-\theta)y - x_0} \le \theta\norm{x-x_0} + (1-\theta)\norm{y-x_0} \le r$。
+  \item \textbf{概率单纯形}：$\Delta^{d-1} = \{p \in \R^d : p_i \ge 0,\; \sum_{i=1}^d p_i = 1\}$（第 6 章 GMM 混合权重与多分类概率分布的自然定义域）。
+  \item \textbf{半正定矩阵锥}：$\mathbb{S}_+^d = \{A \in \R^{d\times d} : A = A^\top,\; v^\top A v \ge 0\ \forall v\in\R^d\}$（协方差矩阵与核矩阵的天然栖息地）。
+  \item \textbf{任意多个凸集的交集}：若 $\{C_\alpha\}_{\alpha \in \mathcal{I}}$ 是一族凸集，则 $\bigcap_{\alpha \in \mathcal{I}} C_\alpha$ 必为凸集。特别地，线性规划与 SVM 的多面体可行域 $\{x : Ax \le b\}$ 作为有限个闭半空间的交集，必然是凸集。
+\end{enumerate}
+
+\subsection{凸函数的零阶、一阶与二阶等价刻画}
+
+\begin{defBox}
+\begin{definition}[凸函数与严格凸函数]\label{def:v4-convex-fn}
+设 $C \subseteq \R^d$ 为凸集，函数 $f: C \to \R$ 称为\textbf{凸函数（Convex Function）}，如果对任意 $x, y \in C$ 和任意 $\theta \in [0, 1]$，满足\textbf{零阶定义（弦在弧上方）}：
+\begin{equation}\label{eq:v4-jensen2}
+  f\big(\theta x + (1-\theta)y\big) \le \theta f(x) + (1-\theta)f(y).
+\end{equation}
+若对所有 $x \neq y$ 及 $\theta \in (0, 1)$ 上式严格成立，则称 $f$ 为\textbf{严格凸函数}。若 $-f$ 是凸函数，则称 $f$ 为\textbf{凹函数（Concave Function）}。
+\end{definition}
+\end{defBox}
+
+通过数学归纳法，式~\eqref{eq:v4-jensen2} 立即可推广至有限凸组合 $\sum_{i=1}^k \theta_i = 1\;(\theta_i \ge 0)$ 以及一般随机变量的 \textbf{Jensen 不等式}：$f(\E[X]) \le \E[f(X)]$（我们在第 2 卷已用它证明 KL 散度非负，第 6 章还将再次用它推导 EM 算法的 ELBO 下界）。
+
+凸函数与凸集之间存在一座完美的几何桥梁——\textbf{上境图（Epigraph）}：
+\[
+  \operatorname{epi}(f) \coloneqq \left\{(x, t) \in C \times \R : f(x) \le t\right\}.
+\]
+容易验证：\textbf{$f$ 是凸函数，当且仅当其上境图 $\operatorname{epi}(f)$ 是 $\R^{d+1}$ 中的凸集。} 这一几何视角在下一章处理不可微凸函数（如 $\ell_1$ 范数）与拉格朗日对偶时极具威力。
+
+对于光滑函数，每次都去验证零阶弦不等式~\eqref{eq:v4-jensen2} 颇为繁琐。下面这条核心定理给出了一阶切平面与二阶海森矩阵的等价判据，它们分别是构建全局最优性与收敛率证明的基石。
+
+\begin{thmBox}
+\begin{theorem}[凸函数的一阶与二阶等价刻画]\label{thm:v4-convex-char}
+设 $C \subseteq \R^d$ 为开凸集：
+\begin{enumerate}
+  \item \textbf{一阶条件（切超平面全局下界）}：若 $f: C \to \R$ 可微，则 $f$ 是凸函数当且仅当对任意 $x, y \in C$ 均有
+  \begin{equation}\label{eq:v4-first-order-convex}
+    f(y) \ge f(x) + \nabla f(x)^\top (y - x).
+  \end{equation}
+  \item \textbf{二阶条件（海森矩阵半正定）}：若 $f: C \to \R$ 二阶连续可微，则 $f$ 是凸函数当且仅当对任意 $x \in C$ 均有
+  \begin{equation}\label{eq:v4-second-order-convex}
+    \nabla^2 f(x) \succeq 0 \quad \text{（即对任意 } v \in \R^d,\; v^\top \nabla^2 f(x)\, v \ge 0\text{）}.
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+我们先证第一部分（一阶条件）。
+
+\textbf{必要性（凸 $\implies$ 式~\eqref{eq:v4-first-order-convex}）}：任取 $x, y \in C$ 和 $\theta \in (0, 1]$，由凸性定义~\eqref{eq:v4-jensen2} 得
+\[
+  f\big(x + \theta(y - x)\big) = f\big((1-\theta)x + \theta y\big) \le (1-\theta)f(x) + \theta f(y).
+\]
+移项并两边同除以 $\theta > 0$：
+\[
+  f(y) - f(x) \ge \frac{f\big(x + \theta(y-x)\big) - f(x)}{\theta}.
+\]
+令 $\theta \to 0^+$，右侧由方向导数的定义趋于 $\nabla f(x)^\top (y - x)$，即得式~\eqref{eq:v4-first-order-convex}。
+
+\textbf{充分性（式~\eqref{eq:v4-first-order-convex} $\implies$ 凸）}：任取 $x, y \in C$ 与 $\theta \in [0, 1]$，记 $z = \theta x + (1-\theta)y \in C$。分别在点 $z$ 处对 $x$ 与 $y$ 应用式~\eqref{eq:v4-first-order-convex}：
+\[
+  f(x) \ge f(z) + \nabla f(z)^\top (x - z), \qquad f(y) \ge f(z) + \nabla f(z)^\top (y - z).
+\]
+将第一式乘以 $\theta$、第二式乘以 $1-\theta$ 后相加，注意到 $\theta(x-z) + (1-\theta)(y-z) = \theta x + (1-\theta)y - z = 0$，梯度项精确抵消，立得 $\theta f(x) + (1-\theta)f(y) \ge f(z)$。
+
+再证第二部分（二阶条件）。对任意固定 $x \in C$ 与方向 $v \in \R^d$，构造一元辅助函数 $\phi(t) = f(x + t v)$（定义在包含 $0$ 的开区间上）。由链式法则，$\phi'(t) = \nabla f(x+tv)^\top v$，$\phi''(t) = v^\top \nabla^2 f(x+tv)\, v$。
+\begin{itemize}
+  \item 若 $f$ 凸，则由一阶条件分别对 $(x, x+tv)$ 与 $(x+tv, x)$ 使用式~\eqref{eq:v4-first-order-convex} 并相加，得单调梯度不等式 $\big(\nabla f(x+tv)-\nabla f(x)\big)^\top (tv) \ge 0$。对 $t>0$ 两边同除以 $t^2$ 并令 $t \to 0^+$，即得 $\phi''(0) = v^\top \nabla^2 f(x)\, v \ge 0$。
+  \item 反之，若 $\nabla^2 f(\cdot) \succeq 0$ 处处成立，则对任意 $x, y \in C$，记 $v = y-x$，由带积分余项（或 Lagrange 余项）的二阶泰勒展开，存在 $\xi \in (0, 1)$ 使得
+  \[
+    f(y) = \phi(1) = \phi(0) + \phi'(0) + \frac{1}{2}\phi''(\xi) = f(x) + \nabla f(x)^\top (y-x) + \frac{1}{2}v^\top \nabla^2 f(x+\xi v)\, v \ge f(x) + \nabla f(x)^\top (y-x).
+  \]
+  由此满足一阶条件~\eqref{eq:v4-first-order-convex}，故 $f$ 为凸函数。
+\end{itemize}
+\end{proof}
+
+\subsection{保凸运算：不求海森矩阵也能一眼识别凸目标}
+
+实际机器学习损失函数往往由多层运算复合而成，直接展开海森矩阵可能极其繁琐。利用以下三条\textbf{保凸运算（Convexity-Preserving Operations）}，我们可以像搭积木一样迅速判定凸性：
+
+\begin{proposition}[三大常用保凸运算]\label{prop:v4-preserve}
+\begin{enumerate}
+  \item \textbf{非负加权和}：若 $f_1, \dots, f_m$ 为凸函数且 $\alpha_1, \dots, \alpha_m \ge 0$，则 $f(x) = \sum_{i=1}^m \alpha_i f_i(x)$ 为凸函数。
+  \item \textbf{仿射复合}：若 $f: \R^k \to \R$ 为凸函数，且 $A \in \R^{k\times d},\, b \in \R^k$，则 $g(x) = f(Ax + b)$ 是关于 $x \in \R^d$ 的凸函数。
+  \item \textbf{逐点上确界（逐点取最大）}：若对任意索引 $\alpha \in \mathcal{I}$ 函数 $f_\alpha(x)$ 均为凸函数，则 $h(x) = \sup_{\alpha \in \mathcal{I}} f_\alpha(x)$ 也是凸函数。
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+第 1、2 条直接代入零阶定义~\eqref{eq:v4-jensen2} 即可验证。第 3 条从上境图立即可见：
+\[
+  \operatorname{epi}(h) = \{(x, t) : \sup_{\alpha} f_\alpha(x) \le t\} = \bigcap_{\alpha \in \mathcal{I}} \{(x, t) : f_\alpha(x) \le t\} = \bigcap_{\alpha \in \mathcal{I}} \operatorname{epi}(f_\alpha).
+\]
+凸集的任意交仍为凸集，故 $h$ 是凸函数。也可直接代数验证：$h(\theta x + (1-\theta)y) = \sup_\alpha f_\alpha(\theta x + (1-\theta)y) \le \sup_\alpha [\theta f_\alpha(x) + (1-\theta)f_\alpha(y)] \le \theta \sup_\alpha f_\alpha(x) + (1-\theta)\sup_\alpha f_\alpha(y) = \theta h(x) + (1-\theta)h(y)$。
+\end{proof}
+
+\begin{insightBox}{机器学习三大损失函数的凸性秒证与第 4 章伏笔}
+\begin{itemize}
+  \item \textbf{合页损失（Hinge Loss，第 4 章 SVM 核心）}：$\ell_{\text{hinge}}(w, b) = \max\big(0,\, 1 - y_i(w^\top x_i + b)\big)$ 是两个仿射函数（常数 $0$ 与 $1 - y_i(w^\top x_i + b)$）的逐点最大值，由命题~\ref{prop:v4-preserve} 第 3 条立知它是凸函数（尽管在 $y_i(w^\top x_i + b)=1$ 处不可微）！
+  \item \textbf{指数与 Log-Sum-Exp 损失}：$\mathrm{LSE}(z) = \ln\sum_{k=1}^K e^{z_k}$ 是凸函数（留作习题~\ref{ex:4.1.2}），经仿射复合 $z = Xw$ 后即得逻辑回归与多分类 Softmax 交叉熵损失的全局凸性。
+  \item \textbf{正则化目标}：经验风险（非负平均）与 $\lambda \norm{w}_1$ 或 $\frac{\lambda}{2}\norm{w}_2^2$（$\lambda \ge 0$）之和仍为凸函数。
+\end{itemize}
+\end{insightBox}
+
+\subsection{凸函数的全局最优性定理}
+
+一阶条件~\eqref{eq:v4-first-order-convex} 带来的最直接、也最珍贵的红利，就是局部驻点与全局极小点的完全统一。
+
+\begin{thmBox}
+\begin{theorem}[凸函数驻点的全局最优性]\label{thm:v4-global-opt}
+设 $f: \R^d \to \R$ 为可微凸函数。则 $x^* \in \R^d$ 是 $f$ 的全局极小点，当且仅当
+\[
+  \nabla f(x^*) = 0.
+\]
+进一步地，若 $f$ 严格凸，则全局极小点（若存在）必然唯一。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{必要性}：若 $x^*$ 为全局极小点，它必为局部极小点，由多元微积分 Fermat 引理立得 $\nabla f(x^*) = 0$。
+
+\textbf{充分性}：若 $\nabla f(x^*) = 0$，对任意 $y \in \R^d$ 应用定理~\ref{thm:v4-convex-char} 的一阶切平面下界~\eqref{eq:v4-first-order-convex}：
+\[
+  f(y) \ge f(x^*) + \nabla f(x^*)^\top (y - x^*) = f(x^*) + 0 = f(x^*).
+\]
+因此 $x^*$ 为全局极小点。
+
+\textbf{严格凸时的唯一性}：假设存在两个不同的全局极小点 $x_1^* \neq x_2^*$，且 $f(x_1^*) = f(x_2^*) = f^*$。取中点 $\bar{x} = \frac{1}{2}x_1^* + \frac{1}{2}x_2^*$，由严格凸性有 $f(\bar{x}) < \frac{1}{2}f(x_1^*) + \frac{1}{2}f(x_2^*) = f^*$，与 $f^*$ 是全局最小值矛盾！
+\end{proof}
+
+\begin{example}[$L_2$ 正则化逻辑回归的精确海森矩阵与曲率界]\label{ex:v4-ch1-logreg}
+考虑第 1.6 节即将实测的目标函数（样本 $(x_i, y_i) \in \R^D \times \{0, 1\},\; i=1,\dots,N$，正则化系数 $\lambda > 0$）：
+\[
+  F(w) = \frac{1}{N}\sum_{i=1}^N \Big[\ln\big(1 + e^{x_i^\top w}\big) - y_i (x_i^\top w)\Big] + \frac{\lambda}{2}\norm{w}_2^2.
+\]
+记 $p_i(w) = \sigma(x_i^\top w) = \frac{1}{1+e^{-x_i^\top w}} \in (0, 1)$，由链式法则直接求一阶与二阶导数：
+\[
+  \nabla F(w) = \frac{1}{N}X^\top \big(p(w) - y\big) + \lambda w, \qquad
+  \nabla^2 F(w) = \frac{1}{N}X^\top D(w) X + \lambda I_D,
+\]
+其中 $D(w) = \diag\big(p_1(1-p_1), \dots, p_N(1-p_N)\big)$。对任意 $p \in (0, 1)$，算术-几何平均不等式给出 $0 < p(1-p) \le \frac{1}{4}$。于是对任意非零向量 $v \in \R^D$，有双边谱估计：
+\[
+  \lambda \norm{v}_2^2 \le v^\top \nabla^2 F(w)\, v = \frac{1}{N}\sum_{i=1}^N p_i(1-p_i)(x_i^\top v)^2 + \lambda\norm{v}_2^2 \le \left(\frac{\lambda_{\max}(X^\top X)}{4N} + \lambda\right)\norm{v}_2^2.
+\]
+这表明 $F(w)$ 不仅是严格凸函数（具有唯一全局最优解 $w^*$），而且全局曲率被严丝合缝地夹在 $\mu = \lambda$ 与 $L = \frac{\sigma_{\max}(X)^2}{4N} + \lambda$ 之间！这个精确的常数 $L$ 将直接用来设定我们实验中的无调参步长 $\eta = 1/L$。
+\end{example}
+
+% ============================================================
+\section{$L$-光滑性、下降引理与 $O(1/T)$ 收敛率证明}
+% ============================================================
+
+仅知道函数是凸的，还不足以保证固定步长梯度下降会收敛——例如 $f(x) = x^4$ 是凸的，但在远端梯度增长过快，任何固定步长从足够远处出发都会发散；而 $f(x) = |x|$ 也是凸的，但在原点不可微，固定步长只会在原点两侧来回弹跳。要保证一阶算法有可预期的下降幅度，必须限制梯度的变化速率，即引入\textbf{$L$-光滑性（$L$-Smoothness）}。
+
+\begin{defBox}
+\begin{definition}[$L$-光滑函数]\label{def:v4-lsmooth}
+可微函数 $f: \R^d \to \R$ 称为\textbf{$L$-光滑（$L$-Smooth）}的（$L > 0$），如果其梯度满足 $L$-Lipschitz 连续条件：对任意 $x, y \in \R^d$，
+\begin{equation}\label{eq:v4-lip-grad}
+  \norm{\nabla f(y) - \nabla f(x)}_2 \le L \norm{y - x}_2.
+\end{equation}
+当 $f$ 二阶连续可微时，式~\eqref{eq:v4-lip-grad} 等价于海森矩阵谱范数处处有界：$-LI \preceq \nabla^2 f(x) \preceq LI$（对凸函数即 $0 \preceq \nabla^2 f(x) \preceq LI$）。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{lemma}[下降引理 / 二次上界引理，Descent Lemma]\label{lem:v4-descent}
+若 $f: \R^d \to \R$ 是 $L$-光滑的（不要求 $f$ 为凸函数！），则对任意 $x, y \in \R^d$ 均有
+\begin{equation}\label{eq:v4-descent-ub}
+  f(y) \le f(x) + \nabla f(x)^\top (y - x) + \frac{L}{2}\norm{y - x}_2^2.
+\end{equation}
+特别地，令梯度下降迭代为 $x_{t+1} = x_t - \eta \nabla f(x_t)$，则
+\begin{equation}\label{eq:v4-step-drop}
+  f(x_{t+1}) \le f(x_t) - \eta\left(1 - \frac{L\eta}{2}\right)\norm{\nabla f(x_t)}_2^2.
+\end{equation}
+当取最优保守步长 $\eta = \frac{1}{L}$ 时，每步保证至少下降：
+\begin{equation}\label{eq:v4-1overL-drop}
+  f(x_{t+1}) \le f(x_t) - \frac{1}{2L}\norm{\nabla f(x_t)}_2^2.
+\end{equation}
+\end{lemma}
+\end{thmBox}
+
+\begin{proof}
+构造沿线段的一元函数 $g(s) = f\big(x + s(y-x)\big),\; s \in [0, 1]$。由微积分基本定理：
+\begin{align*}
+  f(y) - f(x) &= g(1) - g(0) = \int_0^1 g'(s)\,ds = \int_0^1 \nabla f\big(x + s(y-x)\big)^\top (y - x)\,ds \\
+  &= \nabla f(x)^\top (y-x) + \int_0^1 \Big(\nabla f\big(x + s(y-x)\big) - \nabla f(x)\Big)^\top (y - x)\,ds.
+\end{align*}
+对积分号内的内积依次应用 Cauchy-Schwarz 不等式与 $L$-光滑定义~\eqref{eq:v4-lip-grad}：
+\begin{align*}
+  f(y) - f(x) - \nabla f(x)^\top (y-x)
+  &\le \int_0^1 \norm{\nabla f\big(x + s(y-x)\big) - \nabla f(x)}_2 \norm{y - x}_2\,ds \\
+  &\le \int_0^1 \big(L \cdot s\norm{y - x}_2\big) \norm{y - x}_2\,ds
+  = L\norm{y - x}_2^2 \int_0^1 s\,ds = \frac{L}{2}\norm{y - x}_2^2.
+\end{align*}
+移项即证得二次上界~\eqref{eq:v4-descent-ub}。将 $x = x_t,\; y = x_{t+1} = x_t - \eta \nabla f(x_t)$ 代入式~\eqref{eq:v4-descent-ub}，注意 $y - x = -\eta \nabla f(x_t)$：
+\[
+  f(x_{t+1}) \le f(x_t) - \eta\norm{\nabla f(x_t)}_2^2 + \frac{L\eta^2}{2}\norm{\nabla f(x_t)}_2^2
+  = f(x_t) - \eta\left(1 - \frac{L\eta}{2}\right)\norm{\nabla f(x_t)}_2^2.
+\]
+最后，将右侧关于 $\eta$ 的二次函数 $\phi(\eta) = \eta - \frac{L}{2}\eta^2$ 求导并令其为零，得唯一极大值点 $\eta^* = 1/L$，此时系数 $\eta(1 - L\eta/2) = \frac{1}{2L}$，即得式~\eqref{eq:v4-1overL-drop}。
+\end{proof}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.06, >=Stealth]
+  % Axes
+  \draw[->, slate!75, thin] (-2.7, 0) -- (4.2, 0) node[right, font=\footnotesize\sffamily] {$x$};
+  \draw[->, slate!75, thin] (-2.4, -0.3) -- (-2.4, 4.45) node[above, font=\footnotesize\sffamily] {$f(x)$};
+
+  % Shaded sandwich region
+  \fill[tealLight, opacity=0.85]
+    plot[domain=-2.0:1.65, samples=60] (\x, {2.0052 - 1.232*(\x+0.8) + 0.625*(\x+0.8)^2})
+    -- plot[domain=1.65:-2.0, samples=60] (\x, {max(0.05, 2.0052 - 1.232*(\x+0.8))}) -- cycle;
+
+  % Upper L-smooth quadratic bound
+  \draw[ochre, very thick, dashed, domain=-2.0:1.65, samples=80]
+    plot (\x, {2.0052 - 1.232*(\x+0.8) + 0.625*(\x+0.8)^2});
+  \node[ochre, font=\footnotesize\sffamily, align=left, anchor=west] at (0.35, 3.92)
+    {$L$-光滑二次上界\\$q_t(y) = f(x_t) + \nabla f(x_t)^\top(y-x_t) + \frac{L}{2}\|y-x_t\|^2$};
+  \draw[->, ochre!85, thin] (0.95, 3.48) -- (1.18, 2.95);
+
+  % True convex function f(x)
+  \draw[tealDark, line width=1.6pt, domain=-2.05:3.55, samples=80]
+    plot (\x, {0.28*(\x-1.4)^2 + 0.65});
+  \node[tealDark, font=\small\sffamily\bfseries] at (3.65, 2.25) {$f(x)$};
+
+  % Lower convexity tangent line
+  \draw[navy, thick, dash dot, domain=-2.05:0.82, samples=2]
+    plot (\x, {2.0052 - 1.232*(\x+0.8)});
+  \node[navy, font=\scriptsize\sffamily, align=left, fill=white, inner sep=1.5pt] (tanlbl) at (-1.55, 0.72)
+    {凸性一阶切线下界\\$f(x_t)+\nabla f(x_t)^\top(y-x_t)$};
+  \draw[->, navy!85, thin] (-0.82, 0.98) -- (-0.25, 1.32);
+
+  % Key points: x_t, x_{t+1}, x^*
+  \draw[dotted, slate, thick] (-0.8, 0) -- (-0.8, 2.0052);
+  \fill[ink] (-0.8, 2.0052) circle (2.3pt);
+  \node[below, font=\footnotesize] at (-0.8, -0.05) {$x_t$};
+
+  \draw[dotted, ochre, thick] (0.186, 0) -- (0.186, 1.3981);
+  \fill[ochre] (0.186, 1.3981) circle (2.3pt);
+  \fill[teal] (0.186, 1.063) circle (2.3pt);
+  \node[below, font=\footnotesize, color=ochre] at (0.186, -0.05) {$x_{t+1}$};
+
+  % Drop bracket at x = 0.45 with clean non-overlapping callout
+  \draw[dashed, slate!60] (-0.8, 2.0052) -- (0.50, 2.0052);
+  \draw[dashed, slate!60] (0.186, 1.3981) -- (0.50, 1.3981);
+  \draw[<->, teal, thick] (0.45, 2.0052) -- (0.45, 1.3981);
+  \node[font=\scriptsize\sffamily, color=tealDark, fill=white, inner sep=1.8pt, anchor=west] (droplbl) at (1.58, 2.62)
+    {保底下降 $\ge \frac{1}{2L}\|\nabla f(x_t)\|_2^2$};
+  \draw[->, teal, semithick] (droplbl.west) -- (0.52, 1.72);
+
+  % Global minimum x^*
+  \draw[dotted, tealDark, thick] (1.4, 0) -- (1.4, 0.65);
+  \fill[gold] (1.4, 0.65) circle (2.6pt);
+  \node[below, font=\footnotesize, color=tealDark] at (1.4, -0.05) {$x^*$};
+  \node[font=\footnotesize\sffamily, color=gold!80!ink, anchor=west] (optlbl) at (2.05, 0.40) {全局最优 $(x^*, f^*)$};
+  \draw[->, gold!85!ink, thin] (optlbl.west) -- (1.50, 0.62);
+\end{tikzpicture}
+\caption{凸性与 $L$-光滑性构成的“夹心三明治”几何图景：凸性用一阶切线从下方托住 $f(x)$，$L$-光滑性用开口宽度由 $L$ 决定的二次抛物线 $q_t(y)$ 从上方罩住 $f(x)$。一步步长为 $1/L$ 的梯度下降，本质上就是精确跳到当前二次上界 $q_t(y)$ 的最低点 $x_{t+1}$，从而保证真实函数值至少下降 $\frac{1}{2L}\norm{\nabla f(x_t)}_2^2$。}\label{fig:v4-sandwich}
+\end{figure}
+
+图~\ref{fig:v4-sandwich} 揭示了梯度下降最优雅的优化-最小化（Majorization-Minimization, MM）解释：我们并不直接最小化复杂的 $f(y)$，而是在当前点 $x_t$ 构造一个处处高于 $f(y)$ 且在 $x_t$ 处相切的二次代理模型 $q_t(y) = f(x_t) + \nabla f(x_t)^\top(y-x_t) + \frac{L}{2}\norm{y-x_t}_2^2$，然后精确求解 $\argmin_y q_t(y) = x_t - \frac{1}{L}\nabla f(x_t)$！这一视角将在第 2 章推广为\textbf{近端梯度法（ISTA）}，并在第 6 章演化为 \textbf{EM 算法}。
+
+\begin{failBox}{步长超过 $2/L$ 时为何必然面临发散风险？}
+观察下降引理式~\eqref{eq:v4-step-drop} 中的系数 $\eta(1 - \frac{L\eta}{2})$：只要 $0 < \eta < \frac{2}{L}$，该系数严格为正，每步函数值单调不增；但一旦 $\eta > \frac{2}{L}$，上界右侧反而变成正项，二次代理模型不再保证下降。在例~\ref{ex:v4-ch1-zigzag} 中 $L=100$，临界步长正是 $2/L = 0.02$；实际工程中若无法精确知道 $L$，则必须配合\textbf{回溯线搜索（Armijo Backtracking）}或动态学习率衰减，切忌盲目放大固定步长。
+\end{failBox}
+
+现在，把“凸性切线下界”与“$L$-光滑二次上界”两块拼图扣合在一起，我们就能给出优化理论中最经典、最干净的\textbf{望远镜求和（Telescoping Sum）}收敛率证明。
+
+\begin{thmBox}
+\begin{theorem}[光滑凸函数梯度下降的 $O(1/T)$ 收敛率]\label{thm:v4-gd-convex}
+设 $f: \R^d \to \R$ 为凸函数且 $L$-光滑，存在全局极小点 $x^*$，记 $f^* = f(x^*)$。从任意初值 $x_0 \in \R^d$ 出发，取固定步长 $\eta = \frac{1}{L}$ 执行梯度下降 $x_{t+1} = x_t - \frac{1}{L}\nabla f(x_t)$，则对任意步数 $T \ge 1$ 均有：
+\begin{equation}\label{eq:v4-gd-o1t}
+  f(x_T) - f^* \le \frac{L\norm{x_0 - x^*}_2^2}{2T}.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记 $g_t = \nabla f(x_t)$，迭代步为 $x_{t+1} = x_t - \frac{1}{L}g_t$。我们的目标是用相邻两步到最优解的距离平方差 $\norm{x_t - x^*}_2^2 - \norm{x_{t+1} - x^*}_2^2$ 去控制当前的函数次优度 $f(x_{t+1}) - f^*$。
+
+\textbf{第一步：联合下降引理与凸性下界。} 由下降引理~\eqref{eq:v4-1overL-drop}，有
+\[
+  f(x_{t+1}) \le f(x_t) - \frac{1}{2L}\norm{g_t}_2^2.
+\]
+另一方面，由凸函数一阶条件~\eqref{eq:v4-first-order-convex}（取 $x=x_t,\, y=x^*$），有 $f(x^*) \ge f(x_t) + g_t^\top(x^* - x_t)$，移项得 $f(x_t) \le f^* + g_t^\top (x_t - x^*)$。将其代入上式：
+\begin{equation}\label{eq:v4-tele-step}
+  f(x_{t+1}) - f^* \le g_t^\top (x_t - x^*) - \frac{1}{2L}\norm{g_t}_2^2.
+\end{equation}
+
+\textbf{第二步：配方法化为距离平方差分。} 观察式~\eqref{eq:v4-tele-step} 右侧，凑出 $\frac{L}{2}$ 因子并直接配方：
+\begin{align*}
+  g_t^\top (x_t - x^*) - \frac{1}{2L}\norm{g_t}_2^2
+  &= \frac{L}{2}\left[\frac{2}{L}g_t^\top (x_t - x^*) - \frac{1}{L^2}\norm{g_t}_2^2\right] \\
+  &= \frac{L}{2}\left[\norm{x_t - x^*}_2^2 - \norm{x_t - \frac{1}{L}g_t - x^*}_2^2\right] \\
+  &= \frac{L}{2}\left(\norm{x_t - x^*}_2^2 - \norm{x_{t+1} - x^*}_2^2\right).
+\end{align*}
+（展开第二行右侧的第二项即可逐项核对：$\norm{(x_t-x^*) - \frac{1}{L}g_t}_2^2 = \norm{x_t-x^*}_2^2 - \frac{2}{L}g_t^\top(x_t-x^*) + \frac{1}{L^2}\norm{g_t}_2^2$。）
+
+\textbf{第三步：望远镜求和与单调性收尾。} 将上述不等式从 $t = 0$ 累加至 $T - 1$，中间项成对精确抵消：
+\begin{align*}
+  \sum_{t=0}^{T-1}\big(f(x_{t+1}) - f^*\big)
+  &\le \frac{L}{2}\sum_{t=0}^{T-1}\left(\norm{x_t - x^*}_2^2 - \norm{x_{t+1} - x^*}_2^2\right) \\
+  &= \frac{L}{2}\left(\norm{x_0 - x^*}_2^2 - \norm{x_T - x^*}_2^2\right)
+  \le \frac{L}{2}\norm{x_0 - x^*}_2^2.
+\end{align*}
+再由下降引理~\eqref{eq:v4-1overL-drop} 知序列 $\{f(x_t)\}$ 单调不增，故对所有 $t \in \{0, \dots, T-1\}$ 均有 $f(x_T) \le f(x_{t+1})$。因此左侧满足
+\[
+  T\big(f(x_T) - f^*\big) \le \sum_{t=0}^{T-1}\big(f(x_{t+1}) - f^*\big) \le \frac{L}{2}\norm{x_0 - x^*}_2^2.
+\]
+两边同除以 $T$，即证得式~\eqref{eq:v4-gd-o1t}！
+\end{proof}
+
+这一证明堪称“天书”级别的典范：它告诉我们，对任意 $L$-光滑凸函数，要使误差 $f(x_T) - f^* \le \varepsilon$，梯度下降最多需要 $T = O(L/\varepsilon)$ 步。然而 $O(1/\varepsilon)$ 的代价依然不菲——要把精度从 $10^{-2}$ 提高到 $10^{-6}$，步数要暴涨 $10{,}000$ 倍！有没有办法把 $O(1/\varepsilon)$ 压缩到 $O(\log(1/\varepsilon))$？答案是肯定的：我们需要让山谷底部具有非零的最小曲率。
+
+% ============================================================
+\section{$\mu$-强凸性、PL 不等式与指数级线性收敛}
+% ============================================================
+
+一般凸函数允许谷底非常“平缓”（如 $f(x) = x^4$ 在 $x=0$ 处二阶导数为 $0$），导致靠近最优解时梯度迅速塌缩、动力不足。如果我们要求函数不仅在切平面上方，而且至少像一个开口向上、曲率为 $\mu > 0$ 的二次碗一样向上弯曲，情形就会发生质变。
+
+\begin{defBox}
+\begin{definition}[$\mu$-强凸函数]\label{def:v4-strong-convex}
+设 $\mu > 0$。可微函数 $f: \R^d \to \R$ 称为\textbf{$\mu$-强凸（$\mu$-Strongly Convex）}的，如果对任意 $x, y \in \R^d$ 均有
+\begin{equation}\label{eq:v4-sc-def}
+  f(y) \ge f(x) + \nabla f(x)^\top (y - x) + \frac{\mu}{2}\norm{y - x}_2^2.
+\end{equation}
+等价地，$g(x) = f(x) - \frac{\mu}{2}\norm{x}_2^2$ 为凸函数；若 $f$ 二阶连续可微，则等价于 $\nabla^2 f(x) \succeq \mu I$ 处处成立。
+\end{definition}
+\end{defBox}
+
+注意这个等价刻画的直接工程含义：\textbf{对任意凸损失函数 $f_0(w)$（例如逻辑回归交叉熵或最小二乘）加上 $L_2$ 正则项 $\frac{\lambda}{2}\norm{w}_2^2$（$\lambda > 0$），新目标 $F(w) = f_0(w) + \frac{\lambda}{2}\norm{w}_2^2$ 立刻变成 $\lambda$-强凸函数！} 正则化不仅像第 3 章将证明的那样能够压制方差、防止过拟合，还在优化层面直接赋予目标函数严格的最小曲率 $\mu \ge \lambda$。
+
+在推导强凸收敛率之前，让我们先提炼一个比强凸更弱、却足以驱动指数级线性收敛的神奇不等式——\textbf{Polyak-\L{}ojasiewicz（PL）不等式}。
+
+\begin{thmBox}
+\begin{lemma}[$\mu$-强凸蕴含 PL 不等式]\label{lem:v4-sc-pl}
+若 $f: \R^d \to \R$ 是 $\mu$-强凸函数且全局最小值为 $f^*$，则对任意 $x \in \R^d$ 均满足 \textbf{PL 不等式}：
+\begin{equation}\label{eq:v4-pl}
+  \frac{1}{2}\norm{\nabla f(x)}_2^2 \ge \mu\big(f(x) - f^*\big).
+\end{equation}
+\end{lemma}
+\end{thmBox}
+
+\begin{proof}
+固定 $x \in \R^d$，在 $\mu$-强凸定义~\eqref{eq:v4-sc-def} 的左右两侧同时对 $y \in \R^d$ 取极小值：
+\begin{itemize}
+  \item 左侧 $\min_{y\in\R^d} f(y) = f^*$；
+  \item 右侧是关于 $y$ 的开口向上的二次函数 $r(y) = f(x) + \nabla f(x)^\top(y-x) + \frac{\mu}{2}\norm{y-x}_2^2$。令 $\nabla_y r(y) = \nabla f(x) + \mu(y - x) = 0$，解得唯一极小点 $y^* = x - \frac{1}{\mu}\nabla f(x)$，代入得
+  \[
+    \min_{y\in\R^d} r(y) = f(x) - \frac{1}{\mu}\norm{\nabla f(x)}_2^2 + \frac{\mu}{2}\cdot\frac{1}{\mu^2}\norm{\nabla f(x)}_2^2 = f(x) - \frac{1}{2\mu}\norm{\nabla f(x)}_2^2.
+  \]
+\end{itemize}
+因此 $f^* \ge f(x) - \frac{1}{2\mu}\norm{\nabla f(x)}_2^2$，整理即得式~\eqref{eq:v4-pl}。
+\end{proof}
+
+PL 不等式的物理意义一目了然：只要你离谷底还差 $f(x) - f^*$ 的高度，你脚下的坡度平方 $\norm{\nabla f(x)}_2^2$ 就绝不会太小（至少有 $2\mu(f(x)-f^*)$）。再把 PL 不等式代入下降引理~\eqref{eq:v4-1overL-drop}，只需三行代数，指数级收敛便跃然纸上！
+
+\begin{thmBox}
+\begin{theorem}[光滑 PL / $\mu$-强凸函数的线性收敛定理]\label{thm:v4-linear-conv}
+设 $f: \R^d \to \R$ 是 $L$-光滑的且满足参数为 $\mu > 0$ 的 PL 不等式~\eqref{eq:v4-pl}（特别地，一切 $L$-光滑且 $\mu$-强凸的函数均满足条件，记条件数 $\kappa = L/\mu \ge 1$）。取步长 $\eta = \frac{1}{L}$ 执行梯度下降 $x_{t+1} = x_t - \frac{1}{L}\nabla f(x_t)$，则对任意 $T \ge 0$ 有：
+\begin{equation}\label{eq:v4-linear-rate}
+  f(x_T) - f^* \le \left(1 - \frac{\mu}{L}\right)^T \big(f(x_0) - f^*\big) = \left(1 - \frac{1}{\kappa}\right)^T \big(f(x_0) - f^*\big) \le e^{-T/\kappa}\big(f(x_0) - f^*\big).
+\end{equation}
+进一步地，若 $f$ 为 $\mu$-强凸函数（最优解 $x^*$ 唯一），则参数距离也以线性速率收敛：
+\begin{equation}\label{eq:v4-param-dist}
+  \norm{x_T - x^*}_2^2 \le \frac{2}{\mu}\left(1 - \frac{1}{\kappa}\right)^T \big(f(x_0) - f^*\big).
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由下降引理~\eqref{eq:v4-1overL-drop} 与 PL 不等式~\eqref{eq:v4-pl} 直接串联：
+\[
+  f(x_{t+1}) - f(x_t) \le -\frac{1}{2L}\norm{\nabla f(x_t)}_2^2 \le -\frac{\mu}{L}\big(f(x_t) - f^*\big).
+\]
+两边同时加上 $f(x_t) - f^*$ 并整理：
+\[
+  f(x_{t+1}) - f^* \le \left(1 - \frac{\mu}{L}\right)\big(f(x_t) - f^*\big).
+\]
+从 $t=0$ 递推 $T$ 步，并利用初等不等式 $1 - u \le e^{-u}$，即证得式~\eqref{eq:v4-linear-rate}。
+
+若 $f$ 还是 $\mu$-强凸的，在式~\eqref{eq:v4-sc-def} 中令 $x = x^*$（注意 $\nabla f(x^*)=0$）、$y = x_T$，得\textbf{二次增长性质}：
+\[
+  f(x_T) - f^* \ge \frac{\mu}{2}\norm{x_T - x^*}_2^2 \implies \norm{x_T - x^*}_2^2 \le \frac{2}{\mu}\big(f(x_T) - f^*\big),
+\]
+结合式~\eqref{eq:v4-linear-rate} 即得式~\eqref{eq:v4-param-dist}。
+\end{proof}
+
+\begin{insightBox}{为何称指数衰减为“线性收敛”？以及 PL 条件在非凸深度学习中的回响}
+\begin{enumerate}
+  \item \textbf{术语澄清}：在最优化文献中，若误差满足 $e_{t+1} \le \rho\, e_t\;(\rho < 1)$，在对数坐标 $\log e_t$ 下误差随步数 $t$ 呈\textbf{直线下降}（每固定步数多获得一位有效十进制精度），因此称为\textbf{线性收敛（Linear Convergence）}，其达到精度 $\varepsilon$ 所需的步数仅为 $T = O\big(\kappa \ln\frac{1}{\varepsilon}\big)$。
+  \item \textbf{超越凸性的 PL 条件}：请注意，定理~\ref{thm:v4-linear-conv} 的证明\emph{根本没有用到凸性}，只用到了 $L$-光滑与 PL 不等式！存在许多非凸函数依然满足 PL 条件——例如一维波动函数 $f(x) = x^2 + 3\sin^2 x$（它并非凸函数，因为二阶导数 $2 + 6\cos(2x)$ 可为负，但读者可在习题~\ref{ex:4.1.6} 中验证它全局满足 PL 不等式且不存在非全局驻点！）。在现代深度学习理论（第 5 卷）中，宽过参数化神经网络在初始化邻域内常局部满足 PL 条件，这正是 SGD 竟能将非凸深度网络训练到零损失的重要数学解释之一。
+\end{enumerate}
+\end{insightBox}
+
+% ============================================================
+\section{突破条件数瓶颈：动量法与 Nesterov 加速梯度}
+% ============================================================
+
+定理~\ref{thm:v4-linear-conv} 虽然把对精度的依赖从 $1/\varepsilon$ 降到了 $\ln(1/\varepsilon)$，却留下了一座沉重的大山：步数仍正比于条件数 $\kappa = L/\mu$。在稍后的病态逻辑回归实验中，$\kappa = 1030.5$，意味着纯梯度下降每走一步，最坏情况下的误差倍率高达 $1 - 1/1030.5 \approx 0.99903$，走 150 步误差连一个数量级都下不去！
+
+能否在不计算 $O(D^2)$ 海森矩阵的前提下，仅凭一阶梯度就大幅打破 $O(\kappa)$ 的魔咒？苏联数学家 Boris Polyak（1964）与 Yurii Nesterov（1983）给出了两套载入史册的方案。
+
+\subsection{Polyak 重球动量法（Heavy-Ball Momentum）}
+
+回到例~\ref{ex:v4-ch1-zigzag} 的狭长山谷。纯梯度下降像一个没有质量的纸片，每一步都完全忘掉刚才的方向，只能听从当前陡壁梯度的摆布来回弹跳。如果赋予迭代点一个“物理质量”，让它像一颗有惯性的重球沿山谷滚落，就会得到 \textbf{Heavy-Ball 动量法}：
+\begin{equation}\label{eq:v4-momentum}
+  v_{t+1} = \beta v_t + \nabla f(x_t), \qquad x_{t+1} = x_t - \eta v_{t+1},
+\end{equation}
+等价地消去速度向量 $v_t$ 后可写作二阶差分格式 $x_{t+1} = x_t - \eta \nabla f(x_t) + \beta(x_t - x_{t-1})$，其中 $\beta \in [0, 1)$ 为动量（阻尼）系数。其几何奇迹在于\textbf{方向选择性滤波}：
+\begin{itemize}
+  \item 在陡峭震荡方向上，相邻两步的梯度正负交替，历史动量项 $\beta v_t$ 与当前梯度相互抵消，剧烈震荡被平滑阻尼；
+  \item 在平坦谷底方向上，每一步梯度指向一致，动量项不断同相累加，有效步长被放大至 $\frac{\eta}{1-\beta}$（例如 $\beta = 0.85$ 时有效步长放大约 $6.7$ 倍！）。
+\end{itemize}
+Polyak 证明，对强凸二次函数，取最优动量 $\beta^* = \left(\frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1}\right)^2$ 与步长 $\eta^* = \frac{4}{(\sqrt{L}+\sqrt{\mu})^2}$，重球法即可达到局部加速速率 $\frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1}$。但对于一般非二次强凸函数，Heavy-Ball 可能因为惯性过大“冲过头”而失去全局加速保证。
+
+\subsection{Nesterov 加速梯度法（NAG）：带着“前瞻刹车”的动量}
+
+1983 年，Nesterov 对动量法做了一个看似微小、实则化腐朽为神奇的改动：不再在当前位置 $x_t$ 求梯度，而是\textbf{先顺着惯性外推一步到达“前瞻点” $y_t$，再在 $y_t$ 处评估梯度并纠正方向}！对 $L$-光滑且 $\mu$-强凸函数，Nesterov 加速梯度（Nesterov Accelerated Gradient, NAG）的固定动量形式为：
+\begin{equation}\label{eq:v4-nag}
+  \left\{
+  \begin{aligned}
+    x_{t+1} &= y_t - \frac{1}{L}\nabla f(y_t), \\
+    y_{t+1} &= x_{t+1} + \beta_{\text{nag}}\,(x_{t+1} - x_t), \qquad \beta_{\text{nag}} = \frac{\sqrt{\kappa} - 1}{\sqrt{\kappa} + 1},
+  \end{aligned}
+  \right.
+\end{equation}
+初值 $y_0 = x_0$。而对一般光滑凸函数（$\mu = 0$），只需采用时变动量 $\beta_t = \frac{\theta_t - 1}{\theta_{t+1}}$（其中 $\theta_0 = 1,\; \theta_{t+1} = \frac{1 + \sqrt{1+4\theta_t^2}}{2}$，近似于 $\beta_t \approx \frac{t-1}{t+2}$）。
+
+为什么“先外推、再求梯度”就能驯服惯性？想象你正推着球冲向谷底：Heavy-Ball 是在原地看一眼坡度、然后闭着眼睛加上惯性往前冲，冲过谷底爬上对岸才发现坡度反向；而 NAG 是先预判自己靠惯性会滚到前方 $y_t$ 处，提前去感知 $y_t$ 的坡度——如果 $y_t$ 已经越过谷底开始上坡，$\nabla f(y_t)$ 就会立刻施加反向制动力，像一套自带“预判刹车”的控制系统！
+
+\begin{thmBox}
+\begin{theorem}[Nesterov 加速梯度的最优一阶收敛率，不证自引]\label{thm:v4-nag-rate}
+\begin{enumerate}
+  \item 若 $f$ 为 $L$-光滑凸函数，时变动量 NAG 满足
+  \[
+    f(x_T) - f^* \le \frac{2L\norm{x_0 - x^*}_2^2}{(T+1)^2} = O\!\left(\frac{1}{T^2}\right).
+  \]
+  \item 若 $f$ 为 $L$-光滑且 $\mu$-强凸函数，取式~\eqref{eq:v4-nag} 的固定动量 $\beta_{\text{nag}} = \frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1}$，则存在常数 $C$ 使得
+  \[
+    f(x_T) - f^* \le C \left(1 - \frac{1}{\sqrt{\kappa}}\right)^T \big(f(x_0) - f^*\big).
+  \]
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+更重要的是，Nesterov 还通过构造高维三对角二次“最坏情况函数”证明了\textbf{一阶算法信息论下界}：任何只查询梯度的黑箱一阶算法，在凸光滑类上不可能快于 $\Omega(1/T^2)$，在强凸光滑类上不可能快于 $\Omega\big((1-1/\sqrt{\kappa})^T\big)$。也就是说，\textbf{NAG 已经撞上了光滑一阶凸优化的物理速度上限！} 表~\ref{tab:v4-ch1-rates} 总结了本章的核心收敛率阶梯。
+
+\begin{table}[htbp]
+\centering
+\caption{光滑一阶优化算法收敛率与迭代复杂度对比（达到 $f(x_T)-f^* \le \varepsilon$，条件数 $\kappa = L/\mu$）}\label{tab:v4-ch1-rates}
+\small
+\begin{tabularx}{\linewidth}{@{}lcccX@{}}
+\toprule
+\textbf{算法与函数类} & \textbf{步长 / 参数} & \textbf{误差衰减率} & \textbf{迭代复杂度} & \textbf{核心特征} \\
+\midrule
+GD（光滑凸） & $\eta = 1/L$ & $O(L/T)$ & $O(L/\varepsilon)$ & 单调下降，但高精度极慢 \\
+NAG（光滑凸） & $\eta = 1/L,\; \beta_t \approx \frac{t-1}{t+2}$ & $O(L/T^2)$ & $O(\sqrt{L/\varepsilon})$ & 达一阶信息下界，允许轻微震荡 \\
+GD（光滑强凸 / PL） & $\eta = 1/L$ & $(1-1/\kappa)^T$ & $O(\kappa \ln\frac{1}{\varepsilon})$ & 指数收敛，但受制于大 $\kappa$ \\
+NAG（光滑强凸） & $\eta = 1/L,\; \beta = \frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1}$ & $(1-1/\sqrt{\kappa})^T$ & $O(\sqrt{\kappa}\ln\frac{1}{\varepsilon})$ & $\kappa=1000$ 时提速约 $32\times$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================
+\section{实测验证：病态 $L_2$ 逻辑回归上的三法对决}
+% ============================================================
+
+理论公式有多美，必须在真实数值实验里过招才算数。我们在配套脚本 \texttt{code/vol4\_experiments.py} 中构造了一个刻意制造量纲跨度的病态 $L_2$ 正则化逻辑回归问题：
+\begin{itemize}
+  \item 样本数 $N = 300$，特征维数 $D = 15$，各列特征的标准差按几何级数从 $1.0$ 跨越至 $15.0$，正则化系数 $\lambda = 0.05$。
+  \item 利用例~\ref{ex:v4-ch1-logreg} 的精确公式，算得 $L = \frac{\sigma_{\max}(X)^2}{4N} + \lambda = 51.52$，$\mu = \lambda = 0.05$，因此条件数高达 $\kappa = L/\mu = 1030.5$，对应 Nesterov 理论最优动量 $\beta_{\text{nag}} = \frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1} = 0.940$。
+  \item 为获得精确到机器精度的基准值 $f^*$，先运行 15 步牛顿法求解（最终梯度范数 $\norm{\nabla F(w^*)}_2 < 10^{-12}$），再从统一原点 $w_0 = 0$ 出发，使用完全相同的理论步长 $\eta = 1/L$ 对比 GD、Heavy-Ball 动量法（$\beta = 0.85$）与 NAG（$\beta_{\text{nag}} = 0.940$）在 150 步内的次优度 $F(w_t) - f^*$。
+\end{itemize}
+
+\begin{lstlisting}[caption={病态 $L_2$ 逻辑回归上 GD、Momentum 与 NAG 的核心实现（节选自 \texttt{vol4\_experiments.py}）},label={lst:v4-ch1-opt}]
+smax = np.linalg.svd(X, compute_uv=False)[0]
+L = 0.25 * (smax ** 2) / N + lam      # Exact smoothness bound: L = 51.52
+mu, kappa, eta = lam, L / lam, 1.0 / L
+beta_nag = (np.sqrt(kappa) - 1.0) / (np.sqrt(kappa) + 1.0)  # 0.940
+
+w_gd, w_mom, v_mom = np.zeros(D), np.zeros(D), np.zeros(D)
+w_nag, y_nag = np.zeros(D), np.zeros(D)
+for t in range(151):
+    _, g_gd = loss_grad(w_gd)
+    _, g_mom = loss_grad(w_mom)
+    w_gd -= eta * g_gd                       # Plain GD
+    v_mom = 0.85 * v_mom + g_mom             # Heavy-Ball Momentum
+    w_mom -= eta * v_mom
+    _, g_y = loss_grad(y_nag)                # Nesterov look-ahead gradient
+    w_next = y_nag - eta * g_y
+    y_nag = w_next + beta_nag * (w_next - w_nag)
+    w_nag = w_next
+\end{lstlisting}
+
+图~\ref{fig:v4-ch1-accel} 与表~\ref{tab:v4-ch1-exp} 直接读取自实测数据文件 \texttt{data/opt\_accel.csv}，震撼地呈现了条件数 $\kappa$ 与 $\sqrt{\kappa}$ 之间的鸿沟。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{semilogyaxis}[
+  width=0.90\linewidth,
+  height=6.7cm,
+  xlabel={迭代步数 $t$},
+  ylabel={次优度 $F(w_t) - f^*$（对数坐标）},
+  xmin=-3, xmax=153,
+  ymin=2e-6, ymax=6e-1,
+  grid=both,
+  major grid style={tealLine!45, line width=0.4pt},
+  minor grid style={tealLine!20, line width=0.25pt},
+  axis line style={slate!80},
+  tick label style={font=\footnotesize\sffamily, color=ink},
+  label style={font=\small\sffamily, color=ink},
+  legend style={
+    at={(0.035,0.055)}, anchor=south west,
+    fill=white, draw=tealLine, rounded corners=1.2mm,
+    font=\footnotesize\sffamily, cells={anchor=west}
+  },
+  every axis plot/.append style={line width=1.45pt}
+]
+  \addplot[color=ochre, mark=square*, mark size=1.4pt, mark repeat=3]
+    table[x=t, y=gd, col sep=comma]{data/opt_accel.csv};
+  \addlegendentry{GD（$\eta = 1/L$）}
+
+  \addplot[color=navy, mark=triangle*, mark size=1.7pt, mark repeat=3]
+    table[x=t, y=mom, col sep=comma]{data/opt_accel.csv};
+  \addlegendentry{Heavy-Ball 动量（$\beta = 0.85$）}
+
+  \addplot[color=teal, mark=*, mark size=1.4pt, mark repeat=3]
+    table[x=t, y=nag, col sep=comma]{data/opt_accel.csv};
+  \addlegendentry{Nesterov NAG（$\beta_{\text{nag}} = 0.940$）}
+\end{semilogyaxis}
+\end{tikzpicture}
+\caption{病态 $L_2$ 逻辑回归（$N=300, D=15, \lambda=0.05, L=51.52, \kappa=1030.5$）实测收敛曲线（读取自 \texttt{data/opt\_accel.csv}）。对数纵轴上的斜率清晰印证了线性收敛速率：150 步后，NAG 与动量法将误差压低至 $10^{-6}$--$10^{-5}$ 量级，领先纯 GD 整整四个数量级！}\label{fig:v4-ch1-accel}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{实测次优度 $F(w_t) - f^*$ 关键节点对比（\texttt{data/opt\_accel.csv}）}\label{tab:v4-ch1-exp}
+\small
+\begin{tabular}{@{}rccc@{}}
+\toprule
+\textbf{迭代步 $t$} & \textbf{GD（$\eta=1/L$）} & \textbf{Momentum（$\beta=0.85$）} & \textbf{Nesterov NAG（$\beta=0.940$）} \\
+\midrule
+$0$   & $3.19 \times 10^{-1}$ & $3.19 \times 10^{-1}$ & $3.19 \times 10^{-1}$ \\
+$50$  & $5.90 \times 10^{-2}$ & $3.93 \times 10^{-3}$ & $2.43 \times 10^{-3}$ \\
+$100$ & $3.51 \times 10^{-2}$ & $2.26 \times 10^{-4}$ & $2.70 \times 10^{-5}$ \\
+$150$ & $2.22 \times 10^{-2}$ & $1.56 \times 10^{-5}$ & $3.36 \times 10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+细看图~\ref{fig:v4-ch1-accel} 中的绿色 NAG 曲线，你会发现一个极具教学价值的细节：在 $t=35 \to 40$（误差从 $2.23\times 10^{-3}$ 轻微回弹至 $2.70\times 10^{-3}$）以及 $t=105 \to 125$（从 $1.09\times 10^{-5}$ 轻微回弹至 $2.48\times 10^{-5}$ 后又迅速跌至 $3.36\times 10^{-6}$），NAG 并不是每一步都单调下降的！这正是\textbf{加速方法不是下降方法（Not a Descent Method）}的典型标志——为了换取全局 $\sqrt{\kappa}$ 级的惊人提速，NAG 允许像欠阻尼弹簧一样在谷底附近轻微过冲并迅速拉回。而在工程实践中，如果我们在前瞻步检测到函数值回弹，配合“自适应重启（Adaptive Restart，清零动量）”甚至能把这些小波纹彻底抹平。
+
+\begin{extBox}{二阶牛顿法：局部二次收敛的“核动力”与 $O(D^3)$ 代价}
+在刚才的实验中，我们只用了 \textbf{15 步牛顿法}就把基准解 $w^*$ 算到了梯度范数 $< 10^{-12}$ 的机器精度，为什么它比一阶法快如此之多？
+
+牛顿法的核心思想是将图~\ref{fig:v4-sandwich} 中的各向同性二次上界 $\frac{L}{2}\norm{y-x_t}_2^2$，替换为目标函数在当前点 $x_t$ 的\textbf{精确二阶泰勒展开}：
+\begin{align*}
+  x_{t+1} &= \argmin_y \left\{f(x_t) + \nabla f(x_t)^\top(y-x_t) + \frac{1}{2}(y-x_t)^\top \nabla^2 f(x_t)(y-x_t)\right\} \\
+  &= x_t - \big[\nabla^2 f(x_t)\big]^{-1}\nabla f(x_t).
+\end{align*}
+由于海森矩阵逆 $[\nabla^2 f(x_t)]^{-1}$ 自动把狭长椭球“拉圆”成了标准球体，牛顿法具备\textbf{仿射不变性}——无论特征尺度相差 $15$ 倍还是 $10^6$ 倍，条件数都被海森逆瞬间抵消！在最优解 $x^*$ 邻域内，只要 $\nabla^2 f$ 满足 Lipschitz 连续，牛顿法具备\textbf{局部二次收敛（Quadratic Convergence）}：
+\[
+  \norm{x_{t+1} - x^*}_2 \le C \norm{x_t - x^*}_2^2,
+\]
+这意味着一旦误差进入 $10^{-1}$，接下来的误差序列将按 $10^{-2} \to 10^{-4} \to 10^{-8} \to 10^{-16}$ 坍缩，每步有效数字\textbf{翻倍}！
+
+那为何我们在大规模机器学习与深度学习里不直接全用牛顿法？瓶颈在于每一步都需要存储 $O(D^2)$ 的海森矩阵并花费 $O(D^3)$ 的算力求解线性方程组 $H \Delta x = -g$：当 $D = 15$（本节实验）时 $15^3 \approx 3000$ 瞬息即成；当 $D = 10^6$ 时 $D^3 = 10^{18}$ 完全不可承受。因此在大维场景下，人们转向只用 $O(D)$ 存储的\textbf{拟牛顿法（如 L-BFGS）}或本章的加速一阶法与自适应梯度法（Adam 等，第 5 卷）。
+\end{extBox}
+
+% ============================================================
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+% ============================================================
+
+\exTier{A 层}{概念核对与基础验算}
+\begin{enumerate}[label=\textbf{4.1.\arabic*}, leftmargin=3.3em, itemsep=5pt]
+  \item\label{ex:4.1.1} \textbf{凸性判别与反例}：判断下列函数在各自定义域上是否为凸函数、严格凸函数或非凸函数，并给出简明证明或反例：
+  (a) $f_1(x) = e^{a^\top x + b}\;(x\in\R^d)$；
+  (b) $f_2(x_1, x_2) = x_1 x_2\;(x \in \R_{++}^2)$；
+  (c) $f_3(x) = -\sum_{i=1}^d \ln x_i\;(x \in \R_{++}^d)$；
+  (d) $f_4(w) = \max_{1\le k \le K} (a_k^\top w + b_k)\;(w\in\R^d)$。
+  \exHint{结合二阶海森矩阵判据与命题~\ref{prop:v4-preserve} 的保凸运算；对 $f_2$ 检查特征值符号。}
+
+  \item\label{ex:4.1.2} \textbf{Log-Sum-Exp 函数的凸性与光滑常数}：证明 $\mathrm{LSE}(z) = \ln\left(\sum_{k=1}^K e^{z_k}\right)$ 是 $\R^K$ 上的凸函数，并证明其梯度是 $1$-Lipschitz 连续的（即 $\nabla^2 \mathrm{LSE}(z) \preceq I_K$）。
+  \exHint{令 $p_k = e^{z_k}/\sum_j e^{z_j}$，导出 $\nabla^2 \mathrm{LSE}(z) = \diag(p) - pp^\top$，并用 Cauchy-Schwarz 验证 $0 \le v^\top(\diag(p)-pp^\top)v \le \norm{v}_2^2$。}
+\end{enumerate}
+
+\exTier{B 层}{定理推演与条件数分析}
+\begin{enumerate}[label=\textbf{4.1.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=3]
+  \item\label{ex:4.1.3} \textbf{最小二乘与岭回归的精确条件数}：考虑 $F_\lambda(w) = \frac{1}{2N}\norm{Xw - y}_2^2 + \frac{\lambda}{2}\norm{w}_2^2$，设 $X \in \R^{N\times D}$ 的奇异值为 $\sigma_1 \ge \dots \ge \sigma_D \ge 0$。求出 $F_\lambda$ 的紧致光滑常数 $L$ 与强凸常数 $\mu$，并说明当 $X$ 秩亏（$\sigma_D = 0$）时为何加入 $\lambda > 0$ 会彻底改变梯度下降的收敛阶。
+  \exHint{直接写出海森矩阵 $\nabla^2 F_\lambda(w) = \frac{1}{N}X^\top X + \lambda I_D$ 的最大与最小特征值。}
+
+  \item\label{ex:4.1.4} \textbf{一般步长 $\eta \in (0, 2/L)$ 的线性收敛率}：修改定理~\ref{thm:v4-linear-conv} 的证明，在 $L$-光滑且满足 PL 不等式的假设下，求出任意固定步长 $\eta \in (0, 2/L)$ 对应的单步收缩系数 $\rho(\eta)$，并验证 $\eta = 1/L$ 恰好使 $\rho(\eta)$ 最小。
+  \exHint{直接从下降引理~\eqref{eq:v4-step-drop} 出发，将 $\norm{\nabla f(x_t)}_2^2 \ge 2\mu(f(x_t)-f^*)$ 代入即可。}
+\end{enumerate}
+
+\exTier{C 层}{深度证明与非凸边界探索}
+\begin{enumerate}[label=\textbf{4.1.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=5]
+  \item\label{ex:4.1.5} \textbf{共强制性（Co-coercivity）与强凸参数距离的直接收缩}：对 $L$-光滑凸函数，利用辅助函数 $g_x(z) = f(z) - \nabla f(x)^\top z$ 证明：
+  \[
+    \big(\nabla f(y) - \nabla f(x)\big)^\top (y - x) \ge \frac{1}{L}\norm{\nabla f(y) - \nabla f(x)}_2^2.
+  \]
+  再利用该不等式证明：若 $f$ 同时是 $\mu$-强凸的且 $\eta \le 1/L$，则有更紧的参数一步收缩
+  \[
+    \norm{x_{t+1} - x^*}_2^2 \le (1 - \mu\eta)\norm{x_t - x^*}_2^2.
+  \]
+  \exHint{注意 $g_x$ 仍 $L$-光滑且在 $z=x$ 处取全局最小，应用下降引理得 $g_x(x) \le g_x(y) - \frac{1}{2L}\norm{\nabla g_x(y)}_2^2$，交换 $x, y$ 后相加。}
+
+  \item\label{ex:4.1.6} \textbf{满足 PL 条件的非凸函数}：考察一维函数 $f(x) = x^2 + 3\sin^2 x$。
+  (a) 计算 $f''(x)$ 并说明 $f$ 在 $\R$ 上不是凸函数；
+  (b) 证明 $x^* = 0$ 是唯一全局极小点且 $f^* = 0$；
+  (c) 证明存在常数 $\mu > 0$（例如 $\mu = \frac{1}{32}$）使 $f$ 在整个 $\R$ 上满足 PL 不等式~\eqref{eq:v4-pl}，从而梯度下降对其依然具有全局线性收敛性！
+  \exHint{注意到 $f'(x) = 2x + 3\sin(2x)$；可分 $|x| \le \frac{\pi}{2}$（利用 $\sin(2x)$ 与 $x$ 同号或界定比值）与 $|x| > \frac{\pi}{2}$ 两段放缩证明 $(f'(x))^2 / f(x)$ 有正下界。}
+\end{enumerate}
+
+\exTier{D 层}{数值实验与工程诊断}
+\begin{enumerate}[label=\textbf{4.1.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=7]
+  \item\label{ex:4.1.7} \textbf{特征标准化对条件数 $\kappa$ 的震撼效应}：修改脚本 \texttt{vol4\_experiments.py} 中的实验 1 函数，在运行优化器之前仅对设计矩阵 $X$ 做零均值单位方差标准化（列归一化）。重新计算 $L, \mu, \kappa$ 并运行 150 步 GD 与 NAG，比较标准化前后 $t=150$ 时的次优度变化。这一结果对机器学习预处理有何启示？
+  \exHint{标准化后 $X^\top X / N$ 的最大特征值将骤降两个数量级，纯 GD 也能迅速逼近机器精度。}
+
+  \item\label{ex:4.1.8} \textbf{Nesterov 自适应重启（Adaptive Restart）实验}：在第 1.6 节实验中我们观察到 NAG 曲线在 $t \approx 40$ 与 $t \approx 115$ 出现轻微回弹。在代码清单~\ref{lst:v4-ch1-opt} 中加入梯度重启判据：每当 $\nabla F(y_t)^\top (w_{t+1} - w_t) > 0$（说明动量方向与当前负梯度形成钝角、已经冲过谷底）时，令 $y_{t+1} = w_{t+1}$ 强制清零惯性。绘制重启版 NAG 与原版 NAG 的对比曲线，验证 $t=150$ 时的精度提升。
+  \exHint{参见 O'Donoghue \& Candès (2015) 经典启发式重启策略，仅需在循环末尾判断 \texttt{np.dot(g\_y, w\_next - w\_nag) > 0} 并重置 \texttt{y\_nag = w\_next.copy()}。}
+\end{enumerate}

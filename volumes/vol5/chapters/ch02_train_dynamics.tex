@@ -1,0 +1,613 @@
+\chapter[深层训练动力学：初始化与优化]{深层网络的训练动力学：初始化、归一化与自适应优化}
+\label{ch:train-dynamics}
+
+\chapEpigraph{给我四个参数，我就能画出一头大象；给我五个，我就能让它甩起鼻子。}{John von Neumann（冯·诺依曼，费米转述）}
+
+\begin{chapIntro}{本章导读：驯服 20 层乃至 100 层网络的信号与梯度}
+第~\ref{ch:mlp-autodiff} 章赋予了我们两件利器：深层 ReLU 网络的指数级折叠表达力，以及反向模式自动微分的精确梯度。然而在深度学习历史上，直到 2010 年代中期之前，训练一个 20 层以上的纯前馈网络都如同走钢丝——稍不留神，前向激活就会在十几层内坍缩成全零，或者爆炸成 \texttt{NaN}；反向梯度也随之呈指数级消失或发散。
+
+本章从第一性原理剖析深层网络的\textbf{训练动力学（Training Dynamics）}，逐一拆解让现代深度网络稳定收敛的四大核心支柱：
+\begin{enumerate}
+  \item \textbf{信号传播与初始化定理}：定量刻画 $L$ 层连乘如何导致方差呈 $\sigma^{2L}$ 指数失控；严格证明 \textbf{Xavier（Glorot）} 与 \textbf{Kaiming（He）} 方差守恒初始化定理（尤其揭示 ReLU 将二阶矩精确砍半的 $\frac{2}{n_{\text{in}}}$ 因子）。
+  \item \textbf{归一化家族的张量几何}：统一比较 \textbf{BatchNorm}、\textbf{LayerNorm} 与 \textbf{RMSNorm} 的数学定义、归一化轴切面与推理陷阱，并用 20 层 ReLU 实测（\texttt{data/init\_prop.csv}）直观展示四条激活传播曲线的十三个数量级悬殊。
+  \item \textbf{自适应优化与解耦权重衰减}：沿着 $\text{SGD+Momentum} \to \text{AdaGrad} \to \text{RMSProp} \to \text{Adam} \to \text{AdamW}$ 的脉络完整推导；严格证明 Adam 的偏差校正公式，并数学证明为何 \textbf{Adam + $L_2$ 正则化不等价于 AdamW 的解耦权重衰减}。
+  \item \textbf{正则化与学习率调度}：证明反向 Dropout 的期望守恒性，剖析线性预热（Warmup）与余弦退火（Cosine Annealing）背后的动力学直觉。
+\end{enumerate}
+\end{chapIntro}
+
+\section{深层信号与梯度的指数病理}
+\label{sec:vanishing-exploding}
+
+考虑一个 $L$ 层无偏置前馈网络，每层宽度均为 $n$，输入向量 $x^{(0)} \in \R^n$ 满足各分量独立同分布、零均值且单位方差：$\E[x^{(0)}_j] = 0,\; \Var(x^{(0)}_j) = 1$。为先剥离非线性干扰，考察线性链
+\[
+  x^{(l)} = W^{(l)} x^{(l-1)}, \qquad l = 1, 2, \dots, L,
+\]
+其中每个权重矩阵 $W^{(l)} \in \R^{n \times n}$ 的元素独立抽自零均值、方差为 $\sigma_w^2$ 的分布。
+
+\subsection{前向方差的指数坍缩与爆炸}
+
+考察第 $l$ 层任意单个神经元 $x^{(l)}_i = \sum_{j=1}^{n} W^{(l)}_{ij} x^{(l-1)}_j$。利用权重与上一层激活的相互独立性以及零均值条件 $\E[W^{(l)}_{ij}] = 0$，我们立刻得到：
+\begin{align*}
+  \E\!\left[x^{(l)}_i\right] &= \sum_{j=1}^{n} \E\!\left[W^{(l)}_{ij}\right] \E\!\left[x^{(l-1)}_j\right] = 0, \\
+  \Var\!\left(x^{(l)}_i\right) &= \E\!\left[\left(\sum_{j=1}^{n} W^{(l)}_{ij} x^{(l-1)}_j\right)^2\right]
+  = \sum_{j=1}^{n} \E\!\left[\left(W^{(l)}_{ij}\right)^2\right] \E\!\left[\left(x^{(l-1)}_j\right)^2\right]
+  = n \sigma_w^2 \Var\!\left(x^{(l-1)}_j\right).
+\end{align*}
+其中交叉项 $\E[W^{(l)}_{ij} W^{(l)}_{ik} x^{(l-1)}_j x^{(l-1)}_k]$ 对所有 $j \neq k$ 均因权重独立且零均值而严格消失。沿着 $L$ 层递推，输出方差满足指数律：
+\begin{equation}
+  \Var\!\left(x^{(L)}_i\right) = \left(n \sigma_w^2\right)^L \Var\!\left(x^{(0)}_i\right).
+  \label{eq:linear-var-exp}
+\end{equation}
+式~\eqref{eq:linear-var-exp} 的后果触目惊心：记增益因子 $\alpha = n \sigma_w^2$。只要 $\alpha$ 略微偏离临界点 $1$，深度 $L$ 就会将其指数放大：
+\begin{itemize}
+  \item 若 $\sigma_w = 0.5 / \sqrt{n}$（即 $\alpha = 0.25$），在 $L = 20$ 层后方差缩小为 $0.25^{20} \approx 9.1 \times 10^{-13}$，标准差跌至 $10^{-6}$ 量级；若再叠加上 ReLU 每次砍半的能量衰减，激活值直接跌入 $10^{-10}$ 的浮点噪声泥潭！
+  \item 若 $\sigma_w = 2.2 / \sqrt{n}$（即 $\alpha = 4.84$），在 $L = 20$ 层后标准差剧增至 $2.2^{20} \approx 7.0 \times 10^6$（即使加上 ReLU 砍半也仍达数千倍），激活与梯度迅速上溢为 \texttt{inf}/\texttt{NaN}。
+\end{itemize}
+
+\subsection{反向梯度的对称灾难与饱和激活函数}
+
+反向传播与前向传播在数学上完全对偶。由第~\ref{ch:mlp-autodiff} 章的仿射层 VJP，设反向误差信号（伴随量）为 $\delta^{(l)} = \frac{\partial \mathcal{L}}{\partial z^{(l)}} \in \R^{n_l}$，则
+\[
+  \delta^{(l-1)} = \left(W^{(l)}\right)^\top \delta^{(l)} \had \sigma'\!\left(z^{(l-1)}\right).
+\]
+从第 $L$ 层一路回传到第 $1$ 层，梯度要连乘 $L-1$ 个矩阵和 $L-1$ 个激活导数对角阵：
+\begin{equation}
+  \frac{\partial z^{(L)}}{\partial z^{(1)}} = \prod_{l=2}^{L} W^{(l)} \diag\!\left(\sigma'\!\left(z^{(l-1)}\right)\right).
+  \label{eq:grad-chain}
+\end{equation}
+这就解释了 1990 年代 Sigmoid 网络为何几乎不可能训练超过 5 层：因为 Sigmoid 导数的全局最大值仅为
+\[
+  \max_{z \in \R} \sigma'(z) = \sigma(0)(1-\sigma(0)) = \frac{1}{4}!
+\]
+哪怕权重矩阵都是完美的正交矩阵（谱范数恒为 $1$），仅 Sigmoid 导数一项就会把梯度每层至少衰减至 $\frac{1}{4}$，20 层之后梯度就被压缩到 $4^{-20} \approx 9.1 \times 10^{-13}$——底层权重完全收不到任何有效更新信号，这就是历史上著名的\textbf{梯度消失问题（Vanishing Gradient Problem）}。
+
+\section{Xavier 与 Kaiming 方差守恒初始化定理}
+\label{sec:init-theory}
+
+既然式~\eqref{eq:linear-var-exp} 表明信号能否平稳穿透深层网络取决于每层的方差缩放系数是否精确等于 $1$，我们就可以把这一条件写成严格的数学定理，直接解出不同激活函数下最优的权重初始化方差！
+
+\begin{thmBox}
+\begin{theorem}[Xavier/Glorot 与 Kaiming/He 方差守恒初始化]
+\label{thm:xavier-kaiming}
+考虑第 $l$ 层仿射变换 $z^{(l)} = W^{(l)} x^{(l-1)} + b^{(l)}$，其中 $W^{(l)} \in \R^{n_{\text{out}} \times n_{\text{in}}}$ 的元素独立同分布于零均值、对称分布（方差为 $\sigma_w^2 = \Var(w)$），偏置 $b^{(l)} = 0$，输入 $x^{(l-1)} = \sigma(z^{(l-1)})$ 与 $W^{(l)}$ 相互独立，且上一层预激活 $z^{(l-1)}$ 各分量独立同分布、关于原点对称（均值 $0$，方差 $\Var(z^{(l-1)})$）。
+\begin{enumerate}
+  \item \textbf{线性或原点附近 $\tanh$ 激活（Xavier / Glorot, 2010）}：当 $\sigma(z) \approx z$ 时，
+  \[
+    \Var\!\left(z^{(l)}\right) = n_{\text{in}} \sigma_w^2\,\Var\!\left(z^{(l-1)}\right), \qquad
+    \Var\!\left(\delta^{(l-1)}\right) = n_{\text{out}} \sigma_w^2\,\Var\!\left(\delta^{(l)}\right).
+  \]
+  前向方差守恒要求 $\sigma_w^2 = \frac{1}{n_{\text{in}}}$，反向方差守恒要求 $\sigma_w^2 = \frac{1}{n_{\text{out}}}$。当 $n_{\text{in}} \neq n_{\text{out}}$ 时取调和平均折中，即得 \textbf{Xavier 初始化}：
+  \begin{equation}
+    \Var(w) = \frac{2}{n_{\text{in}} + n_{\text{out}}}.
+    \label{eq:xavier-init}
+  \end{equation}
+  \item \textbf{ReLU 激活（Kaiming / He, 2015）}：当 $x^{(l-1)} = \ReLU(z^{(l-1)})$ 时，有精确的二阶矩关系
+  \begin{equation}
+    \E\!\left[\ReLU\!\left(z^{(l-1)}\right)^2\right] = \frac{1}{2}\,\Var\!\left(z^{(l-1)}\right),
+    \label{eq:relu-half-moment}
+  \end{equation}
+  由此前向预激活方差递推满足 $\Var(z^{(l)}) = \frac{1}{2} n_{\text{in}} \sigma_w^2\,\Var(z^{(l-1)})$，反向梯度方差递推满足 $\Var(\delta^{(l-1)}) = \frac{1}{2} n_{\text{out}} \sigma_w^2\,\Var(\delta^{(l)})$。因此保持前向（fan-in）或反向（fan-out）信号方差守恒的 \textbf{Kaiming 初始化}为：
+  \begin{equation}
+    \Var(w) = \frac{2}{n_{\text{in}}} \quad (\text{fan-in 模式}) \qquad \text{或} \qquad
+    \Var(w) = \frac{2}{n_{\text{out}}} \quad (\text{fan-out 模式}).
+    \label{eq:kaiming-init}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+首先证明 ReLU 下的前向二阶矩公式~\eqref{eq:relu-half-moment}。由于 $W^{(l)}$ 与 $x^{(l-1)}$ 独立且 $\E[W^{(l)}_{ij}] = 0$，第 $l$ 层预激活 $z^{(l)}_i = \sum_{j=1}^{n_{\text{in}}} W^{(l)}_{ij} x^{(l-1)}_j$ 仍满足零均值 $\E[z^{(l)}_i] = 0$，并且由于 $W^{(l)}_{ij}$ 分布关于原点对称，$z^{(l)}_i$ 的分布也关于原点对称！
+
+下面计算 $z^{(l)}_i$ 的方差。注意此时 $x^{(l-1)}_j = \ReLU(z^{(l-1)}_j)$ \textbf{不再是零均值}（它恒非负！），因此不能粗暴地套用 $\Var(WX) = \Var(W)\Var(X)$，而必须使用二阶原点矩：
+\begin{align*}
+  \Var\!\left(z^{(l)}_i\right)
+  &= \E\!\left[\left(\sum_{j=1}^{n_{\text{in}}} W^{(l)}_{ij} x^{(l-1)}_j\right)^2\right]
+  = \sum_{j=1}^{n_{\text{in}}} \E\!\left[\left(W^{(l)}_{ij}\right)^2\right] \E\!\left[\left(x^{(l-1)}_j\right)^2\right] \\
+  &= n_{\text{in}} \Var(w)\, \E\!\left[\ReLU\!\left(z^{(l-1)}_j\right)^2\right].
+\end{align*}
+因为交叉项中含有 $\E[W^{(l)}_{ij} W^{(l)}_{ik}] = \E[W^{(l)}_{ij}]\E[W^{(l)}_{ik}] = 0$（$j \neq k$），所以依然严格为零。
+
+接下来利用 $z := z^{(l-1)}_j$ 分布关于原点对称（概率密度满足 $p(-z) = p(z)$）且 $\E[z] = 0$，直接积分计算 $\E[\ReLU(z)^2]$：
+\[
+  \E\!\left[\ReLU(z)^2\right]
+  = \int_{0}^{+\infty} z^2 p(z)\,dz
+  = \frac{1}{2} \int_{-\infty}^{+\infty} z^2 p(z)\,dz
+  = \frac{1}{2}\E[z^2] = \frac{1}{2}\Var(z).
+\]
+代入上式立刻得到
+\[
+  \Var\!\left(z^{(l)}\right) = \frac{1}{2} n_{\text{in}} \Var(w)\,\Var\!\left(z^{(l-1)}\right).
+\]
+令每层缩放系数 $\frac{1}{2} n_{\text{in}} \Var(w) = 1$，便得到 Kaiming fan-in 条件 $\Var(w) = \frac{2}{n_{\text{in}}}$。
+
+再看反向传播：记 $g^{(l)}_j = \frac{\partial \mathcal{L}}{\partial x^{(l)}_j}$ 与 $\delta^{(l)}_j = \frac{\partial \mathcal{L}}{\partial z^{(l)}_j} = g^{(l)}_j \cdot \mathbb{I}[z^{(l)}_j > 0]$。由对称性，$\Prob(z^{(l)}_j > 0) = \frac{1}{2}$；近似认为掩码与上游梯度 $g^{(l)}_j$ 独立且 $\E[g^{(l)}_j] = 0$，则 $\Var(\delta^{(l)}_j) = \frac{1}{2}\Var(g^{(l)}_j)$。又因为 $g^{(l-1)}_k = \sum_{i=1}^{n_{\text{out}}} W^{(l)}_{ik} \delta^{(l)}_i$，重复完全相同的求和计算即得
+\[
+  \Var\!\left(g^{(l-1)}\right) = n_{\text{out}} \Var(w)\,\Var\!\left(\delta^{(l)}\right) = \frac{1}{2} n_{\text{out}} \Var(w)\,\Var\!\left(g^{(l)}\right),
+\]
+令缩放系数为 $1$ 即得 fan-out 条件 $\Var(w) = \frac{2}{n_{\text{out}}}$。当激活函数退化为线性 $\sigma(z)=z$ 时，式~\eqref{eq:relu-half-moment} 中无 $\frac{1}{2}$ 因子，立刻退化为 Xavier 条件。
+\end{proof}
+\end{thmBox}
+
+\begin{insightBox}{一个极容易被忽略的细节：Kaiming 守恒的是 $z$ 的方差，而非 $\ReLU(z)$ 的方差！}
+设 $z \sim \mathcal{N}(0, \sigma^2)$，经 ReLU 后 $x = \ReLU(z)$ 的均值和方差是多少？直接积分可得：
+\[
+  \E[x] = \int_0^\infty z \frac{1}{\sqrt{2\pi}\sigma} e^{-z^2/(2\sigma^2)} dz = \frac{\sigma}{\sqrt{2\pi}} \approx 0.3989\sigma,
+\]
+\[
+  \Var(x) = \E[x^2] - (\E[x])^2 = \left(\frac{1}{2} - \frac{1}{2\pi}\right)\sigma^2 \approx 0.3408\,\sigma^2 \implies \operatorname{std}(x) \approx 0.5838\,\sigma.
+\]
+但是请注意！由于下一层输入 $z' = Wx$ 的每个权重 $W_{ij}$ 零均值，它会自动把 $x$ 的非零均值抵消掉，因此进入下一层预激活方差的不是 $\Var(x)$，而是完整的二阶矩 $\E[x^2] = \frac{1}{2}\sigma^2$！这也解释了为什么后文实测中（图~\ref{fig:init-prop}），在 Kaiming 初始化下 ReLU 之后的激活标准差稳定在约 $0.84 \sim 0.96$（略低于初始高斯输入 $1.0$，具体数值取决于输入首层分布与有限宽度波动），而不会像 $\sigma_w = 0.5/\sqrt{D}$ 那样指数衰减。
+\end{insightBox}
+
+如果采用更一般的带负半轴斜率 $a$ 的 LeakyReLU（$\sigma(z) = \max(az, z)$），完全仿照定理~\ref{thm:xavier-kaiming} 的积分即可推得 $\E[\sigma(z)^2] = \frac{1 + a^2}{2}\Var(z)$，因此通用的 Kaiming 公式是 $\Var(w) = \frac{2}{(1+a^2)n_{\text{in}}}$——这正是 PyTorch \texttt{nn.init.kaiming\_normal\_} 源码中的精确公式！
+
+\section{归一化家族：BatchNorm、LayerNorm 与 RMSNorm}
+\label{sec:normalization}
+
+即便使用了完美的 Kaiming 初始化，它也只保证\textbf{第 0 步（初始化瞬间）}的方差守恒。一旦梯度下降开始更新权重，各层分布就会随着参数演化而漂移，且残差支路、注意力权重等结构会再次破坏方差平衡。现代深度学习对此给出的终极工程解药，是在网络内部显式插入\textbf{归一化层（Normalization Layers）}，把激活张量实时拉回“零均值、单位方差”的舒适区。
+
+归一化家族的核心区别，仅仅在于\textbf{沿着张量的哪几个维度计算均值与方差}。
+
+\subsection{三种主流归一化的精确数学定义}
+
+\begin{defBox}
+\begin{definition}[BatchNorm、LayerNorm 与 RMSNorm]
+设某层激活张量在视觉任务中形状为 $(N, C, H, W)$（批量、通道、高、宽），或在序列任务中形状为 $(B, T, D)$（批量、序列长度、特征维）。取数值稳定常数 $\epsilon \approx 10^{-5}$，引入可学习的仿射缩放参数 $\gamma$ 与平移参数 $\beta$（初始化为 $\gamma = \mathbf{1}, \beta = \mathbf{0}$，保证归一化层在需要时可恢复恒等映射）。
+\begin{enumerate}
+  \item \textbf{批归一化（Batch Normalization, BN；Ioffe \& Szegedy, 2015）}：对每个通道 $c \in \{1,\dots,C\}$，\textbf{跨整个小批量与空间像素} $(N, H, W)$ 统计标量均值与方差：
+  \begin{equation}
+  \begin{aligned}
+    \mu_c &= \frac{1}{NHW}\sum_{n,h,w} x_{n,c,h,w}, \qquad
+    \sigma_c^2 = \frac{1}{NHW}\sum_{n,h,w} (x_{n,c,h,w} - \mu_c)^2, \\
+    \BN(x)_{n,c,h,w} &= \gamma_c \frac{x_{n,c,h,w} - \mu_c}{\sqrt{\sigma_c^2 + \epsilon}} + \beta_c.
+  \end{aligned}
+  \label{eq:bn}
+  \end{equation}
+  \item \textbf{层归一化（Layer Normalization, LN；Ba et al., 2016）}：对\textbf{每个样本、每个时间步} $(b, t)$ 独立地在特征维度 $D$ 上统计均值与方差（完全不跨样本！）：
+  \begin{equation}
+  \begin{aligned}
+    \mu_{b,t} &= \frac{1}{D}\sum_{d=1}^{D} x_{b,t,d}, \qquad
+    \sigma_{b,t}^2 = \frac{1}{D}\sum_{d=1}^{D} (x_{b,t,d} - \mu_{b,t})^2, \\
+    \LN(x)_{b,t,d} &= \gamma_d \frac{x_{b,t,d} - \mu_{b,t}}{\sqrt{\sigma_{b,t}^2 + \epsilon}} + \beta_d.
+  \end{aligned}
+  \label{eq:ln}
+  \end{equation}
+  \item \textbf{均方根归一化（RMSNorm；Zhang \& Sennrich, 2019）}：现代大语言模型（LLaMA、Qwen、DeepSeek、Gemma 等）的默认标配。它发现 LayerNorm 的核心收益来自\textbf{重缩放不变性（Re-scaling Invariance）}而非中心平移，因此直接去掉均值减法与偏置 $\beta$，仅除以均方根：
+  \begin{equation}
+    \operatorname{RMS}(x_{b,t}) = \sqrt{\frac{1}{D}\sum_{d=1}^{D} x_{b,t,d}^2 + \epsilon}, \qquad
+    \RMSN(x)_{b,t,d} = \gamma_d \frac{x_{b,t,d}}{\operatorname{RMS}(x_{b,t})}.
+    \label{eq:rmsnorm}
+  \end{equation}
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+图~\ref{fig:norm-slices} 用直观的张量切面对比了 BatchNorm、LayerNorm 与 RMSNorm 在 $(B, T, D)$ / $(N, C, L)$ 空间中的统计范围：BN 沿着批量轴 $N$ 纵向切割，因而把同一批次内不同样本耦合在了一起；而 LN 与 RMSNorm 沿着特征轴 $D$ 横向切片，每个 token 完全自给自足。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  axis/.style={-{Stealth[length=2mm]}, thick, slate}
+]
+  % Helper macro to draw a 3D tensor grid: (x0, y0, highlight mode)
+  % Mode 1: BatchNorm (slice across N and L for one C)
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\sffamily\bfseries\small, color=tealDark] at (1.5, 3.3) {(a) BatchNorm};
+    \node[font=\scriptsize, color=slate] at (1.5, 2.85) {沿批量 $N$ 与空间 $L$ 归一化};
+    % Draw 4x3 front face (C=4 cols, N=3 rows) and depth L=2
+    \foreach \n in {0,1,2} {
+      \foreach \c in {0,1,2,3} {
+        \ifnum\c=1
+          \fill[teal!55] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \else
+          \fill[tealLight] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \fi
+        \draw[slate!60] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+      }
+    }
+    % Top face (depth L)
+    \foreach \c in {0,1,2,3} {
+      \ifnum\c=1
+        \fill[teal!35] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+      \else
+        \fill[navyLight] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+      \fi
+      \draw[slate!60] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+    }
+    % Right face
+    \foreach \n in {0,1,2} {
+      \fill[navyLight!70] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+      \draw[slate!60] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+    }
+    % Axes labels
+    \draw[axis] (-0.25, 0) -- (-0.25, 2.05) node[above, font=\scriptsize] {$N$ (批量)};
+    \draw[axis] (0, -0.25) -- (2.7, -0.25) node[right, font=\scriptsize] {$C$ (通道)};
+    \draw[axis] (2.75, -0.1) -- (3.25, 0.3) node[right, font=\scriptsize] {$H\!\times\!W$};
+    \node[font=\scriptsize, color=tealDark] at (1.5, -0.85) {依赖批量大小；需维护滑动统计量};
+  \end{scope}
+
+  % Mode 2: LayerNorm (slice across D for each (b, t))
+  \begin{scope}[shift={(5.4,0)}]
+    \node[font=\sffamily\bfseries\small, color=navy] at (1.5, 3.3) {(b) LayerNorm};
+    \node[font=\scriptsize, color=slate] at (1.5, 2.85) {单样本单位置沿特征 $D$ 归一化};
+    \foreach \n in {0,1,2} {
+      \foreach \c in {0,1,2,3} {
+        \ifnum\n=1
+          \fill[navy!50] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \else
+          \fill[navyLight] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \fi
+        \draw[slate!60] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+      }
+    }
+    \foreach \c in {0,1,2,3} {
+      \fill[navyLight!60] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+      \draw[slate!60] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+    }
+    \foreach \n in {0,1,2} {
+      \fill[navyLight!70] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+      \draw[slate!60] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+    }
+    \draw[axis] (-0.25, 0) -- (-0.25, 2.05) node[above, font=\scriptsize] {$B$ (批量)};
+    \draw[axis] (0, -0.25) -- (2.7, -0.25) node[right, font=\scriptsize] {$D$ (特征)};
+    \draw[axis] (2.75, -0.1) -- (3.25, 0.3) node[right, font=\scriptsize] {$T$ (序列)};
+    \node[font=\scriptsize, color=navy] at (1.5, -0.85) {减均值且除标准差；Transformer 标准};
+  \end{scope}
+
+  % Mode 3: RMSNorm (same slice as LN, no mean subtraction, L2 sphere projection)
+  \begin{scope}[shift={(10.8,0)}]
+    \node[font=\sffamily\bfseries\small, color=ochre] at (1.5, 3.3) {(c) RMSNorm};
+    \node[font=\scriptsize, color=slate] at (1.5, 2.85) {仅沿特征 $D$ 按均方根重缩放};
+    \foreach \n in {0,1,2} {
+      \foreach \c in {0,1,2,3} {
+        \ifnum\n=1
+          \fill[ochre!55] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \else
+          \fill[ochreLight] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+        \fi
+        \draw[slate!60] (\c*0.65, \n*0.65) rectangle ++(0.65, 0.65);
+      }
+    }
+    \foreach \c in {0,1,2,3} {
+      \fill[ochreLight!60] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+      \draw[slate!60] (\c*0.65, 1.95) -- ++(0.45, 0.35) -- ++(0.65, 0) -- ++(-0.45, -0.35) -- cycle;
+    }
+    \foreach \n in {0,1,2} {
+      \fill[ochreLight!70] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+      \draw[slate!60] (2.60, \n*0.65) -- ++(0.45, 0.35) -- ++(0, 0.65) -- ++(-0.45, -0.35) -- cycle;
+    }
+    \draw[axis] (-0.25, 0) -- (-0.25, 2.05) node[above, font=\scriptsize] {$B$ (批量)};
+    \draw[axis] (0, -0.25) -- (2.7, -0.25) node[right, font=\scriptsize] {$D$ (特征)};
+    \draw[axis] (2.75, -0.1) -- (3.25, 0.3) node[right, font=\scriptsize] {$T$ (序列)};
+    \node[font=\scriptsize, color=ochre] at (1.5, -0.85) {省去均值归约与 $\beta$；LLM 更快更省内存};
+  \end{scope}
+\end{tikzpicture}}
+\caption{BatchNorm、LayerNorm 与 RMSNorm 的张量归一化切片几何对比。阴影区块表示同一次均值/方差（或均方根）归约所覆盖的元素集合。}
+\label{fig:norm-slices}
+\end{figure}
+
+\subsection{为什么归一化能让训练提速十倍？}
+
+早期文献将 BatchNorm 的成功归因于减少“内部协变量偏移（Internal Covariate Shift）”。然而 Santurkar 等人（2018）的经典实验证明，哪怕在 BN 之后人为注入分布噪声，网络依然收敛得更好！真正深层的数学原因是\textbf{归一化显著平滑了损失函数的 Lipschitz 常数与 $\beta$-光滑性}，同时赋予网络\textbf{权重尺度不变性（Scale Invariance）}：
+\[
+  \BN\!\left((\alpha W) x\right) = \BN(W x), \qquad \forall \alpha > 0.
+\]
+对尺度不变的函数求导可知 $\nabla_{\alpha W} \mathcal{L} = \frac{1}{\alpha} \nabla_W \mathcal{L}$：如果某层权重不慎变得过大，它的梯度会自动缩小 $\frac{1}{\alpha}$；反之权重过小则梯度自动放大——这种隐式的\textbf{自调节步长机制}让我们可以安全地使用比无归一化网络大一个数量级的学习率，大幅加快收敛。
+
+此外，在视觉检测/分割任务中当单卡批量被迫降至 $N=1\text{或}2$ 时，BN 的批统计量方差极大，此时可使用 \textbf{GroupNorm}（将通道 $C$ 分成 $G$ 组，在每组 $(C/G, H, W)$ 上归一化），同样彻底摆脱对批量大小 $N$ 的依赖。而在自然语言与大模型中，序列长度可变且自回归推理时逐 token 生成，BN 既不自然又无法在线使用，因此 LayerNorm 与 RMSNorm 成为绝对统治者（RMSNorm 在 GPU 上少一次均值归约与写回，实际可减少约 $10\%\sim 40\%$ 的归一化算子耗时）。
+
+\begin{failBox}{BatchNorm 工程排错头号杀手：\texttt{model.train()} 与 \texttt{model.eval()}}
+\begin{enumerate}
+  \item \textbf{训练与推理的行为割裂}：训练时 BN 使用当前小批量的实时均值 $\mu_B$ 与方差 $\sigma_B^2$，同时以指数滑动平均更新全局统计量 $\hat{\mu} \leftarrow (1-m)\hat{\mu} + m\mu_B$（PyTorch 默认动量 $m=0.1$）。推理时往往只输入单张图片（$N=1$），此时必须调用 \texttt{model.eval()} 切换为使用冻结的 $(\hat{\mu}, \hat{\sigma}^2)$！\textbf{新手最常见的惨案}是验证或部署时忘记 \texttt{model.eval()}，导致单样本推理时方差为 $0$，输出全部崩溃；或者批量极小时训练统计量噪声剧烈，验证精度莫名暴跌。
+  \item \textbf{跨卡多机同步陷阱}：数据并行训练中，若每张 GPU 分到的微批量太小（如 $N_{\text{local}} = 2$），默认 BN 只在单卡内部算均值方差，必须替换为 \texttt{SyncBatchNorm} 或直接换用 GroupNorm/LayerNorm。
+  \item \textbf{半精度 \texttt{fp16} 方差溢出}：在混合精度训练中，对 $x^2$ 求和极易突破 \texttt{fp16} 上限 $65504$，因此工业实现（PyTorch/Apex/FlashNorm）一律在归一化内部将中间累加器强制提升至 \texttt{fp32} 计算。
+\end{enumerate}
+\end{failBox}
+
+\section{实测验证：20 层 ReLU 网络的激活传播实验}
+\label{sec:exp-init}
+
+{\rightskip=0pt plus 1fil\relax 为了亲眼见证理论公式~\eqref{eq:linear-var-exp}、\eqref{eq:kaiming-init} 与~\eqref{eq:ln} 的惊人威力，我们运行配套实验脚本 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp2\_init\_norm\_opt}：构造一个 $L = 20$ 层、宽度 $D = 128$ 的纯 ReLU 深度前馈网络，输入批量 $B = 64$ 的标准高斯噪声 $x^{(0)} \sim \mathcal{N}(0, I)$（第 0 层实测标准差 $0.9975$），对比四种配置下各层输出激活的标准差：\par}
+\begin{itemize}
+  \item \textbf{Small 初始化}（$\sigma_w = 0.5 / \sqrt{D}$）：每层按理论因子 $\frac{1}{2}(0.5)^2 = 0.125$（标准差约 $0.35\times$）塌缩；第 10 层跌至 $2.88 \times 10^{-5}$，第 19 层跌至 $2.14 \times 10^{-9}$，第 20 层实测坍缩至 \textbf{\texttt{6.60e-10}}（绘图 CSV 文件中为对数坐标可读性截断在 \texttt{1.00e-09} 下界）。
+  \item \textbf{Large 初始化}（$\sigma_w = 2.2 / \sqrt{D}$）：每层按因子 $\frac{1}{2}(2.2)^2 = 2.42$（标准差约 $1.56\times$）膨胀；第 10 层达 $65.3$，第 20 层实测爆炸至 \textbf{\texttt{6.87e+03}}（\texttt{6.8709e+03}）——与 Small 之间相差整整 \textbf{13 个数量级}！
+  \item \textbf{Kaiming 初始化}（$\sigma_w = \sqrt{2/D}$）：完美命中临界点，穿透全部 20 层后既不坍缩也不爆炸，第 20 层标准差稳稳保持在 \textbf{\texttt{0.843}}（\texttt{8.4263e-01}），全程波动落在 $[0.76, 1.00]$ 之间。
+  \item \textbf{Kaiming + LayerNorm}：每层 ReLU 后施加 LayerNorm，所有 20 层的激活标准差纹丝不动地锁定在 \textbf{\texttt{0.996}}（\texttt{9.9613e-01}——精确对应 PyTorch 样本标准差贝塞尔修正 $\sqrt{(128-1)/128} \approx 0.9961$！）。
+\end{itemize}
+
+图~\ref{fig:init-prop} 直接读取 \texttt{data/init\_prop.csv} 在半对数坐标系中绘出这四条实测曲线，两条倾斜笔直的对数直线生动印证了式~\eqref{eq:linear-var-exp} 的指数定律。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{semilogyaxis}[
+    width=0.86\linewidth, height=6.4cm,
+    xlabel={网络深度（层号 $l$）},
+    ylabel={激活张量标准差 $\operatorname{std}(h^{(l)})$（对数刻度）},
+    xmin=-0.4, xmax=20.4, ymin=5e-10, ymax=3e4,
+    xtick={0,2,4,6,8,10,12,14,16,18,20},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend columns=2,
+    legend style={at={(0.5,1.04)}, anchor=south, font=\scriptsize, fill=white, draw=tealLine, legend cell align=left, column sep=8pt}
+  ]
+    \addplot[ochre, very thick, mark=triangle*, mark size=1.8pt]
+      table[x=layer, y=large, col sep=comma]{data/init_prop.csv};
+    \addlegendentry{Large ($2.2/\sqrt{D}$)：终值 $6.87\times 10^3$}
+
+    \addplot[navy, very thick, dashed, mark=diamond*, mark size=1.8pt]
+      table[x=layer, y=kaiming_ln, col sep=comma]{data/init_prop.csv};
+    \addlegendentry{Kaiming + LN：锁定 $0.996$}
+
+    \addplot[teal, very thick, mark=*, mark size=1.7pt]
+      table[x=layer, y=kaiming, col sep=comma]{data/init_prop.csv};
+    \addlegendentry{Kaiming ($\sqrt{2/D}$)：终值 $0.843$}
+
+    \addplot[plum, very thick, mark=square*, mark size=1.6pt]
+      table[x=layer, y=small, col sep=comma]{data/init_prop.csv};
+    \addlegendentry{Small ($0.5/\sqrt{D}$)：终值 $6.60\times 10^{-10}$}
+
+    \draw[dotted, slate, thick] (axis cs:0, 1) -- (axis cs:20, 1);
+  \end{semilogyaxis}
+\end{tikzpicture}
+\caption{20 层 ReLU 网络（宽度 $D=128$）前向激活标准差的实测演化（读取自 \texttt{data/init\_prop.csv}）。半对数图上的两条直线清晰暴露了初始化失配时的指数爆炸与指数坍缩，而 Kaiming 初始化与 LayerNorm 将信号牢牢锚定在 $O(1)$ 水平线上。}
+\label{fig:init-prop}
+\end{figure}
+
+\section{自适应优化器演化：从 SGD 动量到 Adam 与 AdamW}
+\label{sec:optimizers}
+
+解决了“信号能穿透深层网络”之后，第二个拦路虎浮出水面：深度神经网络的损失曲面是一个极度病态（ill-conditioned）的高维峡谷——某些参数方向（如大奇异值方向或高频特征）坡度极陡，另一些方向（如低频词嵌入）坡度极其平缓。固定步长的朴素随机梯度下降（SGD）在陡峭方向剧烈震荡、在平坦方向龟速爬行。现代优化器的全部进化史，就是为了解决这一曲率失衡问题。
+
+\subsection{从动量（Momentum）到 AdaGrad 与 RMSProp}
+
+\begin{enumerate}
+  \item \textbf{SGD + 动量（Heavy-Ball Momentum）}：为梯度引入一阶指数滑动平均速度 $v_t$：
+  \[
+    v_t = \beta v_{t-1} + g_t, \qquad \theta_t = \theta_{t-1} - \eta v_t \qquad (\text{典型 }\beta = 0.9).
+  \]
+  在峡谷两壁来回震荡的高曲率方向，正负梯度在滑动平均中彼此抵消；而在沿谷底一致前进的低曲率方向，速度不断累积加速至 $\frac{1}{1-\beta} = 10\times$。Nesterov 加速梯度（NAG）则先沿动量方向“往前看一步”再算梯度，进一步提升收敛率。
+
+  \item \textbf{AdaGrad（Duchi et al., 2011）}：为每个参数坐标 $i$ 独立累积历史梯度平方和 $G_{t,i} = \sum_{\tau=1}^{t} g_{\tau,i}^2$，并按其平方根倒数缩放步长：
+  \[
+    \theta_{t,i} = \theta_{t-1,i} - \frac{\eta}{\sqrt{G_{t,i}} + \epsilon}\, g_{t,i}.
+  \]
+  稀疏/低梯度坐标获得较大有效学习率，频繁/大梯度坐标自动减速。缺点在于 $G_{t,i}$ 单调递增，训练后期有效步长往往过早衰减至零。
+
+  \item \textbf{RMSProp（Hinton, 2012）}：用指数滑动平均替代单调累积，遗忘遥远历史：
+  \[
+    v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t \had g_t, \qquad \theta_t = \theta_{t-1} - \frac{\eta}{\sqrt{v_t} + \epsilon} \had g_t.
+  \]
+\end{enumerate}
+
+\subsection{Adam 与偏差校正的严格证明}
+
+\textbf{Adam（Adaptive Moment Estimation；Kingma \& Ba, 2015）} 将“一阶动量（Momentum）”与“二阶自适应步长（RMSProp）”优雅合一，并修补了零初始化带来的冷启动偏差。在每一步 $t = 1, 2, \dots$，给定当前小批量随机梯度 $g_t = \nabla_\theta \mathcal{L}_t(\theta_{t-1})$（默认超参数 $\beta_1 = 0.9,\; \beta_2 = 0.999,\; \epsilon = 10^{-8}$）：
+\begin{align}
+  m_t &= \beta_1 m_{t-1} + (1 - \beta_1) g_t, & \hat{m}_t &= \frac{m_t}{1 - \beta_1^t}, \label{eq:adam-m} \\
+  v_t &= \beta_2 v_{t-1} + (1 - \beta_2) g_t^{\had 2}, & \hat{v}_t &= \frac{v_t}{1 - \beta_2^t}, \label{eq:adam-v} \\
+  \theta_t &= \theta_{t-1} - \eta \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}, \label{eq:adam-step}
+\end{align}
+其中初始状态 $m_0 = 0,\; v_0 = 0$，平方与除法均按元素进行。
+
+\begin{thmBox}
+\begin{proposition}[Adam 偏差校正的无偏性证明]
+\label{prop:adam-bias}
+假设在迭代初期随机梯度序列 $\{g_\tau\}_{\tau=1}^t$ 近似平稳（$\E[g_\tau] \equiv \mu_g$ 且 $\E[g_\tau^{\had 2}] \equiv \mu_{g^2}$）。则由 $m_0 = 0, v_0 = 0$ 递推得到的未经校正估计量严重偏向 $0$，而校正后的 $\hat{m}_t, \hat{v}_t$ 严格无偏：
+\[
+  \E[\hat{m}_t] = \mu_g, \qquad \E[\hat{v}_t] = \mu_{g^2}.
+\]
+\end{proposition}
+\begin{proof}
+反复展开一阶递推式 $m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t$ 直至 $m_0 = 0$：
+\[
+  m_t = (1 - \beta_1) \sum_{\tau=1}^{t} \beta_1^{t-\tau} g_\tau.
+\]
+两端取期望，利用平稳假设与等比数列求和公式 $\sum_{k=0}^{t-1} \beta_1^k = \frac{1 - \beta_1^t}{1 - \beta_1}$：
+\[
+  \E[m_t] = (1 - \beta_1) \left(\sum_{\tau=1}^{t} \beta_1^{t-\tau}\right) \mu_g
+  = (1 - \beta_1) \cdot \frac{1 - \beta_1^t}{1 - \beta_1}\,\mu_g
+  = (1 - \beta_1^t)\,\mu_g.
+\]
+因此，在 $t = 1$ 时（若 $\beta_2 = 0.999$），未经校正的 $v_1 = 0.001\, g_1^2$ 竟然比真实二阶矩缩小了整整 $1000$ 倍！若不除以 $(1 - \beta_2^t)$，首步更新就会被 $\sqrt{v_1}$ 放大约 $\sqrt{1000} \approx 31.6$ 倍，引发剧烈震荡。除以精确的归一化因子 $(1-\beta_1^t)$ 与 $(1-\beta_2^t)$ 后，立得 $\E[\hat{m}_t] = \mu_g$ 与 $\E[\hat{v}_t] = \mu_{g^2}$。
+\end{proof}
+\end{thmBox}
+
+\subsection{AdamW 的核心洞察：为什么 $L_2$ 正则化不等价于权重衰减？}
+
+在经典 SGD 中，在目标函数上添加 $L_2$ 正则项 $\tilde{\mathcal{L}}(\theta) = \mathcal{L}(\theta) + \frac{\lambda}{2}\norm{\theta}_2^2$ 后，更新步为
+\[
+  \theta_t = \theta_{t-1} - \eta \left(g_t + \lambda \theta_{t-1}\right) = (1 - \eta\lambda)\theta_{t-1} - \eta g_t,
+\]
+此时“$L_2$ 正则化”与“每步将权重按比例 $(1-\eta\lambda)$ 收缩的\textbf{权重衰减（Weight Decay）}”是\textbf{完全等价}的。正因如此，早期深度学习框架（包括 PyTorch 最初的 \texttt{Adam(weight\_decay=...)}) 直接把 $\lambda \theta_{t-1}$ 粗暴加进梯度 $g_t$ 里！
+
+Loshchilov 与 Hutter（2019）敏锐地指出了这一隐蔽而致命的错误，并提出了如今几乎统治全部大模型预训练的 \textbf{AdamW（Decoupled Weight Decay）}。
+
+\begin{thmBox}
+\begin{theorem}[Adam+$L_2$ 与 AdamW 解耦权重衰减的不等价性]
+\label{thm:adamw}
+设原始梯度为 $g_t = \nabla_\theta \mathcal{L}_t(\theta_{t-1})$，正则系数为 $\lambda > 0$。比较两种更新规则（为清晰起见先忽略 $\beta_1$ 一阶动量效应或令 $\beta_1 = 0$，完整带 $\beta_1$ 情形结论相同）：
+\begin{itemize}
+  \item \textbf{耦合版（Adam + $L_2$）}：将梯度替换为 $\tilde{g}_t = g_t + \lambda \theta_{t-1}$ 并送入 Adam，得到
+  \begin{equation}
+    \theta_t^{\text{L2}} = \theta_{t-1} - \eta \frac{\hat{m}_t(\tilde{g})}{\sqrt{\hat{v}_t(\tilde{g})} + \epsilon}
+    \approx \theta_{t-1} - \frac{\eta \lambda}{\sqrt{\hat{v}_t(\tilde{g})} + \epsilon} \had \theta_{t-1} - \eta \frac{\hat{m}_t(g)}{\sqrt{\hat{v}_t(\tilde{g})} + \epsilon}.
+    \label{eq:adam-l2}
+  \end{equation}
+  \item \textbf{解耦版（AdamW）}：先按原始梯度 $g_t$ 计算自适应步长，再将权重衰减项直接解耦施加于参数：
+  \begin{equation}
+    \theta_t^{\text{W}} = (1 - \eta \lambda)\,\theta_{t-1} - \eta \frac{\hat{m}_t(g)}{\sqrt{\hat{v}_t(g)} + \epsilon}.
+    \label{eq:adamw}
+  \end{equation}
+\end{itemize}
+在自适应预条件矩阵 $P_t = \diag(\sqrt{\hat{v}_t} + \epsilon)$ 非标量倍单位阵时，二者\textbf{绝不等价}，且 Adam+$L_2$ 会系统性扭曲各参数的正则化强度。
+\end{theorem}
+\begin{proof}
+对比式~\eqref{eq:adam-l2} 与式~\eqref{eq:adamw} 中作用在 $\theta_{t-1}$ 上的收缩因子：
+\begin{enumerate}
+  \item 在 \textbf{AdamW} 中，无论某坐标 $i$ 的历史梯度大小如何，它在每一步承受的相对衰减率都是严格均匀的 $\eta\lambda$，且衰减项 $\lambda\theta_{t-1}$ \textbf{不会污染}二阶矩估计 $v_t$。
+  \item 在 \textbf{Adam + $L_2$} 中，权重衰减项被迫除以自适应分母 $\sqrt{\hat{v}_{t,i}} + \epsilon$，等价于坐标 $i$ 的有效权重衰减系数变成了
+  \[
+    \lambda_{\text{eff}, i} = \frac{\lambda}{\sqrt{\hat{v}_{t,i}} + \epsilon}.
+  \]
+  这意味着：\textbf{历史梯度越大的重要权重（$\sqrt{\hat{v}_{t,i}}$ 大），受到的 $L_2$ 惩罚反而越弱}；而历史梯度微小的权重（$\sqrt{\hat{v}_{t,i}}$ 小），反而承受了剧烈放大的收缩！更糟的是，$\tilde{g}_t^2 = (g_t + \lambda\theta_{t-1})^2$ 还会把参数幅值混入二阶矩 $v_t$ 中，使最佳权重衰减系数 $\lambda$ 与学习率 $\eta$ 强耦合，调参极其痛苦。
+\end{enumerate}
+只有当所有坐标的 $\sqrt{\hat{v}_{t,i}}$ 恒为同一常数（即退化为无自适应缩放的 SGD）时，两者才重合。
+\end{proof}
+\end{thmBox}
+
+实践中还有一个极其关键的细节：\textbf{不要对偏置项 $b$ 与归一化层的缩放/平移参数（$\gamma, \beta$）施加权重衰减}！把 $\gamma$ 往 $0$ 衰减会直接扼杀归一化层的输出通道，且一维向量参数量极小、几乎不引起过拟合。在 PyTorch 中，标准做法是按参数维度过滤，仅对二维及以上的权重矩阵（\texttt{p.ndim >= 2}）开启 \texttt{weight\_decay}。
+
+\section{Dropout 正则化与学习率调度动力学}
+\label{sec:dropout-lr}
+
+\subsection{反向 Dropout（Inverted Dropout）的期望守恒}
+
+在全连接层或注意力投影层中，神经元之间容易形成脆弱的“协同适应（co-adaptation）”，导致过拟合。Srivastava 等人（2014）提出的 \textbf{Dropout} 在每次前向传播时，以失活概率 $p \in [0, 1)$ 独立地将每个隐藏激活随机置零。
+
+{\rightskip=0pt plus 1em\relax 现代框架一律采用\textbf{反向 Dropout（Inverted Dropout）}：在\textbf{训练阶段}独立采样伯努利掩码 $m_j \sim \operatorname{Bernoulli}(1 - p)$，并将存活神经元同步放大 $\frac{1}{1-p}$ 倍：\par}
+\begin{equation}
+  \tilde{h}_j = \frac{m_j}{1 - p}\, h_j \quad (\text{训练}), \qquad
+  \tilde{h}_j = h_j \quad (\text{推理}).
+  \label{eq:inv-dropout}
+\end{equation}
+立即验证期望守恒性：
+\[
+  \E_m\!\left[\tilde{h}_j\right] = \frac{\E[m_j]}{1 - p}\, h_j = \frac{1 - p}{1 - p}\, h_j = h_j.
+\]
+由于训练时已经完成了缩放补偿，推理阶段无需任何乘法改动（零额外开销！），同时它可近似看作对 $2^m$ 个共享权重的稀疏子网络执行几何平均集成。
+
+\subsection{线性预热（Warmup）与余弦退火（Cosine Annealing）}
+
+为什么几乎所有现代 Transformer 与深层 ResNet 的训练都以“先升后降”的\textbf{线性预热 + 余弦退火}调度学习率？
+\begin{equation}
+  \eta_t = \begin{cases}
+    \eta_{\max}\,\dfrac{t}{T_{\text{warm}}}, & 1 \le t \le T_{\text{warm}}, \\[6pt]
+    \eta_{\min} + \dfrac{1}{2}\left(\eta_{\max} - \eta_{\min}\right)\left(1 + \cos\!\left(\pi \dfrac{t - T_{\text{warm}}}{T_{\text{total}} - T_{\text{warm}}}\right)\right), & T_{\text{warm}} < t \le T_{\text{total}}.
+  \end{cases}
+  \label{eq:warmup-cosine}
+\end{equation}
+其背后有清晰的动力学原因：
+\begin{itemize}
+  \item \textbf{为什么前几百步必须预热？}在初始化瞬间，参数远离最优谷底，梯度幅度大且方向高度随机；更重要的是，对于 Adam/AdamW，尽管有偏差校正，前几步的二阶矩 $\hat{v}_t$ 仅仅基于极少数几个样本估计，统计方差极大！若一开始就施放满额学习率 $\eta_{\max}$，极易将深层权重一脚踢飞到梯度饱和区或破坏归一化尺度。线性预热给 $m_t, v_t$ 留出了稳定估计的窗口。
+  \item \textbf{为什么后期采用余弦退火？}训练中段保持较大步长以快速穿越平坦高原并逃离尖锐局部极小；训练末段学习率平滑降至 $\eta_{\min} \approx 0.1\eta_{\max}$，压低小批量随机梯度噪声 $\eta^2 \Sigma_g$，让参数精细沉降到平坦极小值盆地的最深处。
+\end{itemize}
+
+下面给出一个简洁可运行的 PyTorch 实战片段，把本章全部最佳实践（Kaiming 初始化、RMSNorm、参数分组 AdamW、线性预热 + 余弦退火）浓缩在一起：
+
+\begin{lstlisting}[caption={现代深层网络训练配置的标准模板：RMSNorm + 参数分组 AdamW + 余弦预热}]
+import math, torch
+import torch.nn as nn
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 在 fp32 下计算均方根，防止半精度平方溢出
+        rms = torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return (x.float() * rms).type_as(x) * self.weight
+
+def build_adamw_groups(model: nn.Module, lr: float = 3e-4, wd: float = 0.1):
+    # 仅对矩阵权重(ndim >= 2)启用解耦衰减；偏置与 Norm 缩放参数不衰减
+    decay = [p for p in model.parameters() if p.requires_grad and p.ndim >= 2]
+    no_decay = [p for p in model.parameters() if p.requires_grad and p.ndim < 2]
+    return torch.optim.AdamW([
+        {"params": decay, "weight_decay": wd},
+        {"params": no_decay, "weight_decay": 0.0},
+    ], lr=lr, betas=(0.9, 0.95))
+
+def lr_schedule(step: int, warm: int, total: int, max_lr: float, min_lr: float):
+    if step < warm:
+        return max_lr * (step + 1) / warm
+    prog = (step - warm) / max(1, total - warm)
+    return min_lr + 0.5 * (max_lr - min_lr) * (1.0 + math.cos(math.pi * prog))
+\end{lstlisting}
+
+\begin{extBox}{损失地形的平坦极小值、稳定性边缘与 $\mu$P 超参数迁移}
+为什么拥有数亿参数的过参数化神经网络，在把训练损失压到几乎为零之后，依然能在测试集上泛化良好？现代深度学习理论从损失地形（Loss Landscape）的几何视角给出了三个激动人心的洞见：
+\begin{enumerate}
+  \item \textbf{平坦极小值 vs 尖锐极小值}：Hessian 最大特征值 $\lambda_{\max}(H)$ 越小，极小值盆地越“平坦”。由于训练损失面与测试损失面之间存在微小的水平漂移，落入尖锐窄缝的解在测试集上损失暴增，而落入宽阔平坦盆地的解对扰动高度鲁棒（Hochreiter \& Schmidhuber, 1997；Keskar et al., 2017）。较小批量与适度大初始学习率带来的随机噪声，恰好起到了“把参数震出尖锐坑洼”的隐式正则化作用。
+  \item \textbf{稳定性边缘（Edge of Stability；Cohen et al., 2021）}：经典凸优化要求学习率 $\eta < 2/\lambda_{\max}(H)$ 才能单调下降；但实测表明，神经网络训练往往会持续推高曲率直到 $\lambda_{\max}(H) \approx 2/\eta$，然后贴着这一“稳定性边缘”边震荡边稳步降低损失！
+  \item \textbf{最大更新参数化（$\mu$P；Yang et al., 2022）}：如果我们在 40M 参数的小模型上调好了最优学习率，把宽度扩大 $16\times$ 到 10B 模型时，传统标准参数化（SP）下的最优学习率会剧烈偏移，而每次尝试 10B 模型的成本高达数百万美元。$\mu$P 严格推导了权重初始化方差与每层学习率随宽度 $n$ 的缩放幂律（隐藏层权重方差 $\propto 1/n$、Adam 学习率 $\propto 1/n$，而输入嵌入层保持 $\Theta(1)$），使得每层激活的变化量 $\Delta h^{(l)}$ 在宽度趋于无穷时恒为 $\Theta(1)$，从而实现\textbf{零样本超参数迁移}——在小模型上调好的学习率可直接平移至百亿大模型！
+\end{enumerate}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章揭开了深度网络从“算得出梯度”到“真正训得动”的动力学密码：
+\begin{itemize}
+  \item \textbf{初始化定基调}：Kaiming 初始化 $\Var(w) = 2/n_{\text{in}}$ 精确抵消 ReLU 的半波能量衰减，将 20 层前向标准差稳在 $O(1)$；
+  \item \textbf{归一化护航程}：BatchNorm 适合大批量视觉卷积（牢记 \texttt{train/eval} 切换），LayerNorm 与更轻快的 RMSNorm 则是序列与大模型标配；
+  \item \textbf{优化器控步伐}：Adam 通过偏差校正消除冷启动偏差，AdamW 将权重衰减从自适应分母中解耦，配合预热与余弦退火构成现代深度学习训练的标准引擎。
+\end{itemize}
+
+然而，即便集齐了 Kaiming 初始化、LayerNorm 与 AdamW，如果我们把纯全连接 MLP 直接喂给 $224 \times 224$ 的自然图像或千词长文本，参数量依然会瞬间失控，且 20 层以上纯直筒网络仍然面临退化瓶颈。如何把世界的\textbf{空间平移对称性}、\textbf{跨层恒等高速公路}与\textbf{时间递推结构}直接编码进网络拓扑中？这正是下一章的主题。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{检验初始化数值、归一化手算与优化器首步行为}
+
+\begin{enumerate}
+  \item[\textbf{5.2.1}] \textbf{归一化算子手算对比}：给定一个小批量特征张量 $X \in \R^{2 \times 3}$（$B=2, D=3$）：
+  \[
+    X = \begin{pmatrix} 1 & 2 & 3 \\ 4 & 8 & 12 \end{pmatrix},
+  \]
+  取 $\gamma = \mathbf{1},\; \beta = \mathbf{0},\; \epsilon = 0$。分别手算 $\BN(X)$、$\LN(X)$ 与 $\RMSN(X)$ 的精确输出矩阵，并观察第二行恰好是第一行的 $4$ 倍时，LayerNorm 与 RMSNorm 对这两行的输出有何异同？
+  \exHint{注意 $\LN$ 与 $\RMSN$ 均具有正尺度不变性 $\operatorname{Norm}(\alpha x) = \operatorname{Norm}(x)$（$\alpha > 0$），故两行输出完全相同！而 $\BN$ 沿列统计，两行结果并不相同。}
+
+  \item[\textbf{5.2.2}] \textbf{Adam 初始步与偏差校正直观}：设一维参数 $\theta_0 = 1.0$，前两步收到的梯度均为常数 $g_1 = g_2 = 0.2$，取 $\beta_1 = 0.9,\; \beta_2 = 0.999,\; \eta = 0.01,\; \epsilon = 0$。分别计算：
+  \begin{enumerate}
+    \item 带偏差校正的 Adam 第 1 步更新量 $\Delta \theta_1$；
+    \item 去掉偏差校正（直接用 $m_1/\sqrt{v_1}$）时的第 1 步更新量，比较两者倍数差异。
+  \end{enumerate}
+  \exHint{带校正时 $\hat{m}_1 = g_1,\; \hat{v}_1 = g_1^2$，因此无论梯度绝对值大小如何，第 1 步步长恒为 $\pm \eta$！去掉校正后放大了 $\frac{1-\beta_1}{\sqrt{1-\beta_2}} = \frac{0.1}{\sqrt{0.001}} \approx 3.16$ 倍。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{深入方差传播、归一化梯度与优化器等价条件}
+
+\begin{enumerate}
+  \item[\textbf{5.2.3}] \textbf{LeakyReLU 与 SELU/GELU 的初始化方差推广}：
+  \begin{enumerate}
+    \item 设 $\sigma(z) = \max(a z, z)$ 为斜率 $a \in (0, 1)$ 的 LeakyReLU，严格证明在零均值对称预激活假设下 $\E[\sigma(z)^2] = \frac{1 + a^2}{2}\Var(z)$，进而推出 Kaiming 初始化方差 $\Var(w) = \frac{2}{(1+a^2)n_{\text{in}}}$；
+    \item 对于标准高斯输入 $z \sim \mathcal{N}(0, 1)$，求激活函数 $\operatorname{GELU}(z) = z \Phi(z)$ 的精确二阶矩 $\E[\operatorname{GELU}(z)^2]$（给出闭式推导与数值结果），并与 ReLU 的二阶矩 $0.5$（增益 $\sqrt{2}$）比较，解释为何在单位方差处 GELU 的精确方差保持增益反而略大于 $\sqrt{2}$。
+  \end{enumerate}
+  \exHint{对 LeakyReLU 将积分拆为 $(-\infty, 0)$ 与 $(0, +\infty)$ 两段并利用 $p(-z) = p(z)$。}
+
+  \item[\textbf{5.2.4}] \textbf{LayerNorm 的张量 VJP 与尺度不变梯度正交性}：对于单向量无仿射参数的标准归一化 $y = \frac{x - \mu}{\sigma}$（其中 $\mu = \frac{1}{D}\sum_i x_i,\; \sigma = \sqrt{\frac{1}{D}\sum_i (x_i-\mu)^2}$），设上游伴随量为 $\bar{y} \in \R^D$。
+  \begin{enumerate}
+    \item 证明反向传播公式为
+    \[
+      \bar{x} = \frac{1}{\sigma}\left(\bar{y} - \frac{1}{D}\sum_{j=1}^D \bar{y}_j - y \cdot \frac{1}{D}\sum_{j=1}^D \bar{y}_j y_j\right);
+    \]
+    \item 验证 $\sum_i \bar{x}_i = 0$ 且 $\inner{\bar{x}}{x - \mu\mathbf{1}} = 0$，从几何上解释为什么归一化层的反向梯度天然垂直于中心化输入向量！
+  \end{enumerate}
+  \exHint{由均值平移不变性与正尺度不变性，$y(x + c\mathbf{1}) = y(x)$ 且 $y(\alpha x) = y(x)$，对 $c$ 和 $\alpha$ 求导即可一眼看出正交性！}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{动手验证反向传播方差与 AdamW vs Adam+$L_2$}
+
+\begin{enumerate}
+  \item[\textbf{5.2.5}] \textbf{复现并扩展 20 层反向梯度传播实验}：修改 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp2\_init\_norm\_opt}，在记录前向激活标准差的同时，对第 20 层施加损失 $\mathcal{L} = \norm{h^{(20)}}_2^2 / (BD)$ 并回传梯度，记录四种配置下第 $1 \sim 20$ 层权重梯度 $\norm{\nabla_{W^{(l)}} \mathcal{L}}_F$ 的演化曲线。对比 \texttt{Kaiming} 与 \texttt{Kaiming + RMSNorm} 的反向梯度稳定性。
+  \exHint{将各层权重设为 \texttt{requires\_grad=True}，运行 \texttt{loss.backward()} 后读取 \texttt{W.grad.norm().item()}。}
+
+  \item[\textbf{5.2.6}] {\rightskip=0pt plus 1em\relax \textbf{病态二次型上的 Adam+$L_2$ vs AdamW 实证}：构造二维病态二次损失 $\mathcal{L}(\theta_1, \theta_2) = 100\,\theta_1^2 + 0.01\,\theta_2^2$，从 $(\theta_1, \theta_2) = (2.0, 2.0)$ 出发，分别用 Adam（\texttt{weight\_decay=0.1}，即耦合 $L_2$）与 AdamW（\texttt{weight\_decay=0.1}）优化 200 步。打印两者的最终权重与每步有效衰减比例，验证定理~\ref{thm:adamw} 预言的不等价现象。\par}
+  \exHint{注意 PyTorch 中 \texttt{torch.optim.Adam(..., weight\_decay=0.1)} 实现的是耦合 $L_2$，而 \texttt{torch.optim.AdamW} 实现的是解耦衰减；在低曲率轴 $\theta_2$ 上两者差异最为悬殊。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{探索前沿归一化、无归一化训练与优化器设计}
+
+\begin{enumerate}
+  \item[\textbf{5.2.7}] \textbf{为什么反向 Dropout 与 BatchNorm 串联时可能出现“方差偏移（Variance Shift）”？}：Li 等人（2019）发现在现代 CNN 中同时串联 Dropout 与 BatchNorm 时测试精度反而下降。设特征 $x$ 经失活率为 $p$ 的反向 Dropout 得到 $\tilde{x} = \frac{m}{1-p} x$，证明虽然 $\E[\tilde{x}] = \E[x]$，但其二阶矩却被放大了 $\frac{1}{1-p}$ 倍（$\Var(\tilde{x}) = \frac{1}{1-p}\Var(x) + \frac{p}{1-p}(\E[x])^2$）。由此解释为什么 BN 在训练时记录的滑动方差 $\hat{\sigma}^2$ 与推理时（关闭 Dropout）的真实输入方差严重失配，以及为何应当把 Dropout 放在 BN 之后（或仅放在最终分类头前）。
+  \exHint{利用全方差公式 $\Var(M X) = \E[M^2]\E[X^2] - (\E[M]\E[X])^2$，其中 $M = m/(1-p)$ 满足 $\E[M]=1,\; \E[M^2] = 1/(1-p)$。}
+
+  \item[\textbf{5.2.8}] \textbf{探究低显存自适应优化器（Adafactor / 8-bit Adam / Muon）}：标准 AdamW 需要为每个参数额外保存两份 \texttt{fp32} 状态（一阶矩 $m_t$ 与二阶矩 $v_t$），使优化器显存占用高达模型权重本身的 $2\times$（在半精度训练中更是占到参数显存的 $4\times$）。阅读 Adafactor（用秩-1 矩阵分解 $v_{ij} \approx r_i c_j$ 近似二阶矩）与近期兴起的矩阵正交化优化器 Muon（利用 Newton-Schulz 迭代近似谱正交更新）的核心思想，讨论：为何矩阵权重在结构上与一维向量不同，按奇异值谱而非逐元素缩放步长能带来怎样的收敛收益？
+  \exHint{对比逐元素预条件 $\diag(v_t)^{-1/2} m_t$ 与矩阵极分解 $UV^\top$（将所有非零奇异值拉平为 $1$）对矩阵条件数的不同作用。}
+\end{enumerate}

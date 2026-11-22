@@ -1,0 +1,728 @@
+\chapter[AI 多元微积分与矩阵微分]{AI 多元微积分与矩阵微分}
+\label{ch:multivar-matrix-calc}
+
+\chapEpigraph{优秀的符号以最简短的形式直指事物的本质，从而极大地减轻思维的负担。}{戈特弗里德·威廉·莱布尼茨（Gottfried Wilhelm Leibniz）}
+
+\begin{chapIntro}{本章定位}
+大一微积分下册花费大量篇幅讲授曲线积分、曲面积分以及格林、高斯、斯托克斯三大矢量场公式；但在现代人工智能中，你几乎永远不会去算一个曲面上的通量。AI 模型的世界是另一套完全不同的微积分图景：模型把数百万乃至数百亿个参数向量与权重矩阵，经过层层线性变换与非线性激活，最终映射为一个\textbf{标量损失函数} $L(\theta)\in\R$。我们需要每天反复使用的是\textbf{梯度与最速下降方向、Jacobian 矩阵与反向模式链式法则、二阶 Taylor 与 Hessian 曲率判别、拉格朗日乘子法}，以及专门为矩阵参数打造的系统化求导武器——\textbf{全微分与迹技巧（Trace Trick）及 Hadamard 逐元素求导}。本章全部工具都是第 6 章梯度下降、第 2 卷逻辑/Softmax 回归以及第 5 卷手写自动微分的直接底座。
+\end{chapIntro}
+
+% ====================================================================
+\section{偏导、方向导数、梯度与最速下降方向}
+\label{sec:ch5-grad}
+
+\begin{recallBox}{一元导数的本质是“局部线性逼近”}
+对一元可微函数 $f:\R\to\R$，在点 $x$ 处加微小扰动 $h$ 时，导数 $f'(x)$ 刻画了函数的一阶线性增量：
+\[
+  f(x + h) = f(x) + f'(x)\,h + o(|h|), \qquad h \to 0.
+\]
+当 $h$ 足够小时，误差项 $o(|h|)$ 相比 $|h|$ 可以忽略，因此只要 $f'(x)\neq 0$，沿着 $-\operatorname{sign}(f'(x))$ 走一小步就必然让函数值下降。
+\end{recallBox}
+
+在人工智能中，参数不再是单个实数 $x\in\R$，而是向量 $x = (x_1,\dots,x_n)^T \in \R^n$（例如线性回归的权重向量 $w\in\R^d$）。如何把“一阶线性逼近”自然升级到高维空间？
+
+\subsection{梯度与方向导数的定义}
+
+\begin{defBox}
+\begin{definition}[可微性、梯度与方向导数]\label{def:ch5-grad}
+设多元标量函数 $f:\R^n\to\R$ 在点 $x\in\R^n$ 的某个邻域内有定义。
+\begin{enumerate}
+  \item \textbf{梯度（Gradient）}：将 $f$ 对各个坐标分量的偏导数排成\textbf{列向量}，记作
+  \[
+    \nabla f(x) \coloneqq
+    \begin{bmatrix}
+      \dfrac{\partial f}{\partial x_1}(x) &
+      \dfrac{\partial f}{\partial x_2}(x) &
+      \cdots &
+      \dfrac{\partial f}{\partial x_n}(x)
+    \end{bmatrix}^T \in \R^n.
+  \]
+  \item \textbf{全可微（一阶线性逼近）}：若当扰动向量 $h\in\R^n$ 满足 $\norm{h}_2\to 0$ 时，有
+  \begin{equation}\label{eq:ch5-first-order}
+    f(x + h) = f(x) + \inner{\nabla f(x)}{h} + o(\norm{h}_2),
+  \end{equation}
+  则称 $f$ 在 $x$ 处\textbf{可微}。由连续偏导数定理，只要各偏导数在 $x$ 处连续，式~\eqref{eq:ch5-first-order} 就自动成立。
+  \item \textbf{方向导数（Directional Derivative）}：给定任意单位方向向量 $u\in\R^n$（$\norm{u}_2=1$），函数沿方向 $u$ 的瞬时变化率定义为
+  \[
+    D_u f(x) \coloneqq \lim_{t\to 0} \frac{f(x + t u) - f(x)}{t}.
+  \]
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+把 $h = t u$（其中 $t\in\R$，$\norm{u}_2=1$）代入式~\eqref{eq:ch5-first-order}，两边减去 $f(x)$ 再同除以 $t$，令 $t\to 0$，立即得到方向导数与梯度的核心关系：
+\begin{equation}\label{eq:ch5-dir-deriv}
+  D_u f(x) = \inner{\nabla f(x)}{u} = \nabla f(x)^T u.
+\end{equation}
+在讨论抽象定理之前，我们先通过一个具体的二维碗状函数亲手感受梯度、等高线与方向导数之间的几何关系。
+
+\begin{example}[二维椭圆碗上的梯度与方向导数]\label{ex:ch5-2d-grad}
+考虑二元函数 $f(x_1, x_2) = x_1^2 + 3x_2^2$，在点 $x_0 = (1, 1)^T$ 处函数值为 $f(x_0) = 1^2 + 3\cdot 1^2 = 4$。求偏导数得梯度向量：
+\[
+  \nabla f(x_1, x_2) = \begin{bmatrix} 2x_1 \\ 6x_2 \end{bmatrix}
+  \implies
+  \nabla f(x_0) = \begin{bmatrix} 2 \\ 6 \end{bmatrix},
+  \qquad
+  \norm{\nabla f(x_0)}_2 = \sqrt{2^2 + 6^2} = 2\sqrt{10} \approx 6.325.
+\]
+比较从 $x_0=(1,1)^T$ 出发沿四个不同单位方向 $u$ 的瞬时变化率 $D_u f(x_0) = \inner{\nabla f(x_0)}{u}$：
+\begin{itemize}
+  \item 沿横轴 $e_1=(1,0)^T$：$D_{e_1} f(x_0) = 2$（正是 $\partial f/\partial x_1$）；
+  \item 沿纵轴 $e_2=(0,1)^T$：$D_{e_2} f(x_0) = 6$（正是 $\partial f/\partial x_2$，纵轴比横轴陡 3 倍）；
+  \item 沿等高线 $x_1^2 + 3x_2^2 = 4$ 在 $(1,1)^T$ 处的单位切向量 $v = \frac{1}{\sqrt{10}}(3, -1)^T$：
+  \[
+    D_v f(x_0) = \frac{1}{\sqrt{10}}(2\times 3 + 6\times(-1)) = 0,
+  \]
+  说明沿等高线切线移动时函数值一阶不变；
+  \item 沿负梯度单位方向 $u^* = -\frac{\nabla f(x_0)}{\norm{\nabla f(x_0)}_2} = -\frac{1}{\sqrt{10}}(1, 3)^T$：
+  \[
+    D_{u^*} f(x_0) = -\frac{1}{\sqrt{10}}(2\times 1 + 6\times 3) = -2\sqrt{10} \approx -6.325,
+  \]
+  比单沿 $-e_1$（变化率 $-2$）和单沿 $-e_2$（变化率 $-6$）下降得都更剧烈！
+\end{itemize}
+值得注意的是，点 $x_0=(1,1)^T$ 指向碗底原点 $(0,0)^T$ 的单位方向是 $-\frac{1}{\sqrt{2}}(1,1)^T$，与负梯度方向 $-\frac{1}{\sqrt{10}}(1,3)^T$ \textbf{并不重合}！正如图~\ref{fig:ch5-grad-contour} 所示，负梯度永远严格垂直于当前等高线，当等高线被拉扁成椭圆时，负梯度会偏向陡峭轴，而不是直指极小值点——这正是第 6 章“窄谷锯齿震荡”的几何根源。
+\end{example}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.18]
+  % Axes
+  \draw[-{Stealth[length=2.2mm]}, slate!70, thin] (-2.9,0) -- (3.2,0) node[right, font=\footnotesize, ink] {$x_1$};
+  \draw[-{Stealth[length=2.2mm]}, slate!70, thin] (0,-1.85) -- (0,2.35) node[above, font=\footnotesize, ink] {$x_2$};
+
+  % Elliptical contours x1^2 + 3 x2^2 = c
+  % Semi-axes: a = sqrt(c), b = sqrt(c/3)
+  \draw[tealLine, thick] (0,0) ellipse ({sqrt(1)} and {sqrt(1/3)});
+  \draw[tealLine, thick] (0,0) ellipse ({sqrt(2)} and {sqrt(2/3)});
+  \draw[teal, very thick] (0,0) ellipse ({2} and {2/sqrt(3)});
+  \draw[tealLine, thick, dashed] (0,0) ellipse ({sqrt(7)} and {sqrt(7/3)});
+
+  % Contour labels
+  \node[font=\scriptsize, teal, fill=white, inner sep=0.8pt] at (-1.05, 0.40) {$c=1$};
+  \node[font=\scriptsize, teal, fill=white, inner sep=0.8pt] at (-2.05, -0.58) {$c=4$};
+  \node[font=\scriptsize, slate] at (-2.65, -0.95) {$c=7$};
+
+  % Minimum origin
+  \fill[tealDark] (0,0) circle (1.8pt) node[below left, font=\scriptsize, tealDark] {$x^*=(0,0)$};
+
+  % Point x0 = (1, 1) on c=4
+  \coordinate (P) at (1,1);
+  \fill[ink] (P) circle (2.2pt);
+  \node[font=\footnotesize, ink, right=3pt, yshift=4pt] at (P) {$x_0=(1,1)$};
+
+  % Tangent line to x1^2 + 3x2^2 = 4 at (1,1): x1 + 3x2 = 4 => dir (3,-1)
+  \draw[navy, dashed, thick] ($(P) + (-1.35, 0.45)$) -- ($(P) + (1.50, -0.50)$);
+  \draw[-{Stealth[length=2.3mm]}, navy, very thick] (P) -- ($(P) + (0.96, -0.32)$)
+    node[above right, font=\scriptsize, navy, yshift=-1pt] {切方向 $v$};
+
+  % Gradient direction (2,6) -> unit (1/sqrt(10), 3/sqrt(10)) = (0.316, 0.949)
+  \draw[-{Stealth[length=2.5mm]}, ochre, very thick] (P) -- ($(P) + (0.41, 1.23)$)
+    node[right, font=\footnotesize, ochre] {$\nabla f(x_0)=(2,6)^T$（最速上升）};
+
+  % Steepest descent direction -grad
+  \draw[-{Stealth[length=2.5mm]}, tealDark, very thick] (P) -- ($(P) + (-0.41, -1.23)$)
+    node[below right, font=\footnotesize, tealDark, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt, xshift=3pt, yshift=2pt] {$-\nabla f(x_0)$（最速下降）};
+
+  % Right-angle mark between tangent (0.949, -0.316) and gradient (0.316, 0.949)
+  \coordinate (A) at ($(P) + (0.18, -0.06)$);
+  \coordinate (B) at ($(P) + (0.24, 0.12)$);
+  \coordinate (C) at ($(P) + (0.06, 0.18)$);
+  \draw[ink, thin] (A) -- (B) -- (C);
+\end{tikzpicture}
+\caption{函数 $f(x_1,x_2)=x_1^2+3x_2^2$ 在 $x_0=(1,1)^T$ 处的几何图景：梯度 $\nabla f(x_0)$ 严格正交于等高线 $c=4$ 的切方向 $v$ 并指向函数值增大最快的方向；负梯度 $-\nabla f(x_0)$ 是局部最速下降方向，但并不直接指向碗底原点 $(0,0)$。}
+\label{fig:ch5-grad-contour}
+\end{figure}
+
+\subsection{最速下降方向与等值面正交性的严格证明}
+
+借助第 2 章证明过的 Cauchy-Schwarz 不等式，我们可以把例~\ref{ex:ch5-2d-grad} 中的几何现象提升为任意 $n$ 维空间的普遍定理。
+
+\begin{thmBox}
+\begin{theorem}[梯度的最速变化与正交性定理]\label{thm:ch5-steepest}
+设 $f:\R^n\to\R$ 在点 $x_0$ 处可微且 $\nabla f(x_0)\neq 0$，则：
+\begin{enumerate}
+  \item \textbf{局部最速下降与最速上升}：在所有单位方向 $u\in\R^n$（$\norm{u}_2=1$）中，方向导数 $D_u f(x_0)$ 满足
+  \[
+    -\norm{\nabla f(x_0)}_2 \le D_u f(x_0) \le \norm{\nabla f(x_0)}_2.
+  \]
+  上界在唯一单位方向 $u_{\max} = \dfrac{\nabla f(x_0)}{\norm{\nabla f(x_0)}_2}$ 处取得；下界在唯一单位方向 $u_{\min} = -\dfrac{\nabla f(x_0)}{\norm{\nabla f(x_0)}_2}$ 处取得。因此\textbf{负梯度方向是唯一的一阶最速局部下降方向}。
+  \item \textbf{正交于等值面}：设 $S_c = \{x\in\R^n : f(x) = c\}$ 是过 $x_0$ 的等值面（$c = f(x_0)$）。对 $S_c$ 上任意过 $x_0$ 的光滑曲线 $\gamma:(-\delta,\delta)\to S_c$（$\gamma(0)=x_0$），梯度与曲线切向量严格正交：
+  \[
+    \inner{\nabla f(x_0)}{\gamma'(0)} = 0.
+  \]
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{(1)} 对任意单位向量 $\norm{u}_2=1$，由式~\eqref{eq:ch5-dir-deriv} 及第 2 章的 Cauchy-Schwarz 不等式得
+\[
+  \abs{D_u f(x_0)} = \abs{\inner{\nabla f(x_0)}{u}} \le \norm{\nabla f(x_0)}_2 \norm{u}_2 = \norm{\nabla f(x_0)}_2,
+\]
+即 $-\norm{\nabla f(x_0)}_2 \le D_u f(x_0) \le \norm{\nabla f(x_0)}_2$。回忆 Cauchy-Schwarz 等号成立当且仅当 $u$ 与 $\nabla f(x_0)$ 线性相关（共线），即存在实数 $\alpha\in\R$ 使 $u = \alpha \nabla f(x_0)$。由 $\norm{u}_2 = 1$ 得 $|\alpha| = 1/\norm{\nabla f(x_0)}_2$：
+\begin{itemize}
+  \item 取 $\alpha = +1/\norm{\nabla f(x_0)}_2$ 时，$D_u f(x_0) = +\norm{\nabla f(x_0)}_2$，达到唯一最大值；
+  \item 取 $\alpha = -1/\norm{\nabla f(x_0)}_2$ 时，$D_u f(x_0) = -\norm{\nabla f(x_0)}_2$，达到唯一最小值。
+\end{itemize}
+
+\textbf{(2)} 由于曲线 $\gamma(t)$ 始终落在等值面 $S_c$ 上，复合函数 $h(t) \coloneqq f(\gamma(t)) \equiv c$ 为常数，故 $h'(0) = 0$。另一方面，将 $\gamma(t) = x_0 + t\gamma'(0) + o(|t|)$ 代入可微性展开式~\eqref{eq:ch5-first-order}：
+\[
+  0 = \lim_{t\to 0}\frac{f(\gamma(t)) - f(x_0)}{t}
+    = \lim_{t\to 0}\frac{\inner{\nabla f(x_0)}{t\gamma'(0) + o(|t|)} + o(|t|)}{t}
+    = \inner{\nabla f(x_0)}{\gamma'(0)}.
+\]
+因此 $\nabla f(x_0)$ 正交于等值面在 $x_0$ 处的每一条切向量。
+\end{proof}
+
+\begin{insightBox}{“最速下降”是局部性质，不是全局承诺}
+定理~\ref{thm:ch5-steepest} 仅在步长 $\eta\to 0^+$ 的无穷小邻域内保证了 $f(x_0 - \eta \nabla f(x_0)) < f(x_0)$。如果步长 $\eta$ 迈得太大，高阶项 $o(\norm{h}_2)$ 会接管一切，导致“一步跨过山谷冲到更高的对岸”甚至发散。第 6 章我们将用特征值精确算出这个允许步长的临界上限 $\eta < 2/\lambda_{\max}$。
+\end{insightBox}
+
+% ====================================================================
+\section{Jacobian 矩阵与多元链式法则：反向传播的微积分骨架}
+\label{sec:ch5-jacobian}
+
+上一节讨论的是“向量输入 $\to$ 标量输出”（$f:\R^n\to\R$）。但在神经网络中，每一层都在做\textbf{向量到向量}的变换 $f:\R^n\to\R^m$（例如线性层 $z = Wx+b$、激活层 $a = \sigma(z)$）。此时一阶线性逼近的系数不再是向量，而是一个 $m\times n$ 矩阵——\textbf{Jacobian 矩阵}。
+
+\subsection{先看具体二维小例，再抽象定义 Jacobian}
+
+\begin{example}[线性层与 Sigmoid 激活层的手算偏导矩阵]\label{ex:ch5-2d-jac}
+考虑两层极简网络的前向计算：输入 $x = (x_1, x_2)^T \in \R^2$，权重 $W = \begin{bmatrix} 1 & -2 \\ 0.5 & 1 \end{bmatrix}$，偏置 $b = \begin{bmatrix} 0 \\ -1 \end{bmatrix}$，
+\[
+  z = f(x) = W x + b = \begin{bmatrix} x_1 - 2x_2 \\ 0.5 x_1 + x_2 - 1 \end{bmatrix},
+  \qquad
+  a = g(z) = \sigma(z) = \begin{bmatrix} \sigma(z_1) \\ \sigma(z_2) \end{bmatrix},
+\]
+其中 $\sigma(t) = \frac{1}{1+e^{-t}}$，其导数为 $\sigma'(t) = \sigma(t)(1-\sigma(t))$。把输出各分量对输入各分量的偏导数排成 $2\times 2$ 矩阵（第 $i$ 行对应第 $i$ 个输出，第 $j$ 列对应第 $j$ 个输入）：
+\begin{enumerate}
+  \item 对线性层 $z = Wx + b$：
+  \[
+    \frac{\partial z}{\partial x} =
+    \begin{bmatrix}
+      \partial z_1/\partial x_1 & \partial z_1/\partial x_2 \\
+      \partial z_2/\partial x_1 & \partial z_2/\partial x_2
+    \end{bmatrix}
+    = \begin{bmatrix} 1 & -2 \\ 0.5 & 1 \end{bmatrix} = W.
+  \]
+  \item 对逐元素激活层 $a = \sigma(z)$：由于 $a_1$ 只依赖 $z_1$、$a_2$ 只依赖 $z_2$，非对角偏导全为 $0$，得到对角矩阵：
+  \[
+    \frac{\partial a}{\partial z} =
+    \begin{bmatrix}
+      \sigma'(z_1) & 0 \\
+      0 & \sigma'(z_2)
+    \end{bmatrix}
+    = \diag(\sigma'(z_1), \sigma'(z_2)).
+  \]
+\end{enumerate}
+代入具体点 $x = (2, 1)^T$，算得 $z = (0, 1)^T$，从而 $\sigma(0) = 0.5$，$\sigma'(0) = 0.25$；$\sigma(1)\approx 0.7311$，$\sigma'(1)\approx 0.1966$。若想知道输出 $a$ 对输入 $x$ 的敏感度，直接把两个矩阵相乘：
+\[
+  \frac{\partial a}{\partial x} = \frac{\partial a}{\partial z}\frac{\partial z}{\partial x}
+  = \begin{bmatrix} 0.25 & 0 \\ 0 & 0.1966 \end{bmatrix}
+    \begin{bmatrix} 1 & -2 \\ 0.5 & 1 \end{bmatrix}
+  = \begin{bmatrix} 0.25 & -0.50 \\ 0.0983 & 0.1966 \end{bmatrix}.
+\]
+\end{example}
+
+上面的矩阵乘积并非巧合，而是多元微积分最核心的\textbf{Jacobian 链式法则}。
+
+\begin{defBox}
+\begin{definition}[Jacobian 矩阵]\label{def:ch5-jacobian}
+设向量值函数 $f:\R^n\to\R^m$ 的分量形式为 $f(x) = (f_1(x), \dots, f_m(x))^T$。其在点 $x\in\R^n$ 处的 \textbf{Jacobian 矩阵} $J_f(x) \in \R^{m\times n}$ 定义为
+\[
+  \big(J_f(x)\big)_{ij} \coloneqq \frac{\partial f_i}{\partial x_j}(x),
+  \qquad i=1,\dots,m,\; j=1,\dots,n,
+\]
+即第 $i$ 行恰好是第 $i$ 个分量函数 $f_i$ 的梯度行向量 $\nabla f_i(x)^T$。若当 $\norm{h}_2\to 0$ 时满足
+\begin{equation}\label{eq:ch5-jac-linear}
+  f(x + h) = f(x) + J_f(x)\,h + o(\norm{h}_2),
+\end{equation}
+则称 $f$ 在 $x$ 处可微。特别地，当 $m=1$（标量函数）时，$J_f(x) = \nabla f(x)^T \in \R^{1\times n}$ 是行向量，而梯度 $\nabla f(x) \in \R^{n\times 1}$ 是列向量。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[多元链式法则]\label{thm:ch5-chain}
+设 $f:\R^n\to\R^m$ 在 $x$ 处可微，$g:\R^m\to\R^p$ 在 $y = f(x)$ 处可微，则复合映射 $h \coloneqq g \circ f : \R^n\to\R^p$ 在 $x$ 处可微，且其 Jacobian 矩阵等于两层 Jacobian 矩阵的乘积：
+\begin{equation}\label{eq:ch5-chain}
+  J_{g\circ f}(x) = J_g\big(f(x)\big)\, J_f(x) \in \R^{p\times n}.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记 $y = f(x)$，对扰动 $h\in\R^n$ 记 $\Delta y = f(x+h) - f(x)$。由 $f$ 的可微性~\eqref{eq:ch5-jac-linear}：
+\[
+  \Delta y = J_f(x) h + r_f(h), \qquad \lim_{h\to 0}\frac{\norm{r_f(h)}_2}{\norm{h}_2} = 0.
+\]
+由于矩阵算子范数有界，存在常数 $M>0$ 使当 $\norm{h}_2$ 充分小时 $\norm{\Delta y}_2 \le M\norm{h}_2$。再将 $\Delta y$ 代入 $g$ 在 $y$ 处的可微展开式 $g(y+\Delta y) = g(y) + J_g(y)\Delta y + r_g(\Delta y)$（其中 $\norm{r_g(\Delta y)}_2 = o(\norm{\Delta y}_2)$）：
+\[
+  g(f(x+h)) - g(f(x))
+  = J_g(y)\big(J_f(x)h + r_f(h)\big) + r_g(\Delta y)
+  = \big(J_g(y) J_f(x)\big) h + \underbrace{J_g(y) r_f(h) + r_g(\Delta y)}_{R(h)}.
+\]
+最后检验余项：$\norm{J_g(y) r_f(h)}_2 / \norm{h}_2 \le \norm{J_g(y)}_2 \cdot \norm{r_f(h)}_2/\norm{h}_2 \to 0$；且由 $\norm{\Delta y}_2 \le M\norm{h}_2$，亦有 $\norm{r_g(\Delta y)}_2 / \norm{h}_2 \to 0$。故 $R(h) = o(\norm{h}_2)$，对比式~\eqref{eq:ch5-jac-linear} 的唯一性即得 $J_{g\circ f}(x) = J_g(f(x)) J_f(x)$。
+\end{proof}
+
+\subsection{为什么 AI 选反向模式（VJP）而非前向模式？}
+
+定理~\ref{thm:ch5-chain} 表面上看只是矩阵乘法，但它隐藏了深度学习最关键的计算复杂度分野：\textbf{矩阵乘法满足结合律，但不同加括号顺序的计算代价相差百万倍！}
+
+考虑一个 3 阶段标量损失复合链条（输入维数 $n$、隐藏维数 $d$、输出标量损失维数 $1$）：
+\[
+  x \in \R^n \xrightarrow{\;f\;} z \in \R^d \xrightarrow{\;g\;} a \in \R^d \xrightarrow{\;h\;} L \in \R.
+\]
+由链式法则~\eqref{eq:ch5-chain}，总损失对输入 $x$ 的 Jacobian 是一个 $1\times n$ 行向量：
+\[
+  J_L(x) = \nabla_x L^T =
+  \underbrace{J_h(a)}_{1\times d}\;
+  \underbrace{J_g(z)}_{d\times d}\;
+  \underbrace{J_f(x)}_{d\times n}.
+\]
+对比两种计算加括号顺序（设 $n = d = 1000$）：
+\begin{enumerate}
+  \item \textbf{前向模式（Forward-mode，从输入往输出推，算式从右向左结合）}：
+  \[
+    J_h(a)\,\Big(\underbrace{J_g(z)\,J_f(x)}_{d\times n}\Big).
+  \]
+  第一步就要计算 $(d\times d)(d\times n)$ 的\textbf{矩阵乘矩阵}，需要 $O(d^2 n)$ 次浮点运算（当 $n=d=1000$ 时为 $10^9$ 次乘法！）并需要显式存储 $d\times n$ 的中间大矩阵。若输入是百万级参数，前向模式彻底不可行。
+  \item \textbf{反向模式（Reverse-mode / 反向传播，从输出 $L$ 往输入 $x$ 推，算式从左向右结合）}：
+  \[
+    \Big(\underbrace{J_h(a)\,J_g(z)}_{1\times d}\Big)\,J_f(x).
+  \]
+  因为最左端 $J_h(a) = \nabla_a L^T$ 是\textbf{行向量}，每一步都是行向量乘 Jacobian 矩阵——即\textbf{向量-Jacobian 积（VJP）}！第一步 $(1\times d)(d\times d)$ 仅需 $O(d^2)$（对逐元素激活甚至仅需 $O(d)$），第二步 $(1\times d)(d\times n)$ 仅需 $O(dn)$，总代价仅 $O(d^2 + dn)$（约 $2\times 10^6$ 次乘法），与一次前向传播同量级！
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=16mm,
+  var/.style={rectangle, rounded corners=1.5mm, draw=teal, thick, fill=tealLight,
+    minimum width=16mm, minimum height=9mm, font=\sffamily\small, text=ink, align=center},
+  loss/.style={rectangle, rounded corners=1.5mm, draw=ochre, very thick, fill=ochreLight,
+    minimum width=16mm, minimum height=9mm, font=\sffamily\small\bfseries, text=ochre, align=center},
+  fwd/.style={-{Stealth[length=2.4mm]}, thick, teal},
+  bwd/.style={-{Stealth[length=2.4mm]}, very thick, ochre, dashed}
+]
+  \node[var] (x) {$x \in \R^n$};
+  \node[var, right=of x] (z) {$z \in \R^d$};
+  \node[var, right=of z] (a) {$a \in \R^d$};
+  \node[loss, right=of a] (L) {$L \in \R$};
+
+  % Forward pass
+  \draw[fwd] (x) -- node[above, font=\scriptsize, tealDark] {$f$} (z);
+  \draw[fwd] (z) -- node[above, font=\scriptsize, tealDark] {$g$} (a);
+  \draw[fwd] (a) -- node[above, font=\scriptsize, tealDark] {$h$} (L);
+
+  % Backward VJP pass (underneath)
+  \draw[bwd] ([yshift=-2.5mm]L.west) to[bend left=28]
+    node[below, font=\scriptsize, ochre, align=center] {$g_a^T = J_h(a)$\\$(1\times d)$} ([yshift=-2.5mm]a.east);
+  \draw[bwd] ([yshift=-2.5mm]a.west) to[bend left=28]
+    node[below, font=\scriptsize, ochre, align=center] {$g_z^T = g_a^T J_g(z)$\\VJP: $(1\times d)$} ([yshift=-2.5mm]z.east);
+  \draw[bwd] ([yshift=-2.5mm]z.west) to[bend left=28]
+    node[below, font=\scriptsize, ochre, align=center] {$g_x^T = g_z^T J_f(x)$\\VJP: $(1\times n)$} ([yshift=-2.5mm]x.east);
+
+  \node[font=\footnotesize\sffamily\bfseries, teal] at ($(x)!0.5!(L) + (0, 9mm)$) {前向计算（缓存中间值 $x,z,a$）};
+  \node[font=\footnotesize\sffamily\bfseries, ochre] at ($(x)!0.5!(L) + (0, -18mm)$) {反向模式 VJP（从标量 $L$ 向左回传，全程保持行向量，免去矩阵乘矩阵）};
+\end{tikzpicture}}
+\caption{3 阶段标量损失复合计算图与反向模式（VJP）信号回传：只要输出维度远小于参数维度（$1 \ll n$），从右向左逐层做向量-Jacobian 积就能以与前向同量级的算力一次性拿到所有参数的梯度。}
+\label{fig:ch5-vjp-chain}
+\end{figure}
+
+\begin{insightBox}{直通第 5 卷自动微分（Autograd）}
+图~\ref{fig:ch5-vjp-chain} 实际上已经画出了 PyTorch 的 \texttt{loss.backward()} 与第 5 卷 Micro-Autograd 的全部数学内核：前向计算时顺手把每层的局部输入缓存下来；反向传播时从 $\partial L/\partial L = 1$ 出发，每经过一个算子，只需调用该算子的\textbf{局部 VJP 规则}（把上游传回的梯度向量乘上本层局部 Jacobian），连完整的 $d\times d$ Jacobian 矩阵都无需在内存里显式构造（例如逐元素激活层只需一次逐元素乘法）。
+\end{insightBox}
+
+% ====================================================================
+\section{二阶 Taylor 展开、Hessian 矩阵与拉格朗日乘子法}
+\label{sec:ch5-hessian-lagrange}
+
+一阶梯度告诉我们局部往哪走下降最快，但它无法分辨“山谷最低点”与“山脊鞍点”（两者都满足 $\nabla f(x^*) = 0$）。要看清函数在驻点附近的弯曲形状，需要把微积分推进到二阶；而当参数还必须满足等式约束（如第 4 章 PCA 中的单位范数约束 $v^T v = 1$）时，则需要拉格朗日乘子法。
+
+\subsection{多元二阶 Taylor 展开与 Hessian 矩阵}
+
+\begin{recallBox}{一元二阶 Taylor 展开与极值判别}
+若一元函数 $f$ 二阶连续可微，则 $f(x+\Delta x) = f(x) + f'(x)\Delta x + \frac{1}{2}f''(x)(\Delta x)^2 + o((\Delta x)^2)$。在驻点 $f'(x^*)=0$ 处：$f''(x^*)>0$ 意味着向上弯曲（严格局部极小值），$f''(x^*)<0$ 意味着向下弯曲（严格局部极大值）。
+\end{recallBox}
+
+为了把一元二阶展开自然搬到多元函数 $f:\R^n\to\R$（假设二阶偏导数连续，记作 $f\in C^2$），只需固定点 $x$ 与扰动 $\Delta x$，构造沿直线的\textbf{一元切片函数} $\phi(t) \coloneqq f(x + t\Delta x)$（$t\in[0,1]$）。利用链式法则对 $t$ 求一阶导与二阶导：
+\[
+  \phi'(t) = \sum_{i=1}^n \frac{\partial f}{\partial x_i}(x + t\Delta x)\,\Delta x_i
+           = \nabla f(x+t\Delta x)^T \Delta x,
+\]
+\[
+  \phi''(t) = \sum_{i=1}^n \sum_{j=1}^n \frac{\partial^2 f}{\partial x_i \partial x_j}(x + t\Delta x)\,\Delta x_i \Delta x_j
+            = \Delta x^T H_f(x+t\Delta x)\,\Delta x,
+\]
+其中 $H_f(x) \in \R^{n\times n}$ 称为 $f$ 在 $x$ 处的 \textbf{Hessian 矩阵}（即梯度映射的 Jacobian 矩阵）：
+\[
+  \big(H_f(x)\big)_{ij} \coloneqq \frac{\partial^2 f}{\partial x_i \partial x_j}(x), \qquad 1 \le i,j \le n.
+\]
+对一元函数 $\phi(t)$ 在 $t=0$ 处做二阶 Taylor 展开并取 $t=1$，便得到\textbf{多元二阶 Taylor 展开}：
+\begin{equation}\label{eq:ch5-taylor2}
+  f(x + \Delta x) = f(x) + \nabla f(x)^T \Delta x + \frac{1}{2}\,\Delta x^T H_f(x)\,\Delta x + o(\norm{\Delta x}_2^2).
+\end{equation}
+
+关键衔接来了：由微积分的混合偏导数对称性（Schwarz 定理），只要 $f\in C^2$，就有 $\frac{\partial^2 f}{\partial x_i \partial x_j} = \frac{\partial^2 f}{\partial x_j \partial x_i}$，因此 \textbf{Hessian 矩阵 $H_f(x)$ 必然是实对称矩阵}！这意味着第 3 章的\textbf{实对称矩阵谱定理与正定/半正定二次型几何分类}立刻无缝生效：
+
+\begin{thmBox}
+\begin{proposition}[驻点处的二阶充分条件与鞍点判别]\label{prop:ch5-second-order}
+设 $f\in C^2(\R^n)$，且 $x^*$ 为驻点（$\nabla f(x^*) = 0$）。记 $H = H_f(x^*)$ 的特征值为 $\lambda_1 \ge \dots \ge \lambda_n$：
+\begin{enumerate}
+  \item 若 $H \succ 0$（所有 $\lambda_i > 0$，向上开口的碗），则 $x^*$ 是 $f$ 的\textbf{严格局部极小值点}；
+  \item 若 $H \prec 0$（所有 $\lambda_i < 0$，向下倒扣的碗），则 $x^*$ 是 $f$ 的\textbf{严格局部极大值点}；
+  \item 若 $H$ \textbf{不定}（既有 $\lambda_{\max}>0$ 又有 $\lambda_{\min}<0$），则 $x^*$ 是\textbf{鞍点}：沿特征向量 $v_1$ 方向函数局部上升，沿特征向量 $v_n$ 方向函数局部下降。
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+因 $\nabla f(x^*) = 0$，式~\eqref{eq:ch5-taylor2} 化为 $f(x^*+\Delta x) - f(x^*) = \frac{1}{2}\Delta x^T H \Delta x + o(\norm{\Delta x}_2^2)$。
+\begin{itemize}
+  \item 若 $H \succ 0$，由第 3 章 Rayleigh 商界得 $\Delta x^T H \Delta x \ge \lambda_{\min}\norm{\Delta x}_2^2$（$\lambda_{\min}>0$）。当 $\norm{\Delta x}_2$ 充分小时，余项 $|o(\norm{\Delta x}_2^2)| \le \frac{1}{4}\lambda_{\min}\norm{\Delta x}_2^2$，故对所有足够小的非零 $\Delta x$ 均有 $f(x^*+\Delta x) - f(x^*) \ge \frac{1}{4}\lambda_{\min}\norm{\Delta x}_2^2 > 0$，即严格局部极小值。$H\prec 0$ 同理。
+  \item 若 $H$ 不定，取 $\lambda_1>0$ 对应的单位特征向量 $v_1$ 与 $\lambda_n<0$ 对应的单位特征向量 $v_n$。令 $\Delta x = t v_1$ 得 $f(x^*+t v_1) - f(x^*) = \frac{1}{2}\lambda_1 t^2 + o(t^2) > 0$；令 $\Delta x = t v_n$ 得 $f(x^*+t v_n) - f(x^*) = \frac{1}{2}\lambda_n t^2 + o(t^2) < 0$，故在任意小邻域内既非极大也非极小（鞍点）。
+\end{itemize}
+\end{proof}
+
+\begin{example}[二维极小值与鞍点的手算辨析]\label{ex:ch5-min-vs-saddle}
+比较两个在原点 $(0,0)^T$ 处均满足 $\nabla f(0,0) = 0$ 的二元函数：
+\begin{enumerate}
+  \item $f_1(x_1, x_2) = x_1^2 + 3x_2^2 + 2x_1 x_2$：
+  \[
+    H_1 = \begin{bmatrix} 2 & 2 \\ 2 & 6 \end{bmatrix}.
+  \]
+  迹 $\tr(H_1) = \lambda_1 + \lambda_2 = 8 > 0$，行列式 $\det(H_1) = \lambda_1\lambda_2 = 12 - 4 = 8 > 0$，故两特征值均严格为正（$\lambda = 4 \pm 2\sqrt{2} > 0$），$H_1 \succ 0$，原点是\textbf{严格局部（且全局）极小值}。
+  \item $f_2(x_1, x_2) = x_1^2 - x_2^2 + 4x_1 x_2$：
+  \[
+    H_2 = \begin{bmatrix} 2 & 4 \\ 4 & -2 \end{bmatrix}.
+  \]
+  行列式 $\det(H_2) = -4 - 16 = -20 < 0$，两特征值一正一负（$\lambda = \pm 2\sqrt{5}$），$H_2$ 不定，原点是典型的\textbf{鞍点}。
+\end{enumerate}
+\end{example}
+
+\subsection{等式约束优化与拉格朗日乘子法}
+
+现在给优化问题加上一条等式约束：
+\begin{equation}\label{eq:ch5-eq-opt}
+  \min_{x\in\R^n}\; f(x) \qquad \text{subject to}\qquad g(x) = 0,
+\end{equation}
+其中 $f,g:\R^n\to\R$ 连续可微。在无约束优化中，极值点必须满足 $\nabla f(x^*) = 0$；但有了约束 $g(x)=0$ 后，可行点被“锁”在约束曲面 $S = \{x : g(x) = 0\}$ 上，$\nabla f(x^*)$ 通常\textbf{不再等于零}——我们只能沿着约束曲面移动，无法穿透约束墙去追寻更低的点。
+
+那么极值点 $x^*$ 满足什么几何条件？想象你正沿着山坡上的一条狭窄栈道 $g(x)=0$ 行走，试图寻找栈道上的最低点 $x^*$：
+\begin{itemize}
+  \item 沿栈道经过 $x^*$ 的任意一条光滑路径 $\gamma(t)$（满足 $g(\gamma(t))\equiv 0$，$\gamma(0)=x^*$），由定理~\ref{thm:ch5-steepest}(2) 知其切向量必须垂直于约束梯度：$\inner{\nabla g(x^*)}{\gamma'(0)} = 0$；
+  \item 同时，由于 $x^*$ 是栈道上的极值点，高度函数 $f(\gamma(t))$ 在 $t=0$ 处的导数也必须为零，即 $\inner{\nabla f(x^*)}{\gamma'(0)} = 0$。
+\end{itemize}
+既然 $\nabla f(x^*)$ 与约束曲面的\textbf{每一个切方向}都正交（没有任何沿栈道滑动的分量），那么只要 $\nabla g(x^*)\neq 0$，它必然与约束曲面的法向量 $\nabla g(x^*)$ \textbf{完全共线}（见图~\ref{fig:ch5-lagrange}）：
+\begin{equation}\label{eq:ch5-lagrange-cond}
+  \exists\,\lambda\in\R, \qquad \nabla f(x^*) = \lambda\,\nabla g(x^*).
+\end{equation}
+为了把式~\eqref{eq:ch5-lagrange-cond} 和约束 $g(x^*)=0$ 统一写成一个无约束驻点方程，我们引入\textbf{拉格朗日函数（Lagrangian）}：
+\[
+  \mathcal{L}(x, \lambda) \coloneqq f(x) - \lambda\, g(x),
+\]
+那么必要条件立刻变成极其整洁的方程组：
+\[
+  \nabla_x \mathcal{L}(x^*, \lambda^*) = \nabla f(x^*) - \lambda^*\nabla g(x^*) = 0,
+  \qquad
+  \frac{\partial \mathcal{L}}{\partial \lambda}(x^*, \lambda^*) = -g(x^*) = 0.
+\]
+若有 $m$ 条独立等式约束 $g_1(x)=0,\dots,g_m(x)=0$（且各 $\nabla g_k(x^*)$ 线性无关），则只需为每条约束配一个乘子 $\lambda_k$，构造 $\mathcal{L}(x, \boldsymbol{\lambda}) = f(x) - \sum_{k=1}^m \lambda_k g_k(x)$ 并令 $\nabla_x \mathcal{L}=0, \nabla_{\boldsymbol{\lambda}}\mathcal{L}=0$。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.08]
+  % Axes
+  \draw[-{Stealth[length=2.2mm]}, slate!70, thin] (-0.4,0) -- (5.2,0) node[right, font=\footnotesize, ink] {$x_1$};
+  \draw[-{Stealth[length=2.2mm]}, slate!70, thin] (0,-0.4) -- (0,3.6) node[above, font=\footnotesize, ink] {$x_2$};
+
+  % Objective contours centered at (4.2, 2.7)
+  \coordinate (M) at (4.2, 2.7);
+  \fill[tealDark] (M) circle (1.6pt) node[above right, font=\scriptsize, tealDark] {无约束极小点};
+  \draw[tealLine, thick] (M) circle (0.75);
+  \draw[tealLine, thick] (M) circle (1.40);
+  \draw[teal, very thick] (M) circle (2.05);
+  \draw[tealLine, thick, dashed] (M) circle (2.65);
+
+  % Tangent point x* on circle radius 2.05 at angle 220 deg from M
+  % cos(220) = -0.766, sin(220) = -0.643 -> M + 2.05*(-0.766, -0.643) = (2.63, 1.38)
+  \coordinate (X) at (2.63, 1.38);
+
+  % Constraint curve g(x)=0 passing through X smoothly tangent to circle
+  % Normal direction from M to X is (-0.766, -0.643); tangent is (0.643, -0.766)
+  \draw[navy, very thick] (1.15, 3.30) .. controls (1.90, 2.25) and (2.25, 1.83) .. (X)
+    .. controls (3.00, 0.93) and (3.65, 0.40) .. (4.70, 0.15)
+    node[above right, font=\footnotesize, navy] {约束曲线 $g(x)=0$};
+
+  % Common tangent line at X
+  \draw[slate, dashed, thin] ($(X) + (-0.95, 1.13)$) -- ($(X) + (1.05, -1.25)$);
+
+  % Point x*
+  \fill[ochre] (X) circle (2.5pt);
+  \node[font=\footnotesize\bfseries, ochre, left=5pt, yshift=-2pt, fill=white, inner sep=0.8pt] at (X) {$x^*$};
+
+  % Collinear gradients along normal (-0.766, -0.643)
+  \draw[-{Stealth[length=2.4mm]}, tealDark, very thick] (X) -- ($(X) + (-1.05, -0.88)$)
+    node[left, font=\footnotesize, tealDark] {$\nabla f(x^*)$};
+  \draw[-{Stealth[length=2.4mm]}, ochre, very thick] (X) -- ($(X) + (0.88, 0.74)$)
+    node[above left, font=\footnotesize, ochre, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt, xshift=2pt] {$\nabla g(x^*)$};
+
+  % Contour labels
+  \node[font=\scriptsize, teal] at (4.85, 1.02) {$f(x)=c^*$};
+  \node[font=\scriptsize, slate] at (4.2, 3.22) {$f$ 减小};
+\end{tikzpicture}
+\caption{拉格朗日乘子法的几何本质：在约束极值点 $x^*$ 处，目标函数等高线 $f(x)=c^*$ 与约束曲线 $g(x)=0$ 必然相切，从而两者的法向量 $\nabla f(x^*)$ 与 $\nabla g(x^*)$ 共线，即 $\nabla f(x^*) = \lambda \nabla g(x^*)$。}
+\label{fig:ch5-lagrange}
+\end{figure}
+
+现在，让我们用拉格朗日乘子法给出第 4 章 PCA 第一主成分方向的“四行惊艳重证”——体会多元微积分与线性代数合流时的简洁之美！
+
+\begin{example}[四行重推第 4 章 PCA 第一主成分方向]\label{ex:ch5-pca-lagrange}
+设中心化数据的协方差矩阵为实对称半正定矩阵 $C = \frac{1}{N}X^T X \in \R^{d\times d}$。PCA 寻找投影方差最大的单位方向：
+\[
+  \max_{v\in\R^d}\; v^T C v \qquad \text{subject to}\qquad v^T v = 1.
+\]
+用拉格朗日乘子法仅需四步：
+\begin{enumerate}
+  \item 构造拉格朗日函数：$\mathcal{L}(v, \lambda) = v^T C v - \lambda(v^T v - 1)$；
+  \item 对 $v$ 求梯度并令其为零（下节将系统证明对称阵二次型梯度 $\nabla_v(v^T C v) = 2Cv$）：
+  \[
+    \nabla_v \mathcal{L}(v, \lambda) = 2 C v - 2 \lambda v = 0 \implies C v = \lambda v;
+  \]
+  \item 把 $Cv = \lambda v$ 与约束 $v^T v = 1$ 代回目标函数：
+  \[
+    v^T C v = v^T (\lambda v) = \lambda (v^T v) = \lambda;
+  \]
+  \item 因此，约束驻点必然是 $C$ 的单位特征向量，且对应的目标值恰为特征值 $\lambda$；要使方差最大，必须取最大特征值 $\lambda_{\max}(C)$ 对应的单位特征向量！
+\end{enumerate}
+\end{example}
+
+\begin{insightBox}{从等式约束到第 4 卷的 KKT 条件}
+本节的拉格朗日乘子法完美处理了\textbf{等式约束} $g(x)=0$。当问题出现\textbf{不等式约束} $h(x)\le 0$（例如第 4 卷支持向量机 SVM 的最大间隔约束 $y_i(w^Tx_i+b)\ge 1$）时，拉格朗日乘子必须满足非负性 $\mu\ge 0$ 与互补松弛条件 $\mu h(x^*)=0$——这就是第 4 卷凸优化将系统展开的 \textbf{KKT（Karush-Kuhn-Tucker）条件}。
+\end{insightBox}
+
+% ====================================================================
+\section{矩阵微积分的系统化方法：全微分与迹技巧}
+\label{sec:ch5-matrix-calc}
+
+面对标量损失 $f(W)$ 对整个权重矩阵 $W\in\R^{m\times n}$ 求导，许多初学者试图拆成下标 $\sum_{i,j,k}$ 逐项求偏导——不仅极易写错转置和下标，面对两层以上的矩阵乘法更是寸步难行。本节建立一套\textbf{完全免下标、几乎不可能算错}的系统化矩阵求导方法：\textbf{分母布局 + 全微分与迹技巧（Trace Trick）+ Hadamard 逐元素求导}。
+
+\subsection{布局约定与黄金桥梁定理}
+
+\begin{defBox}
+\begin{definition}[矩阵梯度与分母布局约定]\label{def:ch5-denom-layout}
+对标量函数 $f:\R^{m\times n}\to\R$，定义其对矩阵 $X\in\R^{m\times n}$ 的\textbf{梯度矩阵} $\nabla_X f(X) \in \R^{m\times n}$ 为逐元素偏导组成的同形状矩阵：
+\[
+  \big(\nabla_X f(X)\big)_{ij} \coloneqq \frac{\partial f}{\partial X_{ij}}(X),
+  \qquad 1\le i\le m,\; 1\le j\le n.
+\]
+这一约定称为\textbf{分母布局（Denominator Layout）}，其最大优势是\textbf{梯度与参数永远保持完全相同的形状}：$\nabla_x f \in \R^n$ 与 $x\in\R^n$ 同形，$\nabla_W f \in \R^{m\times n}$ 与 $W\in\R^{m\times n}$ 同形，可直接写梯度下降 $W \leftarrow W - \eta \nabla_W f$，且与 PyTorch 中 \texttt{W.grad.shape == W.shape} 完全一致。
+\end{definition}
+\end{defBox}
+
+如何不拆下标就能直接读出 $\nabla_X f(X)$？关键在于把全微分 $df$ 写成矩阵的 Frobenius 内积 $\inner{G}{dX}_F = \tr(G^T dX)$ 形式！
+
+\begin{thmBox}
+\begin{theorem}[矩阵求导的黄金桥梁：全微分-迹等价定理]\label{thm:ch5-golden-bridge}
+设标量函数 $f:\R^{m\times n}\to\R$ 在 $X$ 处可微。若对任意微小矩阵扰动 $dX\in\R^{m\times n}$，函数的一阶全微分可化为
+\begin{equation}\label{eq:ch5-bridge}
+  df = \tr\!\big(G^T\, dX\big),
+\end{equation}
+其中矩阵 $G\in\R^{m\times n}$ 不依赖于 $dX$，则必有
+\[
+  \nabla_X f(X) = G.
+\]
+特别地，对向量 $x\in\R^n$，式~\eqref{eq:ch5-bridge} 简化为 $df = g^T dx \iff \nabla_x f(x) = g$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由多元函数全微分定义及矩阵迹的展开 $\tr(A^T B) = \sum_{i=1}^m\sum_{j=1}^n A_{ij} B_{ij}$：
+\[
+  df = \sum_{i=1}^m \sum_{j=1}^n \frac{\partial f}{\partial X_{ij}}\, dX_{ij}
+     = \tr\!\Big(\big(\nabla_X f(X)\big)^T dX\Big).
+\]
+若同时有 $df = \tr(G^T dX)$ 对所有扰动 $dX\in\R^{m\times n}$ 成立，则 $\tr\big((\nabla_X f(X) - G)^T dX\big) = 0$ 恒成立。令 $dX = E_{ij}$（仅 $(i,j)$ 位置为 $1$、其余为 $0$ 的标准基矩阵），即得 $(\nabla_X f(X))_{ij} - G_{ij} = 0$。因 $(i,j)$ 任意，故 $\nabla_X f(X) = G$。
+\end{proof}
+
+有了定理~\ref{thm:ch5-golden-bridge}，计算任何矩阵导数都变成了一个机械、优雅的三步流水线：
+\textbf{(1)} 对标量 $f$ 两边取全微分 $df$；\textbf{(2)} 套一层迹（因标量 $s = \tr(s)$）并利用迹的循环不变性把 $dX$ 搬到最右端；\textbf{(3)} 凑成 $df = \tr(G^T dX)$，直接读出 $\nabla_X f = G$！
+
+为了流畅运行这三步，只需熟记表~\ref{tab:ch5-trace-rules} 中的 6 条基本规则（全部可一行验证）。
+
+\begin{table}[htbp]
+\centering
+\caption{全微分、迹技巧与 Hadamard 逐元素求导的 6 条常用规则}
+\label{tab:ch5-trace-rules}
+\small
+\begin{tabularx}{\linewidth}{@{}p{26mm}p{58mm}X@{}}
+\toprule
+\textbf{规则名称} & \textbf{公式} & \textbf{核心提醒} \\
+\midrule
+线性与转置 & $d(\alpha X+\beta Y)=\alpha\,dX+\beta\,dY$;\; $d(X^T)=(dX)^T$ & 微分算子 $d$ 与转置可交换 \\
+乘积法则 & $d(XY) = (dX)Y + X(dY)$ & \textbf{严禁交换乘法顺序} \\
+迹的线性与转置 & $\tr(A^T)=\tr(A)$;\; $d(\tr(X))=\tr(dX)$ & 可用来把 $dX^T$ 翻正为 $dX$ \\
+迹的循环不变性 & $\tr(ABC) = \tr(CAB) = \tr(BCA)$ & 仅可\textbf{循环轮换}，不可任意对调两项 \\
+标量套迹 & 若 $s\in\R$，则 $s = \tr(s)$ & 向量内积 $a^T b = \tr(a^T b) = \tr(b a^T)$ \\
+Hadamard 规则 & $d\phi(Z) = \phi'(Z)\had dZ$;\; $\tr(A^T(B\had C)) = \tr((A\had B)^T C)$ & $\had$ 表逐元素乘，三条项对称等价于 $\sum_{i,j}A_{ij}B_{ij}C_{ij}$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{五大 AI 必用求导实战（全流程一步不跳）}
+
+下面五个推导覆盖了第 2 卷回归/分类模型、第 4 卷凸优化目标以及第 5 卷神经网络反向传播的绝大多数梯度公式，请务必亲手跟着推一遍。
+
+\subsubsection{推导 1：线性函数 $f(x) = a^T x$}
+取全微分：$df = a^T dx$。直接对照 $df = g^T dx$ 得
+\begin{equation}\label{eq:ch5-grad-linear}
+  \nabla_x (a^T x) = a.
+\end{equation}
+
+\subsubsection{推导 2：一般二次型 $f(x) = x^T Q x$（$Q\in\R^{n\times n}$ 未必对称）}
+由乘积法则：
+\[
+  df = (dx)^T Q x + x^T Q\, dx.
+\]
+第一项 $(dx)^T Q x$ 是标量，取其转置值不变：$(dx)^T Q x = (x^T Q^T dx)^T = x^T Q^T dx$。合并两项得
+\[
+  df = x^T Q^T dx + x^T Q\, dx = \big((Q + Q^T)x\big)^T dx.
+\]
+由定理~\ref{thm:ch5-golden-bridge} 立即读出：
+\begin{equation}\label{eq:ch5-grad-quad}
+  \nabla_x (x^T Q x) = (Q + Q^T)x.
+\end{equation}
+仅当 $Q = Q^T$ 对称时，式~\eqref{eq:ch5-grad-quad} 才进一步化简为 $2Qx$（这正是例~\ref{ex:ch5-pca-lagrange} 中 PCA 推导用到的公式）。
+
+\subsubsection{推导 3：线性回归均方误差（MSE）的梯度与 Hessian}
+考虑第 2 章的线性回归目标函数（$X\in\R^{N\times d}$，权重 $w\in\R^d$，标签 $y\in\R^N$）：
+\[
+  f(w) = \frac{1}{2N}\norm{Xw - y}_2^2 = \frac{1}{2N}(Xw - y)^T(Xw - y).
+\]
+记残差向量 $r = Xw - y$，则 $dr = X\,dw$。取全微分：
+\[
+  df = \frac{1}{2N}\big((dr)^T r + r^T dr\big) = \frac{1}{N} r^T dr = \frac{1}{N}(Xw - y)^T X\, dw
+     = \Big(\frac{1}{N} X^T(Xw - y)\Big)^T dw.
+\]
+于是梯度为
+\begin{equation}\label{eq:ch5-grad-mse}
+  \nabla_w f(w) = \frac{1}{N} X^T (Xw - y).
+\end{equation}
+令 $\nabla_w f(w) = 0$，立即重现第 2 章的正规方程 $X^T X w = X^T y$！再对梯度映射 $g(w) = \frac{1}{N}X^T X w - \frac{1}{N}X^T y$ 求 Jacobian，得线性回归的常值 Hessian 矩阵：
+\[
+  H_f(w) = \frac{1}{N} X^T X \succeq 0.
+\]
+回忆第 3 章：对任何矩阵 $X$，Gram 矩阵 $X^T X$ 必然对称半正定；若 $X$ 列满秩则严格正定，从而正规方程的解必为全局唯一极小值。
+
+\subsubsection{推导 4：多输出矩阵最小二乘 $f(W) = \frac{1}{2}\norm{XW - Y}_F^2$}
+在多标签回归或线性投影层中，权重是矩阵 $W\in\R^{d\times k}$，输入 $X\in\R^{N\times d}$，目标矩阵 $Y\in\R^{N\times k}$。记残差矩阵 $R = XW - Y$（则 $dR = X\,dW$），利用 Frobenius 范数与迹的恒等式 $\norm{R}_F^2 = \tr(R^T R)$：
+\begin{align*}
+  df &= \frac{1}{2}\,d\big(\tr(R^T R)\big)
+      = \frac{1}{2}\tr\!\big((dR)^T R + R^T dR\big) \\
+     &= \tr(R^T dR) \qquad\text{（因 $\tr((dR)^T R) = \tr(((dR)^T R)^T) = \tr(R^T dR)$）} \\
+     &= \tr(R^T X\, dW) = \tr\!\big((X^T R)^T dW\big).
+\end{align*}
+对照 $df = \tr(G^T dW)$ 直接读出：
+\begin{equation}\label{eq:ch5-grad-matls}
+  \nabla_W \Big(\frac{1}{2}\norm{XW - Y}_F^2\Big) = X^T (XW - Y) \in \R^{d\times k}.
+\end{equation}
+注意检查形状：$X^T$ 是 $d\times N$，$XW-Y$ 是 $N\times k$，乘积恰为 $d\times k$，与 $W$ 完美吻合！
+
+\subsubsection{推导 5：神经网络全连接 + 逐元素激活层的完整反向传播}
+设一层神经网络接收批量输入矩阵 $X\in\R^{d_{\text{in}}\times B}$（每列为一个样本，共 $B$ 个样本），经权重矩阵 $W\in\R^{d_{\text{out}}\times d_{\text{in}}}$ 映射为预激活 $Z = W X \in \R^{d_{\text{out}}\times B}$，再经逐元素光滑激活函数 $\phi$（如 $\tanh$ 或 $\sigma$）输出 $A = \phi(Z) \in \R^{d_{\text{out}}\times B}$，最终接入上游标量损失 $L(A)\in\R$。
+
+假设上游已经传回了损失对输出激活的梯度矩阵 $G_A \coloneqq \nabla_A L \in \R^{d_{\text{out}}\times B}$。我们来一步推导出 $\nabla_Z L$、$\nabla_W L$ 与 $\nabla_X L$：
+\begin{enumerate}
+  \item \textbf{穿过激活层（Hadamard 链式法则）}：由黄金桥梁定理与表~\ref{tab:ch5-trace-rules} 的 Hadamard 规则，$dA = \phi'(Z) \had dZ$，于是
+  \[
+    dL = \tr(G_A^T dA) = \tr\!\big(G_A^T (\phi'(Z) \had dZ)\big) = \tr\!\big((G_A \had \phi'(Z))^T dZ\big).
+  \]
+  直接读出预激活梯度：
+  \begin{equation}\label{eq:ch5-backprop-z}
+    G_Z \coloneqq \nabla_Z L = (\nabla_A L) \had \phi'(Z) \in \R^{d_{\text{out}}\times B}.
+  \end{equation}
+  \item \textbf{穿过线性层 $Z = WX$（对 $W$ 与对 $X$ 同时求导）}：由乘积法则 $dZ = (dW)X + W(dX)$，代入 $dL = \tr(G_Z^T dZ)$ 并拆成两项：
+  \[
+    dL = \tr\!\big(G_Z^T (dW) X\big) + \tr\!\big(G_Z^T W (dX)\big).
+  \]
+  对第一项使用迹的循环不变性把 $X$ 轮换到最左端：$\tr(G_Z^T (dW) X) = \tr(X G_Z^T dW) = \tr((G_Z X^T)^T dW)$；第二项直接写成 $\tr((W^T G_Z)^T dX)$。对照定理~\ref{thm:ch5-golden-bridge} 立即同时读出权重梯度与输入梯度：
+  \begin{equation}\label{eq:ch5-backprop-wx}
+    \nabla_W L = (\nabla_Z L)\, X^T \in \R^{d_{\text{out}}\times d_{\text{in}}},
+    \qquad
+    \nabla_X L = W^T (\nabla_Z L) \in \R^{d_{\text{in}}\times B}.
+  \end{equation}
+\end{enumerate}
+请停下来欣赏一下式~\eqref{eq:ch5-backprop-z} 和~\eqref{eq:ch5-backprop-wx}：没有任何下标求和，短短四行全微分推导，就得到了第 5 卷多层感知机（MLP）反向传播的全部核心代码——且 $\nabla_W L = G_Z X^T = \sum_{b=1}^B (G_Z)_{:,b} X_{:,b}^T$ 正是第 1 章强调过的\textbf{矩阵乘法外积视角}（批量中每个样本各自贡献一个秩 1 梯度外积再累加）！
+
+\begin{failBox}{形状核对铁律与非对称二次型暗坑}
+在手推和编写矩阵梯度时，有两个最常见、最隐蔽的错误必须时刻防范：
+\begin{enumerate}
+  \item \textbf{形状核对铁律（Shape Checking）}：在分母布局下，无论公式多复杂，\texttt{grad\_W.shape == W.shape} 必须无条件成立。例如在 $Z = WX$（$W\in\R^{m\times n}, X\in\R^{n\times B}, G_Z\in\R^{m\times B}$）中，想用 $G_Z$ 和 $X$ 拼出 $m\times n$ 的矩阵，唯有 $G_Z X^T$ 合法（$X^T G_Z$ 或 $G_Z^T X$ 维度根本对不上）。当 $W$ 恰好是方阵时维度检查会失效，此时务必用第 6 章的有限差分梯度校验来捉虫！
+  \item \textbf{把非对称二次型错写成 $2Qx$}：设 $Q = \begin{bmatrix} 1 & 2 \\ 0 & 3 \end{bmatrix}$，则 $f(x) = x^T Q x = x_1^2 + 2x_1 x_2 + 3x_2^2$。直接求偏导得 $\nabla f(x) = \begin{bmatrix} 2x_1 + 2x_2 \\ 2x_1 + 6x_2 \end{bmatrix} = (Q+Q^T)x$；若误套对称阵公式 $2Qx = \begin{bmatrix} 2x_1 + 4x_2 \\ 6x_2 \end{bmatrix}$，则会静默产生系数差 2 倍和缺项的灾难性 Bug！
+\end{enumerate}
+\end{failBox}
+
+% ====================================================================
+\section{本章习题}
+\label{sec:ch5-exercises}
+
+\exTier{A. 概念辨析与反例查错}{合上书独立判断正误并构造具体反例}
+\begin{enumerate}[label=\textbf{5.\arabic*}]
+  \item \textbf{判断正误并纠错}：
+  (a) “梯度方向指向全局最大值，负梯度方向直接指向全局最小值。”
+  (b) “若多元可微函数 $f$ 在 $x^*$ 处满足 $\nabla f(x^*)=0$ 且 $H_f(x^*) \succeq 0$（半正定），则 $x^*$ 一定是局部极小值点。”
+  请对每一条给出明确的真假判断；若为假，请构造一个极简的 1D 或 2D 显式反例。
+
+  \item \textbf{迹技巧与矩阵导数找茬}：某同学尝试推导 $f(W) = \tr(A W B W^T)$（$A\in\R^{m\times m}, B\in\R^{n\times n}, W\in\R^{m\times n}$，且 $A,B$ 未必对称）的梯度时写道：
+  \[
+    df = \tr(A (dW) B W^T + A W B (dW)^T) = 2\tr(B W^T A\, dW) \implies \nabla_W f = 2 A^T W B^T.
+  \]
+  请指出该推导中\textbf{唯一但致命的一处错误}，并写出对一般（非对称）矩阵 $A,B$ 正确的梯度公式 $\nabla_W f$。
+\end{enumerate}
+
+\exTier{B. 具体小例手算}{亲手算通 2D/3D 数值，建立第一手肌肉记忆}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{方向导数、Hessian 与驻点分类}：设 $f(x_1, x_2) = x_1^3 - 3x_1 x_2 + x_2^3$。
+  (a) 求在点 $(1, 0)^T$ 处沿单位方向 $u = (\frac{3}{5}, \frac{4}{5})^T$ 的方向导数 $D_u f(1,0)$；
+  (b) 求出 $f$ 的全部驻点，并用 Hessian 矩阵的特征值（或行列式与迹）逐一判定每个驻点是严格局部极小值、严格局部极大值还是鞍点。
+
+  \item \textbf{两层标量网络的前向与反向手算}：考虑小型函数 $L(x) = \frac{1}{2}\norm{a - y}_2^2$，其中 $z = Wx$，$a = \tanh(z)$，具体数值取 $W = \begin{bmatrix} 1 & -1 \\ 0 & 2 \end{bmatrix}$，$x = \begin{bmatrix} 1 \\ 0 \end{bmatrix}$，$y = \begin{bmatrix} 1 \\ 1 \end{bmatrix}$。
+  (a) 计算前向中间值 $z$、$a$ 与损失值 $L$（提示：$\tanh(1)\approx 0.7616$，$\tanh(0)=0$）；
+  (b) 利用式~\eqref{eq:ch5-backprop-z}--\eqref{eq:ch5-backprop-wx}，按反向模式 VJP 依次手算出 $\nabla_a L$、$\nabla_z L$、$\nabla_W L$ 与 $\nabla_x L$ 的精确数值（保留 4 位小数）。
+\end{enumerate}
+
+\exTier{C. AI 核心推演与实用证明}{连接线性代数与后续机器学习的核心公式}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{岭回归梯度与闭式解推导}：考虑带 $L_2$ 正则项的岭回归损失函数（$\lambda > 0$）：
+  \[
+    J(w) = \frac{1}{2}\norm{Xw - y}_2^2 + \frac{\lambda}{2}\norm{w}_2^2.
+  \]
+  用全微分法求出 $\nabla_w J(w)$ 与 Hessian 矩阵 $H_J(w)$，证明对任意矩阵 $X\in\R^{N\times d}$（即使列不满秩甚至 $N < d$），$H_J(w)$ 均严格正定，从而 $J(w)$ 存在唯一全局极小值 $w_{\text{ridge}} = (X^T X + \lambda I)^{-1} X^T y$。
+  \exHint{利用第 3 章性质：$X^T X \succeq 0$ 且 $\lambda I \succ 0$，两者之和对任意非零向量 $v$ 满足 $v^T(X^T X + \lambda I)v = \norm{Xv}_2^2 + \lambda\norm{v}_2^2 > 0$。}
+
+  \item \textbf{带约束最小二乘与双线性最大奇异值}：利用拉格朗日乘子法求解优化问题
+  \[
+    \max_{u\in\R^m,\, v\in\R^n}\; u^T A v \qquad \text{subject to}\qquad \norm{u}_2^2 = 1,\; \norm{v}_2^2 = 1,
+  \]
+  其中 $A\in\R^{m\times n}$ 为非零矩阵。证明最优解 $(u^*, v^*)$ 必满足 $A v^* = \sigma u^*$ 与 $A^T u^* = \sigma v^*$（即第 4 章的左右奇异向量方程！），且最大值为 $A$ 的最大奇异值 $\sigma_1(A)$。
+  \exHint{构造含两个乘子的拉格朗日函数 $\mathcal{L}(u,v,\lambda_1,\lambda_2) = u^T A v - \frac{\lambda_1}{2}(u^T u - 1) - \frac{\lambda_2}{2}(v^T v - 1)$，分别令 $\nabla_u\mathcal{L}=0, \nabla_v\mathcal{L}=0$，再左乘 $u^T$ 与 $v^T$ 证明 $\lambda_1 = \lambda_2 = u^T A v$。}
+\end{enumerate}
+
+\exTier{D. 可自检编程实验}{动手写 NumPy 验证公式与计算复杂度}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{前向模式 vs 反向模式（VJP）计时对比}：构造一条 3 层线性标量链条 $L(x) = c^T W_2 W_1 x$，其中 $x\in\R^d$，$W_1, W_2 \in \R^{d\times d}$，$c\in\R^d$，取 $d = 800$。用 NumPy 分别按两种顺序计算梯度行向量 $g^T = c^T W_2 W_1$：
+  \begin{itemize}
+    \item 前向结合：\texttt{c @ (W2 @ W1)}；
+    \item 反向 VJP 结合：\texttt{(c @ W2) @ W1}。
+  \end{itemize}
+  \textbf{自检标准}：验证两种结果的相对误差 $\norm{g_{\text{fwd}} - g_{\text{rev}}}_2 / \norm{g_{\text{rev}}}_2 < 10^{-12}$，且反向模式运行时间比前向模式快至少 $10\times$ 以上（实测通常在 $50\times$--$300\times$）。
+  \exHint{使用 \texttt{time.perf\_counter()}，在 \texttt{d=800} 时分别重复取平均（前向可跑 5 次，反向可跑 200 次）以避免计时抖动。}
+
+  \item \textbf{手写两层神经网络前向与矩阵反向传播}：给定批量数据 $X\in\R^{5\times 16}$、目标 $Y\in\R^{3\times 16}$、权重 $W_1\in\R^{8\times 5}$ 与 $W_2\in\R^{3\times 8}$，定义前向计算
+  \[
+    Z_1 = W_1 X,\quad A_1 = \tanh(Z_1),\quad \hat{Y} = W_2 A_1,\quad L = \frac{1}{2}\norm{\hat{Y} - Y}_F^2.
+  \]
+  请利用本节式~\eqref{eq:ch5-backprop-z}--\eqref{eq:ch5-backprop-wx} 编写纯 NumPy 函数同时返回损失 $L$ 与解析梯度 $(\nabla_{W_1} L, \nabla_{W_2} L)$。
+  \textbf{自检标准}：断言 \texttt{grad\_W1.shape == W1.shape} 与 \texttt{grad\_W2.shape == W2.shape}，并用中心有限差分（$\epsilon = 10^{-5}$，详见第 6.4 节）核对两个权重矩阵梯度的相对误差均小于 $10^{-9}$。
+  \exHint{先算 $G_{\hat{Y}} = \hat{Y} - Y$，再依次反传得 $\nabla_{W_2} L = G_{\hat{Y}} A_1^T$、$G_{A_1} = W_2^T G_{\hat{Y}}$、$G_{Z_1} = G_{A_1} \had (1 - A_1^2)$、$\nabla_{W_1} L = G_{Z_1} X^T$。}
+\end{enumerate}

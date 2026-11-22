@@ -1,0 +1,31 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.bbl
+*.blg
+*.idx
+*.ilg
+*.ind
+volumes/*/main.pdf
+
+# Python cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS & editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

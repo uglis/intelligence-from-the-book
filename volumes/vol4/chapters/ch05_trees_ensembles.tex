@@ -1,0 +1,546 @@
+\chapter[决策树、随机森林与 GBDT]{决策树、随机森林与梯度提升树（GBDT）}\label{ch:trees}
+\chapEpigraph{整体大于部分之和。}{Aristotle（亚里士多德，《形而上学》）}
+
+\begin{chapIntro}{本章导读}
+第 4 章的核支持向量机通过全局平滑的相似性度量雕刻非线性边界，但它对特征量纲极度敏感，且面对混合类型、含大量噪声特征的表格数据时往往捉襟见肘。本章转向一套截然不同的建模哲学——\textbf{轴对齐递归空间划分（决策树）}，并在此基础上展开机器学习史上最富成果的\textbf{集成学习（Ensemble Learning）}双峰并峙：
+\begin{itemize}
+  \item \textbf{Bagging 与随机森林}：并行训练大批高方差深树并平均，精准打击第 3 章偏差-方差分解中的\textbf{方差项}；
+  \item \textbf{梯度提升树（GBDT / XGBoost）}：串行拟合前序模型的函数空间负梯度（伪残差），逐步消融弱学习器的\textbf{偏差项}。
+\end{itemize}
+即便在深度学习席卷图像与语言的今天，GBDT 家族依然是表格数据预测当之无愧的王者。
+\end{chapIntro}
+
+% ============================================================
+\section{CART 决策树：轴对齐递归划分与不纯度度量}\label{sec:trees-cart}
+% ============================================================
+
+\subsection{为什么轴对齐划分在表格数据上如此锋利？}
+
+一棵\textbf{分类与回归树（Classification and Regression Tree, CART）}将输入空间 $\R^d$ 递归地用一系列垂直于坐标轴的阈值切面 $x^{(j)} \le s$ 切割为 $M$ 个互不相交的超矩形叶区域 $R_1, R_2, \dots, R_M$，在每个叶区域上输出一个常数值 $c_m$：
+\begin{equation}\label{eq:cart-model}
+  T(x) = \sum_{m=1}^{M} c_m \,\mathbb{I}(x \in R_m).
+\end{equation}
+与线性模型或 RBF-SVM 相比，这种看似朴素的“逐维问答机”在现实表格数据（金融风控、医疗体检、推荐点击率）上拥有四项先天优势：
+\begin{enumerate}
+  \item \textbf{单调变换不变性与零标准化需求}：决策树只关心每个特征的\textbf{排序位置}（$x^{(j)} \le s$），对任何严格单调递增变换（如取对数、乘以 $1000$、Z-score 缩放）完全免疫！
+  \item \textbf{天然捕捉高阶特征交互}：沿着树根到叶子的路径“$(\text{年龄}>50) \land (\text{收缩压}>150) \land (\text{血糖}>7.5)$”，本质上自动构造了局部高阶逻辑乘积，无需人工手写交叉特征；
+  \item \textbf{对冗余噪声特征具有鲁棒性}：每次分裂只挑选信息收益最大的单一特征，完全不相关的噪声列很少被选中（第~\ref{sec:trees-exp} 节实验将直观验证这一点）；
+  \item \textbf{自然兼容异构特征与缺失值}：连续值、有序离散值与类别特征可统一处理，且单棵浅树具备“白盒规则”级可解释性。
+\end{enumerate}
+
+\subsection{回归树的最优叶预测与方差缩减准则}
+
+在回归任务中，给定落入某一叶区域 $R_m$ 的训练样本下标集 $I_m = \{i \mid x_i \in R_m\}$（记样本数 $n_m = |I_m|$），采用均方误差（平方损失）衡量叶内拟合误差。
+
+\begin{thmBox}
+\begin{proposition}[回归树叶节点的最优常数预测与贪心分裂目标]\label{prop:cart-reg}
+在平方损失下：
+\begin{enumerate}
+  \item 对任意固定的叶区域 $R_m$，使叶内残差平方和 $\operatorname{RSS}(R_m, c) := \sum_{i \in I_m}(y_i - c)^2$ 最小的唯一常数预测为该区域内标签的\textbf{样本均值}：
+  \[
+    c_m^* = \bar{y}_{R_m} := \frac{1}{n_m}\sum_{i \in I_m} y_i,
+  \]
+  此时该叶节点的最小残差平方和恰等于 $n_m \Var(y_{R_m}) := \sum_{i \in I_m}(y_i - \bar{y}_{R_m})^2$。
+  \item 当考虑用特征 $j$ 与阈值 $s$ 将当前节点 $R$ 一分为二为 $R_L(j, s) = \{x \in R \mid x^{(j)} \le s\}$ 与 $R_R(j, s) = \{x \in R \mid x^{(j)} > s\}$（样本数分别为 $n_L, n_R$）时，最优贪心分裂等价于最小化\textbf{加权叶内方差}：
+  \begin{equation}\label{eq:cart-reg-split}
+    (j^*, s^*) = \argmin_{j,\, s}\; \Big[ n_L \Var(y_L) + n_R \Var(y_R) \Big].
+  \end{equation}
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+将 $g(c) := \sum_{i \in I_m}(y_i - c)^2$ 关于 $c$ 求一阶导与二阶导：
+\[
+  g'(c) = -2\sum_{i \in I_m}(y_i - c) = 0 \implies c_m^* = \frac{1}{n_m}\sum_{i \in I_m} y_i = \bar{y}_{R_m}, \qquad
+  g''(c) = 2 n_m > 0.
+\]
+二阶导严格为正，故样本均值是全局唯一极小值点。将其代回即得最小残差平方和 $\sum_{i \in I_m}(y_i - \bar{y}_{R_m})^2 = n_m \Var(y_{R_m})$（这里 $\Var(y_R)$ 指经验总体方差 $\frac{1}{n_R}\sum (y_i - \bar{y}_R)^2$）。对分裂后的两个子节点分别代入各自最优均值预测，分裂后的总残差平方和即为 $n_L \Var(y_L) + n_R \Var(y_R)$，最小化它等价于最大化总方差缩减量 $n\Var(y_R) - [n_L \Var(y_L) + n_R \Var(y_R)]$。
+\end{proof}
+
+由于寻找全局最优树划分是 NP-难问题，CART 采用自顶向下的\textbf{贪心递归二分法}：在每个节点遍历全部候选特征 $j$ 与候选切分点 $s$，按式~\eqref{eq:cart-reg-split} 选出当前一步最优切分，然后分别对左右子节点递归建树，直至满足停止条件。
+
+\subsection{分类树：信息增益、Gini 不纯度与二者的解析联系}
+
+对于 $K$ 分类任务（标签 $y_i \in \{1, \dots, K\}$），设某节点 $R$ 中各类样本的经验占比为 $p = (p_1, \dots, p_K)$（满足 $\sum_{k=1}^K p_k = 1$）。若所有样本同属一类（某 $p_k = 1$），则节点完全“纯净”；若各类均匀混杂（$p_k = 1/K$），则节点最“浑浊”。衡量节点浑浊度的两大主流指标是\textbf{香农熵}与\textbf{Gini 不纯度}。
+
+\begin{recallBox}{香农熵与信息增益（第 2 卷回顾）}
+离散分布 $p = (p_1, \dots, p_K)$ 的香农熵定义为 $H(p) := -\sum_{k=1}^K p_k \log_2 p_k$（约定 $0\log_2 0 = 0$）。在决策树（ID3/C4.5）中，以切分 $(j, s)$ 将样本集 $D$ 分为 $D_L, D_R$ 后的\textbf{信息增益（Information Gain）}等于分裂前后条件熵的减少量：
+\[
+  \operatorname{IG}(D;\, j, s) := H(D) - \frac{n_L}{n} H(D_L) - \frac{n_R}{n} H(D_R).
+\]
+\end{recallBox}
+
+CART 分类树则默认采用不含对数运算、计算更迅捷的\textbf{Gini 不纯度（Gini Impurity）}：
+\begin{equation}\label{eq:gini-def}
+  G(p) := \sum_{k=1}^{K} p_k (1 - p_k) = 1 - \sum_{k=1}^{K} p_k^2.
+\end{equation}
+相应地，分裂 $(j, s)$ 的 Gini 增益（不纯度下降量）为 $\Delta G(D;\, j, s) := G(D) - \frac{n_L}{n} G(D_L) - \frac{n_R}{n} G(D_R)$。
+
+\begin{thmBox}
+\begin{proposition}[Gini 不纯度的概率意义及其与香农熵的泰勒近似关系]\label{prop:gini-entropy}
+对任意概率分布 $p = (p_1, \dots, p_K)$：
+\begin{enumerate}
+  \item \textbf{随机标签分类器误差解释}：从该节点按分布 $p$ 独立抽取一个样本，并按同一分布 $p$ 随机赋予预测标签，误分类概率恰好等于 $\sum_{k=1}^K p_k(1 - p_k) = G(p)$；
+  \item \textbf{与自然对数熵的泰勒联系}：记自然对数香农熵 $H_e(p) := -\sum_{k=1}^K p_k \ln p_k$。将 $-\ln t$ 在 $t = 1$ 处作一阶展开 $-\ln t = (1 - t) + \frac{1}{2}(1-t)^2 + \cdots$，截取首项即精准还原 Gini 不纯度，且处处满足 $G(p) \le H_e(p)$；在二分类 $p = (\frac{1}{2}+\delta, \frac{1}{2}-\delta)$ 对称点附近作二阶展开，有
+  \[
+    H_e(p) = \ln 2 - 2\delta^2 + O(\delta^4), \qquad G(p) = \frac{1}{2} - 2\delta^2,
+  \]
+  两者的二次曲率完全一致！
+  \item \textbf{严格凹性与非负增益}：$G(p)$ 与 $H_e(p)$ 均是概率单纯形上的严格凹函数；由 Jensen 不等式，只要分裂后的左右子节点类别分布不完全相同（$p_L \neq p_R$），就必然严格有 $\Delta G > 0$ 与 $\operatorname{IG} > 0$。
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+(1) 抽中真实类别 $k$ 的概率为 $p_k$，独立随机赋标签却未抽中 $k$ 的概率为 $1 - p_k$，全概率求和即 $\sum_k p_k(1 - p_k) = G(p)$。
+(2) 由基本不等式 $\ln t \le t - 1$（$t > 0$，当且仅当 $t = 1$ 取等）得 $-\ln p_k \ge 1 - p_k$；两边同乘 $p_k \ge 0$ 并对 $k$ 求和即得 $H_e(p) = \sum_k p_k(-\ln p_k) \ge \sum_k p_k(1 - p_k) = G(p)$。对于二分类 $p_1 = \frac{1}{2} + \delta,\ p_2 = \frac{1}{2} - \delta$，直接计算得 $G(p) = 2(\frac{1}{2}+\delta)(\frac{1}{2}-\delta) = \frac{1}{2} - 2\delta^2$；而对 $H_e(p)$ 用 $\ln(1 \pm 2\delta) = \pm 2\delta - 2\delta^2 + O(\delta^3)$ 展开：
+\begin{align*}
+  H_e(p) &= -\Big(\frac{1}{2}+\delta\Big)\Big(-\ln 2 + 2\delta - 2\delta^2\Big) - \Big(\frac{1}{2}-\delta\Big)\Big(-\ln 2 - 2\delta - 2\delta^2\Big) + O(\delta^4) \\
+         &= \ln 2 - 2\delta^2 + O(\delta^4).
+\end{align*}
+(3) 因 $G(p) = 1 - \norm{p}_2^2$ 的 Hessian 为 $-2 I_K \prec 0$，故严格凹。又母节点分布恰好是子节点分布的凸组合 $p = \frac{n_L}{n} p_L + \frac{n_R}{n} p_R$，当 $p_L \neq p_R$ 时严格 Jensen 不等式给出 $G(p) > \frac{n_L}{n} G(p_L) + \frac{n_R}{n} G(p_R)$，即 $\Delta G > 0$。
+\end{proof}
+
+\subsection{手工完整推演：6 样本分类树的 Gini 与信息增益比较}
+
+\begin{example}[手算 CART 分类分裂]\label{ex:cart-hand}
+考虑包含 $N = 6$ 个样本的一维二分类数据集：特征 $x_1 = (1, 2, 3, 4, 5, 6)$，对应标签 $y = (0, 0, 1, 0, 1, 1)$。请分别用 Gini 不纯度与香农信息增益评估两个候选切分点 $s_1 = 2.5$ 与 $s_2 = 3.5$，确定最优根节点分裂。
+\end{example}
+
+\paragraph{第 1 步：计算根节点不纯度}
+根节点含 3 个负例与 3 个正例（$p = (0.5, 0.5)$）：
+\[
+  G(D) = 1 - (0.5^2 + 0.5^2) = 0.5000, \qquad
+  H(D) = -\big(0.5\log_2 0.5 + 0.5\log_2 0.5\big) = 1.0000\text{ bit}.
+\]
+
+\paragraph{第 2 步：评估候选切分 $s_1 = 2.5$（$x_1 \le 2.5$）}
+左子节点 $D_L$ 含样本 $\{1, 2\}$，标签为 $(0, 0)$（$n_L = 2$，完全纯净！）；右子节点 $D_R$ 含样本 $\{3, 4, 5, 6\}$，标签为 $(1, 0, 1, 1)$（$n_R = 4$，比例 $1/4$ 与 $3/4$）：
+\begin{align*}
+  G(D_L) &= 0, & G(D_R) &= 1 - \Big(\frac{1}{4}\Big)^2 - \Big(\frac{3}{4}\Big)^2 = \frac{6}{16} = 0.3750, \\
+  G_{\mathrm{split}}(2.5) &= \frac{2}{6}\cdot 0 + \frac{4}{6}\cdot 0.3750 = \mathbf{0.2500}, &
+  \Delta G(2.5) &= 0.5000 - 0.2500 = \mathbf{0.2500}.
+\end{align*}
+再算香农熵：
+\begin{align*}
+  H(D_L) &= 0, & H(D_R) &= -\frac{1}{4}\log_2\frac{1}{4} - \frac{3}{4}\log_2\frac{3}{4} \approx 0.8113\text{ bit}, \\
+  \operatorname{IG}(2.5) &= 1.0000 - \left(\frac{2}{6}\cdot 0 + \frac{4}{6}\cdot 0.8113\right) \approx \mathbf{0.4591\text{ bit}}.
+\end{align*}
+
+\paragraph{第 3 步：评估候选切分 $s_2 = 3.5$（$x_1 \le 3.5$）}
+左子节点标签为 $(0, 0, 1)$（$n_L = 3$，比例 $2/3$ 与 $1/3$）；右子节点标签为 $(0, 1, 1)$（$n_R = 3$，比例 $1/3$ 与 $2/3$）：
+\begin{align*}
+  G(D_L) = G(D_R) &= 1 - \Big(\frac{2}{3}\Big)^2 - \Big(\frac{1}{3}\Big)^2 = \frac{4}{9} \approx 0.4444, &
+  \Delta G(3.5) &= 0.5000 - 0.4444 = \mathbf{0.0556}, \\
+  H(D_L) = H(D_R) &= -\frac{2}{3}\log_2\frac{2}{3} - \frac{1}{3}\log_2\frac{1}{3} \approx 0.9183\text{ bit}, &
+  \operatorname{IG}(3.5) &= 1.0000 - 0.9183 = \mathbf{0.0817\text{ bit}}.
+\end{align*}
+可见无论按 Gini 还是按信息增益，切分 $x_1 \le 2.5$（以及对称的 $x_1 \le 4.5$）都以压倒性优势击败 $x_1 \le 3.5$，原因恰在于它立刻剥离出了一个零不纯度的纯净叶节点！
+
+\subsection{过拟合与剪枝：预剪枝与代价复杂度剪枝}
+
+如果不加限制地持续分裂，一棵决策树可以把每个训练样本都单独关进一间叶节点牢房——训练误差归零，但方差爆表，对新数据的预测完全崩溃。抑制单棵树过拟合有两条路线：
+\begin{itemize}
+  \item \textbf{预剪枝（Pre-Pruning）}：在生长过程中提前刹车，常用超参数包括最大树深 \texttt{max\_depth}、叶节点最小样本数 \texttt{min\_leaf} 以及最小不纯度下降阈值 $\Delta_{\min}$；实现简单但有“视野短视”风险（有时当前一步增益很小，但下一步分裂能带来巨额收益）；
+  \item \textbf{后剪枝 / 代价复杂度剪枝（Cost-Complexity Pruning, CCP）}：先长出一棵充分生长的大树 $T_0$，再引入带叶节点数正则惩罚的目标函数
+  \begin{equation}\label{eq:cart-ccp}
+    R_\alpha(T) := R(T) + \alpha \abs{T}, \qquad \alpha \ge 0,
+  \end{equation}
+  其中 $R(T)$ 为树 $T$ 的总经验误差，$\abs{T}$ 为叶节点总数。对树中任意内部节点 $t$（其所领子树为 $T_t$），把整棵子树 $T_t$ 剪成单叶节点 $t$ 带来的单叶代价阈值为
+  \[
+    \alpha(t) = \frac{R(t) - R(T_t)}{\abs{T_t} - 1}.
+  \]
+  不断剪去 $\alpha(t)$ 最小的“最薄弱环节（Weakest Link）”，可生成一族严格嵌套的最优剪枝子树序列 $T_0 \supset T_1 \supset \cdots \supset T_{\text{root}}$，最后通过第 3 章的 $K$ 折交叉验证选出泛化误差最小的 $\alpha^*$。
+\end{itemize}
+
+\begin{failBox}{轴对齐决策树的几何盲区：45 度对角边界与高基数分裂偏置}
+\begin{enumerate}
+  \item \textbf{锯齿阶梯困境}：若真实分类边界是简单的斜直线 $x_1 + x_2 = 0$，线性分类器或 SVM 只需 2 个参数即可精确刻画；而轴对齐决策树只能用大量水平与垂直线段拼出锯齿状阶梯去艰难逼近，树深迅速膨胀且泛化急剧变差；
+  \item \textbf{高基数特征偏好}：若直接用信息增益切分无序离散特征，取值极多的 ID 类特征（如“用户学号”）会把每个样本分进单独子节点，使条件熵骤降为零从而骗取满分信息增益！（C4.5 通过除以分裂信息得到增益率，或工程上在 CART 中控制树深与编码方式加以规避。）
+\end{enumerate}
+\end{failBox}
+
+% ============================================================
+\section{Bagging 与随机森林：降方差的数学证明}\label{sec:trees-rf}
+% ============================================================
+
+单棵深树的致命病根不是偏差（它几乎能拟合任何复杂边界），而是\textbf{极高的方差}——训练集中稍微增删几个样本，根节点的第一次分裂就可能面目全非，整棵树随之剧烈抖动。如果把许多棵略有差异的高方差深树并行平均起来，是否就能在几乎不增加偏差的前提下把方差压扁？这就是 Leo Breiman 在 1996 年提出的 \textbf{Bagging（Bootstrap Aggregating）}与 2001 年提出的\textbf{随机森林（Random Forest）}。
+
+\subsection{自助采样（Bootstrap）与 $36.8\%$ 袋外（OOB）法则}
+
+手头只有一份大小为 $N$ 的训练集 $\mathcal{D}$，如何制造出 $M$ 份略有差异的“平行世界训练集”？答案是\textbf{自助采样（Bootstrap）}：每次从 $\mathcal{D}$ 中\textbf{有放回地均匀随机抽取 $N$ 个样本}构成第 $m$ 个自助集 $\mathcal{D}^{(m)}$，并在其上独立训练第 $m$ 棵决策树 $T_m$。
+
+\begin{thmBox}
+\begin{proposition}[自助采样的袋外（Out-of-Bag, OOB）概率极限]\label{prop:oob-limit}
+对任意给定训练样本 $x_i \in \mathcal{D}$，它在一次大小为 $N$ 的自助采样中\textbf{一次都未被抽中}（成为该树的袋外样本）的概率为
+\[
+  \Prob(x_i \notin \mathcal{D}^{(m)}) = \left(1 - \frac{1}{N}\right)^{N} \xrightarrow{\;N \to \infty\;} e^{-1} \approx \mathbf{36.79\%}.
+\]
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+每次有放回抽取不命中 $x_i$ 的概率为 $1 - \frac{1}{N}$；独立重复 $N$ 次均不命中的概率为 $(1 - \frac{1}{N})^N$。取自然对数并利用 $\ln(1 - u) = -u + O(u^2)$：
+\[
+  N \ln\!\left(1 - \frac{1}{N}\right) = N\left(-\frac{1}{N} + O\!\left(\frac{1}{N^2}\right)\right) = -1 + O\!\left(\frac{1}{N}\right) \xrightarrow{\;N\to\infty\;} -1.
+\]
+两边取指数即得极限 $e^{-1} \approx 0.367879$。
+\end{proof}
+
+这一简短的极限带来一份美妙的“免费午餐”——\textbf{袋外评估（OOB Validation）}：对于每个训练样本 $x_i$，大约有 $36.8\%$ 的树在训练时压根没见过它！只用这批“没见过 $x_i$ 的树”对 $x_i$ 投票或平均求预测，再汇总所有 $N$ 个样本的误差，就能在不切分独立验证集的情况下，得到与留一交叉验证高度接近的无偏泛化误差估计。
+
+\subsection{核心定理：相关集成方差公式与特征随机子采样的数学必然}
+
+现在我们严格证明集成平均究竟能把方差降到多低，以及为什么单纯 Bagging 还不够、必须升级为随机森林。
+
+\begin{thmBox}
+\begin{theorem}[相关同分布集成的精确方差公式]\label{thm:rf-variance}
+设在给定测试点 $x$ 处，集成中的 $M$ 个基学习器预测值 $T_1(x), \dots, T_M(x)$ 具有相同的方差 $\Var(T_m(x)) = \sigma^2$，且任意两棵不同树之间的成对相关系数均为 $\operatorname{Corr}(T_m(x), T_{m'}(x)) = \rho$（$m \neq m'$）。则等权平均集成 $\bar{T}_M(x) := \frac{1}{M}\sum_{m=1}^{M} T_m(x)$ 的方差满足精确恒等式：
+\begin{equation}\label{eq:rf-var-formula}
+  \Var\!\left(\frac{1}{M}\sum_{m=1}^{M} T_m(x)\right) = \rho\sigma^2 + \frac{1 - \rho}{M}\sigma^2.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+利用方差的双线性展开公式 $\Var(\sum_{m=1}^M a_m Z_m) = \sum_{m=1}^M a_m^2 \Var(Z_m) + \sum_{m \neq m'} a_m a_{m'} \Cov(Z_m, Z_{m'})$：
+\begin{align*}
+  \Var\!\left(\frac{1}{M}\sum_{m=1}^{M} T_m(x)\right)
+  &= \frac{1}{M^2}\left[\sum_{m=1}^{M}\Var\big(T_m(x)\big) + \sum_{m \neq m'}\Cov\big(T_m(x), T_{m'}(x)\big)\right].
+\end{align*}
+对角项共有 $M$ 个，每项等于 $\sigma^2$；非对角项共有 $M(M - 1)$ 个，由相关系数定义，每项等于 $\Cov(T_m, T_{m'}) = \rho\sqrt{\sigma^2 \cdot \sigma^2} = \rho\sigma^2$。代入化简：
+\begin{align*}
+  \Var\!\left(\frac{1}{M}\sum_{m=1}^{M} T_m(x)\right)
+  &= \frac{1}{M^2}\Big(M\sigma^2 + M(M - 1)\rho\sigma^2\Big)
+   = \frac{\sigma^2}{M} + \frac{M - 1}{M}\rho\sigma^2
+   = \rho\sigma^2 + \frac{1 - \rho}{M}\sigma^2. \qedhere
+\end{align*}
+\end{proof}
+
+请仔细端详式~\eqref{eq:rf-var-formula}，它是整个随机森林算法设计的灯塔：
+\begin{itemize}
+  \item \textbf{第二项 $\frac{1-\rho}{M}\sigma^2$} 随着树的数量 $M \to \infty$ 迅速衰减趋近于 $0$——这就是增大森林规模能平滑预测、且\textbf{几乎不会因树太多而过拟合}的数学保证；
+  \item \textbf{第一项 $\rho\sigma^2$} 与 $M$ 无关！它构成了集成方差\textbf{永远跨不过去的下界地板}。在纯 Bagging 中，尽管每棵树用了不同自助集，但只要数据中存在一两个极强的核心预测特征，几乎每棵树的根节点都会争先恐后地选同一个特征切分，导致所有树长得大同小异（$\rho$ 高达 $0.5\text{--}0.8$），再多种 1000 棵树也无济于事！
+\end{itemize}
+
+\textbf{随机森林的天才一击}直指 $\rho$：在每棵树的\textbf{每一次节点分裂}时，不再遍历全部 $d$ 个特征，而是先随机抽取一个规模为 $m_{\text{try}} < d$ 的特征子集（分类经验默认 $m_{\text{try}} = \lfloor \sqrt{d} \rfloor$，回归经验默认 $m_{\text{try}} = \lfloor d/3 \rfloor$），仅在这 $m_{\text{try}}$ 个候选中寻找最佳切分！这一举措强行剥夺了强势特征对根节点的垄断权，迫使不同树探索多样化的特征组合，大幅拉低树间相关性 $\rho$，从而以微小的单树偏差代价换来集成总均方误差的断崖式下降！同时，正因平均操作专职降方差，随机森林通常使用\textbf{充分生长的深树}（低偏差、高方差）作为基学习器。
+
+% ============================================================
+\section{Boosting 与 GBDT：函数空间中的梯度下降}\label{sec:trees-gbdt}
+% ============================================================
+
+Bagging 把高方差的“天才乱猜手”拉在一起民主投票以求稳健；而 \textbf{Boosting（提升法）}走了截然相反的另一条大道：它雇佣一队极浅的弱学习器（例如深度仅 $d = 2\text{--}4$ 的“决策树桩/浅树”，本身偏差极大但方差很小），让它们\textbf{串行接力}——每一棵新树专门盯着前面所有树合起来仍未解决的错误猛攻，步步为营地将整体偏差磨平！图~\ref{fig:bag-vs-boost} 并置对比了这两大集成范式的计算拓扑。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=1.5mm, draw=navy, thick, fill=navyLight, minimum width=18mm, minimum height=7.5mm, align=center, font=\sffamily\scriptsize, text=ink},
+  gbox/.style={rectangle, rounded corners=1.5mm, draw=tealDark, thick, fill=tealLight, minimum width=18mm, minimum height=7.5mm, align=center, font=\sffamily\scriptsize, text=ink},
+  rbox/.style={rectangle, rounded corners=1.5mm, draw=ochre, thick, fill=ochreLight, minimum width=16mm, minimum height=6.5mm, align=center, font=\sffamily\scriptsize, text=ochre},
+  arr/.style={-{Stealth[length=2mm]}, thick, slate}
+]
+  % Top panel: Parallel Bagging / Random Forest
+  \draw[rounded corners=2mm, draw=navy!45, fill=navyLight!25] (-0.3, 1.55) rectangle (14.45, 4.75);
+  \node[font=\sffamily\bfseries\small, text=navy, anchor=west] at (0.0, 4.42) {范式一：Bagging / 随机森林（并行降方差，基树深、高方差）};
+
+  \node[box, minimum width=19mm, minimum height=10mm] (D1) at (1.1, 2.95) {训练集 $\mathcal{D}$};
+  \node[box] (B1) at (4.1, 3.85) {Bootstrap $\mathcal{D}^{(1)}$};
+  \node[box] (B2) at (4.1, 2.95) {Bootstrap $\mathcal{D}^{(2)}$};
+  \node[box] (BM) at (4.1, 2.05) {Bootstrap $\mathcal{D}^{(M)}$};
+
+  \node[box, fill=white] (T1) at (7.3, 3.85) {深树 $T_1$ ($m_{\text{try}}$)};
+  \node[box, fill=white] (T2) at (7.3, 2.95) {深树 $T_2$ ($m_{\text{try}}$)};
+  \node[box, fill=white] (TM) at (7.3, 2.05) {深树 $T_M$ ($m_{\text{try}}$)};
+
+  \node[box, draw=navy, very thick, minimum width=27mm, minimum height=11mm] (AVG) at (11.35, 2.95) {等权平均 / 投票\\$\hat{f}(x) = \frac{1}{M}\sum_{m=1}^M T_m(x)$};
+
+  \draw[arr] (D1.east) -- (B1.west);
+  \draw[arr] (D1.east) -- (B2.west);
+  \draw[arr] (D1.east) -- (BM.west);
+  \draw[arr] (B1) -- (T1);
+  \draw[arr] (B2) -- (T2);
+  \draw[arr] (BM) -- (TM);
+  \draw[arr] (T1.east) -- (AVG.west);
+  \draw[arr] (T2.east) -- (AVG.west);
+  \draw[arr] (TM.east) -- (AVG.west);
+
+  % Bottom panel: Sequential GBDT Boosting
+  \draw[rounded corners=2mm, draw=teal!50, fill=tealLight!25] (-0.3, -2.45) rectangle (14.45, 1.25);
+  \node[font=\sffamily\bfseries\small, text=tealDark, anchor=west] at (0.0, 0.92) {范式二：梯度提升树 GBDT（串行降偏差，基树浅、拟合负梯度伪残差）};
+
+  \node[gbox, minimum width=17mm] (F0) at (0.95, -0.58) {常值初始化\\$F_0(x) = c_0$};
+  \node[rbox] (R1) at (3.25, 0.28) {伪残差 $r^{(1)}$};
+  \node[gbox, fill=white] (H1) at (3.25, -1.52) {浅树 $h_1(x)$};
+
+  \node[gbox, minimum width=21mm] (F1) at (5.95, -0.58) {$F_1 = F_0 + \eta h_1$};
+  \node[rbox] (R2) at (8.45, 0.28) {伪残差 $r^{(2)}$};
+  \node[gbox, fill=white] (H2) at (8.45, -1.52) {浅树 $h_2(x)$};
+
+  \node[font=\bfseries\color{tealDark}] (DOTS) at (10.35, -0.58) {$\cdots$};
+  \node[gbox, draw=tealDark, very thick, minimum width=21mm, minimum height=11mm] (FM) at (12.65, -0.58) {最终累加模型\\$F_M = F_0 + \eta\sum h_m$};
+
+  \draw[arr, tealDark] (F0.east) -- (R1.west);
+  \draw[arr, ochre] (R1.south) -- node[pos=0.28, right=1pt, font=\tiny, text=ochre, fill=tealLight!25, inner sep=0.8pt] {拟合} (H1.north);
+  \draw[arr, tealDark] (F0.east) -- (F1.west);
+  \draw[arr, tealDark] (H1.east) -- node[below right, font=\tiny, text=tealDark] {$+\eta h_1$} (F1.south west);
+
+  \draw[arr, tealDark] (F1.east) -- (R2.west);
+  \draw[arr, ochre] (R2.south) -- node[pos=0.28, right=1pt, font=\tiny, text=ochre, fill=tealLight!25, inner sep=0.8pt] {拟合} (H2.north);
+  \draw[arr, tealDark] (F1.east) -- (DOTS.west);
+  \draw[arr, tealDark] (H2.east) -- node[below right, font=\tiny, text=tealDark] {$+\eta h_2$} (DOTS.south west);
+  \draw[arr, tealDark] (DOTS.east) -- (FM.west);
+\end{tikzpicture}}
+\caption{Bagging/随机森林与 GBDT 梯度提升树的架构对照。随机森林通过并行独立自助集与随机选特征压低方差地板 $\rho\sigma^2$；GBDT 通过串行追踪函数空间负梯度（伪残差）逐步消减系统偏差。}
+\label{fig:bag-vs-boost}
+\end{figure}
+
+\subsection{函数空间中的梯度下降（Friedman 2001）}
+
+普通梯度下降在第 1 章是在\textbf{参数空间} $\theta \in \R^d$ 里沿负梯度走步：$\theta_{m} = \theta_{m-1} - \eta \nabla_\theta \mathcal{L}(\theta_{m-1})$。Jerome Friedman 的惊世洞察在于：\textbf{为什么不把模型本身 $F(\cdot)$ 在训练集上的预测向量 $F = (F(x_1), \dots, F(x_N))^\top \in \R^N$ 直接视为优化变量，在“函数空间”里做梯度下降？}
+
+给定任意可微损失函数 $\ell(y_i, F(x_i))$ 与经验总损失 $\mathcal{L}(F) = \sum_{i=1}^N \ell(y_i, F(x_i))$，第 $m$ 轮迭代时，我们在当前累计模型 $F_{m-1}$ 处计算总损失对每个样本预测值 $F(x_i)$ 的\textbf{负梯度}——称为第 $m$ 轮的\textbf{伪残差（Pseudo-Residual）}：
+\begin{equation}\label{eq:gbdt-pseudores}
+  r_{im} := -\left.\frac{\partial \ell\big(y_i, F(x_i)\big)}{\partial F(x_i)}\right|_{F(x_i) = F_{m-1}(x_i)}, \qquad i = 1, \dots, N.
+\end{equation}
+直接把 $F(x_i)$ 沿 $r_{im}$ 移动固然能让训练损失骤降，但那样只能更新这 $N$ 个训练点的取值，无法泛化到未见过的测试样本 $x_{\text{new}}$！于是 GBDT 做了最关键的一步\textbf{投影}：用一棵浅层 CART 回归树 $h_m(x)$ 去最小二乘拟合伪残差训练集 $\{(x_i, r_{im})\}_{i=1}^N$，使得 $h_m$ 成为浅树假设空间里与负梯度方向最贴合的函数方向，然后乘以收缩学习率（Shrinkage）$\eta \in (0, 1]$ 进行加法更新：
+\begin{equation}\label{eq:gbdt-update}
+  F_m(x) = F_{m-1}(x) + \eta\, h_m(x), \qquad F_0(x) \equiv \argmin_{c \in \R} \sum_{i=1}^{N} \ell(y_i, c).
+\end{equation}
+
+让我们立即检验两个核心损失函数下的伪残差公式，见证其浑然天成的统一性：
+\begin{enumerate}
+  \item \textbf{平方损失回归}：取 $\ell(y, F) = \frac{1}{2}(y - F)^2$，求导得
+  \[
+    r_{im} = -\frac{\partial}{\partial F}\left[\frac{1}{2}(y_i - F)^2\right]_{F=F_{m-1}(x_i)} = y_i - F_{m-1}(x_i).
+  \]
+  此时伪残差就是字面意义上的\textbf{真实残差}！每棵新树都在拟合前一轮还没预测完的剩余误差。
+  \item \textbf{二分类对数损失（Logistic Loss）}：设 $y_i \in \{0, 1\}$，$F(x_i)$ 为对数几率（logit），预测概率 $p_i = \sigma(F(x_i)) = \frac{1}{1+e^{-F(x_i)}}$，损失为 $\ell(y_i, F) = \ln(1 + e^F) - y_i F$。求导得
+  \[
+    r_{im} = -\left(\frac{e^{F_{m-1}(x_i)}}{1 + e^{F_{m-1}(x_i)}} - y_i\right) = y_i - p_{i, m-1} \in (-1, 1).
+  \]
+  惊不惊喜？二分类 GBDT 的每棵基树竟然仍是\textbf{回归树}，拟合的正是真实 $0/1$ 标签与当前预测概率之差！（同理，绝对值损失 $|y-F|$ 对应的伪残差为符号函数 $\sign(y_i - F_{m-1}(x_i))$，天然抗离群点！）
+\end{enumerate}
+
+\textbf{学习率 $\eta$ 的正则化作用}：为什么不干脆取 $\eta = 1$ 一步到位？经验与理论均表明，把每棵树的步子收小（如 $\eta = 0.05\text{--}0.10$）并相应增加树的数量 $M$，能防止单棵树对早期残差过度拟合，让大量弱树以“细水长流”的慢速推进方式共同雕琢目标函数——这本质上等价于函数空间中的隐式 $L_1$ 正则化（与第 2 章 Lasso 的前向分步路径高度呼应）。不过请注意：与随机森林不同，若 GBDT 的树数 $M$ 无限增大，它最终会开始拟合训练噪声而\textbf{出现过拟合}，因此必须配合验证集早停（Early Stopping）与树深限制使用。
+
+\subsection{从一阶 GBDT 到二阶牛顿提升：XGBoost 与 LightGBM 精要}
+
+经典 GBDT 只用了一阶负梯度；陈天奇于 2016 年推出的 \textbf{XGBoost} 将函数空间梯度下降直接升级为\textbf{带显式正则化的二阶牛顿步}，推导出极其漂亮的闭式叶权重与分裂增益公式。
+
+在第 $m$ 轮加入新树 $f_m(x) = w_{q(x)}$（将样本 $x$ 映射到第 $q(x) \in \{1,\dots,T\}$ 个叶子并输出权重 $w_j$），定义带树复杂度惩罚的正则化目标：
+\[
+  \mathcal{L}^{(m)} = \sum_{i=1}^{N} \ell\!\big(y_i,\, \hat{y}_i^{(m-1)} + f_m(x_i)\big) + \Omega(f_m),
+  \qquad \Omega(f_m) := \gamma T + \frac{1}{2}\lambda \sum_{j=1}^{T} w_j^2.
+\]
+对损失项在 $\hat{y}_i^{(m-1)}$ 处作二阶泰勒展开，记一阶导 $g_i := \partial_{\hat{y}}\ell(y_i, \hat{y}_i^{(m-1)})$ 与二阶导 $h_i := \partial_{\hat{y}}^2\ell(y_i, \hat{y}_i^{(m-1)}) > 0$，略去与 $f_m$ 无关的常数项，并将样本按所属叶节点 $I_j := \{i \mid q(x_i) = j\}$ 分组：
+\[
+  \widetilde{\mathcal{L}}^{(m)}
+  = \sum_{i=1}^{N}\!\left[g_i f_m(x_i) + \frac{1}{2} h_i f_m(x_i)^2\right] + \gamma T + \frac{1}{2}\lambda \sum_{j=1}^{T} w_j^2
+  = \sum_{j=1}^{T}\!\left[G_j w_j + \frac{1}{2}(H_j + \lambda) w_j^2\right] + \gamma T,
+\]
+其中 $G_j := \sum_{i \in I_j} g_i$、$H_j := \sum_{i \in I_j} h_i$。各个叶节点 $w_j$ 彻底解耦！对每个 $w_j$ 求导置零，立得\textbf{闭式最优叶权重}与\textbf{最优树结构评分}：
+\begin{equation}\label{eq:xgb-leaf-gain}
+  w_j^* = -\frac{G_j}{H_j + \lambda}, \qquad
+  \widetilde{\mathcal{L}}^{(m)*} = -\frac{1}{2}\sum_{j=1}^{T} \frac{G_j^2}{H_j + \lambda} + \gamma T.
+\end{equation}
+从而将任一叶节点分裂为左右两叶 $(I_L, I_R)$ 的精确\textbf{分裂收益（Gain）}一气呵成：
+\begin{equation}\label{eq:xgb-split-gain}
+  \operatorname{Gain} = \frac{1}{2}\left[\frac{G_L^2}{H_L + \lambda} + \frac{G_R^2}{H_R + \lambda} - \frac{(G_L + G_R)^2}{H_L + H_R + \lambda}\right] - \gamma.
+\end{equation}
+式~\eqref{eq:xgb-leaf-gain}--\eqref{eq:xgb-split-gain} 堪称“天书”级公式：不仅自动把二阶曲率信息（牛顿步长）和 $L_2$ 叶权正则 $\lambda$ 融为一体，而且当 $\operatorname{Gain} \le 0$ 时直接拒绝分裂（将叶节点数惩罚 $\gamma$ 内化为自动剪枝！）。微软后续推出的 \textbf{LightGBM} 在同一二阶数学框架上引入了特征直方图分桶（将切分搜索复杂度从排序 $O(N\log N)$ 降至桶数 $O(B)$）与按叶生长（Leaf-wise）策略，使千万级样本训练提速一个数量级。
+
+\begin{extBox}{AdaBoost 与指数损失的前向分步推导}
+Boosting 家族的鼻祖 \textbf{AdaBoost}（Freund \& Schapire, 1997）表面上通过“提高错分样本权重”来迭代训练二分类弱分类器 $h_m(x) \in \{-1, +1\}$。其实它正是\textbf{指数损失} $\ell_{\exp}(y, F) = \exp(-y F)$ 上的前向分步加性建模！证明极简：设第 $m$ 轮要最小化
+\[
+  \sum_{i=1}^{N} \exp\!\big(-y_i(F_{m-1}(x_i) + \alpha_m h_m(x_i))\big)
+  = \sum_{i=1}^{N} \underbrace{e^{-y_i F_{m-1}(x_i)}}_{w_i^{(m)}} \exp\!\big(-\alpha_m y_i h_m(x_i)\big).
+\]
+将求和按“预测正确（$y_i h_m(x_i)=+1$）”与“预测错误（$y_i h_m(x_i)=-1$）”拆成两部分，记加权错误率 $\varepsilon_m := \frac{\sum_{y_i \neq h_m(x_i)} w_i^{(m)}}{\sum_i w_i^{(m)}}$，则目标正比于 $(1 - \varepsilon_m) e^{-\alpha_m} + \varepsilon_m e^{\alpha_m}$。
+\begin{itemize}
+  \item 固定 $\alpha_m > 0$，最小化目标等价于最小化加权错分率 $\varepsilon_m$（即挑选加权误差最小的弱分类器 $h_m$）；
+  \item 固定 $h_m$，对 $\alpha_m$ 求导置零得 $-(1-\varepsilon_m)e^{-\alpha_m} + \varepsilon_m e^{\alpha_m} = 0 \implies \alpha_m^* = \frac{1}{2}\ln\frac{1-\varepsilon_m}{\varepsilon_m}$；
+  \item 下一轮未归一化权重自动更新为 $w_i^{(m+1)} = w_i^{(m)}\exp(-\alpha_m^* y_i h_m(x_i))$——错分样本权重乘以 $e^{\alpha_m^*} > 1$，答对样本权重乘以 $e^{-\alpha_m^*} < 1$！
+\end{itemize}
+由于指数损失对极端错分样本的惩罚呈指数爆炸，AdaBoost 对标签噪声较为敏感；现代实践中通常优先使用对数损失或 Huber 损失的 GBDT。
+\end{extBox}
+
+% ============================================================
+\section{三模型实测对比：单棵树、随机森林与 GBDT}\label{sec:trees-exp}
+% ============================================================
+
+现在我们直接检验配套脚本 \texttt{code/\allowbreak vol4\_experiments.py} 中 \texttt{exp5\_trees\_rf\_gbdt} 的实测曲线与数值（数据存于 \texttt{data/\allowbreak ensemble\_curve.csv}）。
+
+\paragraph{实验设置}
+在 5 维超立方体 $[-3, 3]^5$ 上生成非线性回归数据（$N_{\text{tr}} = 220$，$N_{\text{te}} = 220$），真实函数为
+\[
+  f_{\mathrm{true}}(x) = \sin(x_0) + 0.5 x_1^2 - 0.8 x_2 + 0.4 x_0 x_1,
+\]
+注意最后两维 $x_3, x_4$ 是\textbf{纯无关噪声特征}，且训练标签叠加了标准差 $\sigma = 0.70$ 的高斯噪声（测试集与无噪真实函数 $f_{\mathrm{true}}$ 比对以纯粹考察泛化估计误差）。我们用同一套纯 NumPy 回归树引擎对比三种模型：
+\begin{enumerate}
+  \item \textbf{单棵深 CART 树}（$\text{max\_depth}=8,\ \text{min\_leaf}=2$）：训练 MSE 低至 \textbf{0.2603}，但测试 MSE 高达 \textbf{1.6017}——严重过拟合噪声！
+  \item \textbf{随机森林（RF）}（$M=60,\ \text{max\_depth}=8,\ \text{min\_leaf}=2,\ m_{\text{try}}=3$）：测试 MSE 从单棵自助随机树的 \textbf{2.9815}（$M=1$）在仅 10 棵树时就暴跌至 \textbf{1.0414}（$M=10$），随后在 \textbf{1.0217}（$M=60$）附近稳定进入平台期——精准印证定理~\ref{thm:rf-variance} 中 $\rho\sigma^2$ 的方差地板效应！
+  \item \textbf{梯度提升树（GBDT）}（$M=60,\ \text{max\_depth}=3,\ \text{min\_leaf}=4,\ \eta=0.10$）：起步时单棵浅树欠拟合严重，测试 MSE 高达 \textbf{4.7747}（$M=1$）；但随着残差接力推进，它一路势如破竹：\textbf{2.2161}（$M=10$）$\to$ \textbf{0.9053}（$M=30$，反超随机森林！）$\to$ \textbf{0.5517}（$M=60$，将单棵深树误差削去近三分之二！）。
+\end{enumerate}
+
+图~\ref{fig:ensemble-curve} 直接读取实测数据文件 \texttt{data/\allowbreak ensemble\_curve.csv} 绘制了完整的测试 MSE 演化轨迹，表~\ref{tab:ensemble-metrics} 汇总了关键里程碑数值。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.84\linewidth,
+  height=6.2cm,
+  xlabel={集成基树数量 $M$},
+  ylabel={测试集均方误差（Test MSE）},
+  xmin=0, xmax=62,
+  ymin=0.25, ymax=5.15,
+  xtick={1,10,20,30,40,50,60},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize},
+  grid=both,
+  grid style={line width=0.25pt, draw=slate!18},
+  legend pos=north east,
+  legend style={font=\scriptsize, fill=white, fill opacity=0.92, draw=tealLine, rounded corners=1.5pt}
+]
+  \addplot[ochre, very thick, dashed] table[x=m, y=single_te, col sep=comma] {data/ensemble_curve.csv};
+  \addlegendentry{单棵深 CART（$d=8$，测试 MSE $= 1.6017$）}
+
+  \addplot[navy, very thick, mark=square*, mark size=1.8pt] table[x=m, y=rf_te, col sep=comma] {data/ensemble_curve.csv};
+  \addlegendentry{随机森林（$d=8, m_{\text{try}}=3$，快速触及方差地板）}
+
+  \addplot[tealDark, very thick, mark=*, mark size=1.9pt] table[x=m, y=gbdt_te, col sep=comma] {data/ensemble_curve.csv};
+  \addlegendentry{GBDT（$d=3, \eta=0.10$，持续降偏差至 $0.5517$）}
+
+  % Annotations
+  \node[font=\scriptsize, text=navy, align=left] at (axis cs:44, 1.38) {RF 平台期 $\approx 1.02$};
+  \node[font=\scriptsize, text=tealDark, align=left] at (axis cs:46, 0.42) {GBDT 持续逼近真值};
+  \draw[->, >=Stealth, gold, thick] (axis cs:24, 2.05) -- (axis cs:24.5, 1.18);
+  \node[font=\scriptsize\bfseries, text=gold, fill=white, inner sep=1.2pt] at (axis cs:25, 2.28) {$M \approx 24$ 处 GBDT 反超 RF};
+\end{axis}
+\end{tikzpicture}
+\caption{5 维非线性含噪回归（$N_{\text{tr}}=220, \sigma=0.70$）上单棵深 CART、随机森林与 GBDT 的测试 MSE 演化曲线（实测数据直接读自 \texttt{data/\allowbreak ensemble\_curve.csv}）。随机森林在前 10 棵树内通过降方差迅速击败单棵深树并稳居平台；GBDT 虽然单棵浅树起步偏差很高，却凭借串行负梯度拟合持续压低误差，在 $M \approx 24$ 后全面反超。}
+\label{fig:ensemble-curve}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{5 维非线性回归实测关键节点测试 MSE（单棵深 CART 训练 MSE $=0.2603$，测试 MSE $=1.6017$）}
+\label{tab:ensemble-metrics}
+\small
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+\textbf{集成模型} & $M=1$ & $M=5$ & $M=10$ & $M=20$ & $M=30$ & $M=50$ & $M=60$ \\
+\midrule
+随机森林（$d=8, m_{\text{try}}=3$） & $2.9815$ & $1.5006$ & $1.0414$ & $1.0753$ & $1.0799$ & $1.0504$ & $1.0217$ \\
+GBDT（$d=3, \eta=0.10$） & $4.7747$ & $3.3744$ & $2.2161$ & $1.2893$ & $0.9053$ & $0.6303$ & $\mathbf{0.5517}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{可运行的纯 NumPy 回归树、随机森林与 GBDT 引擎}
+
+下面的紧凑代码用不到 50 行纯 NumPy 实现了 CART 回归树递归生长器，并直接驱动随机森林与 GBDT 两种集成训练循环（完整实验脚本见 \texttt{code/\allowbreak vol4\_experiments.py}）。
+
+\begin{lstlisting}[caption={纯 NumPy 实现 CART 回归树、随机森林与 GBDT 核心循环},label={lst:trees-ensemble}]
+import numpy as np
+
+def fit_reg_tree(X, y, max_depth=3, min_leaf=4, max_features=None, rng=None):
+    n, d = X.shape
+    if max_depth == 0 or n <= min_leaf or np.var(y) < 1e-10:
+        return float(np.mean(y))
+    feats = range(d) if max_features is None else rng.choice(d, size=max_features, replace=False)
+    best_score, best_split = float("inf"), None
+    for j in feats:
+        vals = np.unique(X[:, j])
+        if len(vals) <= 1:
+            continue
+        qs = vals if len(vals) <= 16 else np.quantile(vals, np.linspace(0.1, 0.9, 15))
+        for thr in qs:
+            left = X[:, j] <= thr
+            nl = int(np.sum(left))
+            if nl < min_leaf or (n - nl) < min_leaf:
+                continue
+            score = nl * np.var(y[left]) + (n - nl) * np.var(y[~left])
+            if score < best_score:
+                best_score, best_split = score, (j, float(thr))
+    if best_split is None:
+        return float(np.mean(y))
+    j, thr = best_split
+    left = X[:, j] <= thr
+    return (j, thr,
+            fit_reg_tree(X[left], y[left], max_depth - 1, min_leaf, max_features, rng),
+            fit_reg_tree(X[~left], y[~left], max_depth - 1, min_leaf, max_features, rng))
+
+def pred_tree(tree, X):
+    if isinstance(tree, float):
+        return np.full(len(X), tree)
+    j, thr, tl, tr = tree
+    out = np.empty(len(X))
+    left = X[:, j] <= thr
+    out[left], out[~left] = pred_tree(tl, X[left]), pred_tree(tr, X[~left])
+    return out
+
+# Core ensemble loops (given X_tr, y_tr, X_te):
+# 1) Random Forest (Bagging + feature subsampling):
+#    idx = rng.integers(0, len(X_tr), size=len(X_tr))
+#    t_rf = fit_reg_tree(X_tr[idx], y_tr[idx], max_depth=8, min_leaf=2, max_features=3, rng=rng)
+#    rf_pred_sum += pred_tree(t_rf, X_te)
+# 2) GBDT (Sequential residual fitting with shrinkage lr=0.10):
+#    resid = y_tr - gb_tr
+#    t_gb = fit_reg_tree(X_tr, resid, max_depth=3, min_leaf=4)
+#    gb_tr += 0.10 * pred_tree(t_gb, X_tr); gb_te += 0.10 * pred_tree(t_gb, X_te)
+\end{lstlisting}
+
+\begin{insightBox}{工业界黄金分界线：表格选 GBDT，非结构化模态选深度学习}
+为什么在大量中等规模（$10^3\text{--}10^6$ 行）的真实表格基准评测中，XGBoost / LightGBM / CatBoost 至今依然常常击败多层感知机与表格 Transformer？核心原因有三：（1）表格特征的真实响应面常含\textbf{非光滑的轴对齐阈值跳变}（例如收入过某一档位税率突变），而神经网络天然偏好平滑旋转不变函数；（2）现实表格充斥无关噪声列（正如本节实验中的 $x_3, x_4$），决策树在每次分裂时自动忽略无关维度，而全连接层容易被噪声特征的梯度稀释；（3）树集成的训练、调参与缺失值处理极其省心。反之，一旦数据具有强时空局部性或组合语义结构（图像像素、语音波形、自然语言词元），第 5 卷的卷积网络与 Transformer 便会以压倒性表征优势接管主场。
+\end{insightBox}
+
+% ============================================================
+\section{本章习题}\label{sec:ch5-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{掌握不纯度计算、Bagging/Boosting 核心差异与超参直觉}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}]
+  \item \textbf{三分类节点不纯度计算}：某决策树节点包含 10 个三分类样本，各类别频数分别为 $(5, 3, 2)$。（1）计算该节点的 Gini 不纯度 $G(p)$ 与以 2 为底的香农熵 $H(p)$；（2）若某次分裂将其切分为左子节点 $(5, 0, 0)$ 与右子节点 $(0, 3, 2)$，计算此次分裂的 Gini 增益 $\Delta G$ 与信息增益 $\operatorname{IG}$。
+  \exHint{左子节点完全纯净，不纯度与熵均为 $0$；只需算右子节点比例 $(0.6, 0.4)$ 的不纯度再按权重 $5/10$ 加权。}
+
+  \item \textbf{随机森林 vs GBDT 诊断四连问}：结合本章理论简明判断下列陈述正误并说明核心数学依据：
+  （1）把随机森林的树数 $M$ 从 100 增至 1000，通常会引起严重过拟合；
+  （2）把 GBDT 的树数 $M$ 从 100 增至 5000（固定较大学习率 $\eta=0.2$），通常会引起严重过拟合；
+  （3）对输入特征做单调对数变换 $x \mapsto \ln(1 + x)$（$x \ge 0$）不会改变 CART 分类树的分裂结构；
+  （4）随机森林通常偏好浅树桩（$d=1$），而 GBDT 通常偏好不剪枝的极深树（$d=20$）。
+  \exHint{紧扣方差公式~\eqref{eq:rf-var-formula} 与 Bagging 降方差、Boosting 降偏差的分工定位作答。}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{熟练手算回归树分裂、XGBoost 叶权重与分裂增益}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{一维回归树手算与代价复杂度剪枝}：给定 4 个一维回归样本 $(x_i, y_i)$：$(1, 1),\, (2, 2),\, (3, 9),\, (4, 10)$。（1）评估全部 3 个中点切分 $s \in \{1.5, 2.5, 3.5\}$ 的加权残差平方和，找出最优第一次分裂；（2）在最优第一次分裂后继续完全生长至 4 个叶节点（令总误差为 $0$），计算完全树 $T_0$、1 次分裂树 $T_1$ 与单叶根节点 $T_{\text{root}}$ 在式~\eqref{eq:cart-ccp} 下的代价复杂度 $R_\alpha(T)$，求出使 $T_1$ 严格优于 $T_0$ 与 $T_{\text{root}}$ 的正则参数 $\alpha$ 区间！
+  \exHint{记单节点残差平方和 $R(t) = \sum_{i\in t}(y_i - \bar{y}_t)^2$：根节点的 $R(T_{\text{root}}) = 65$，$T_1$ 的 $R(T_1) = 1$，$T_0$ 的 $R(T_0) = 0$。}
+
+  \item \textbf{XGBoost 二阶叶权重与分裂增益手算}：在二分类对数损失下，当前某叶节点包含 4 个样本，其真实标签为 $y = (1, 1, 0, 0)$，上一轮预测概率分别为 $p = (0.8, 0.4, 0.6, 0.2)$。设正则超参数 $\lambda = 1.0,\ \gamma = 0.05$。（1）计算每个样本的一阶导 $g_i = p_i - y_i$ 与二阶导 $h_i = p_i(1 - p_i)$；（2）由式~\eqref{eq:xgb-leaf-gain} 算出分裂前该叶节点的最优权重 $w^*$；（3）若某候选切分将样本分为 $I_L = \{1, 2\}$ 与 $I_R = \{3, 4\}$，利用式~\eqref{eq:xgb-split-gain} 计算分裂增益 $\operatorname{Gain}$，判断是否应当执行该分裂？
+  \exHint{注意先汇总 $G_L, H_L, G_R, H_R$，检查分裂前是否满足 $G = G_L + G_R$ 与 $H = H_L + H_R$。}
+\end{enumerate}
+
+\exTier{C 层：理论证明与反例构造}{证明带相关性的不等权集成界与 Huber 损失伪残差}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{回归中位数叶预测与 $L_1$ 绝对值损失的 GBDT}：假设在回归任务中将平方损失替换为绝对值损失（MAE）$\ell_1(y, F) = \abs{y - F}$。（1）证明对任意叶节点样本集 $\{y_1, \dots, y_n\}$，最小化 $\sum_{i=1}^n \abs{y_i - c}$ 的最优常数预测 $c^*$ 是这组数的\textbf{样本中位数}（而不是均值）；（2）写出 $L_1$-GBDT 第 $m$ 轮的伪残差 $r_{im}$ 表达式，并解释为何在拟合回归树 $h_m(x)$ 确定叶区域 $R_{jm}$ 之后，标准 $L_1$-GBDT 会把每个叶子的输出值重新替换为 $\operatorname{median}_{i \in R_{jm}}(y_i - F_{m-1}(x_i))$！
+  \exHint{第 (1) 问可利用第 2 章的次梯度最优性条件 $0 \in \partial_c \sum_i \abs{y_i - c}$，即满足 $y_i > c$ 的个数与 $y_i < c$ 的个数平衡。}
+
+  \item \textbf{随机森林特征子采样相关性极限分析}：在定理~\ref{thm:rf-variance} 的模型假设下，假设把候选特征数从 $m_{\text{try}} = d$ 缩减到 $m_{\text{try}} = \sqrt{d}$ 时，单棵树的方差从 $\sigma^2$ 略升至 $1.25\sigma^2$，但任意两棵树之间的成对相关系数从 $\rho_0 = 0.60$ 降至 $\rho_1 = 0.25$。（1）计算在 $M \to \infty$ 极限下，特征子采样使集成方差降低了百分之多少？（2）求出随机森林（$m_{\text{try}}=\sqrt{d}$）开始严格优于纯 Bagging（$m_{\text{try}}=d$）的最小树数阈值 $M_{\min}$。
+  \exHint{直接代入式~\eqref{eq:rf-var-formula}，解不等式 $1.25(\rho_1 + (1-\rho_1)/M) < \rho_0 + (1-\rho_0)/M$。}
+\end{enumerate}
+
+\exTier{D 层：编程实现与实验验证}{复现 OOB 评估与 GBDT 深度/学习率调参相图}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{手写随机森林袋外（OOB）验证器}：在代码~\ref{lst:trees-ensemble} 与 \texttt{code/\allowbreak vol4\_experiments.py} 的 5 维非线性回归数据集上，扩展随机森林训练循环：对每棵自助树记录未被抽中的袋外样本掩码 \texttt{oob\_mask}，累计每个训练样本仅由其袋外树给出的预测均值，并计算 $M = 10, 20, 40, 60$ 时的 OOB MSE。验证：（1）每个样本被用作 OOB 的树数占比收敛在 $36.8\%$ 附近；（2）OOB MSE（注意加回真实标签噪声方差 $\sigma^2 = 0.49$）与独立测试集含噪 MSE 的相对偏差在 $10\%$ 以内。
+  \exHint{可用 \texttt{in\_bag = np.bincount(b\_idx, minlength=N\_tr) > 0} 一行得到 \texttt{oob\_mask = \textasciitilde in\_bag}，只对至少有 1 棵 OOB 树的样本计算均方误差。}
+
+  \item \textbf{GBDT 过拟合警报与早停（Early Stopping）实验}：复用 \texttt{exp5\_trees\_rf\_gbdt} 的数据，将 GBDT 的迭代轮数拉长至 $M = 250$，比较两组超参数：（A）浅树慢步长（$\text{max\_depth}=3,\ \eta=0.05$）；（B）深树快步长（$\text{max\_depth}=6,\ \eta=0.30$）。分别打印两者的训练 MSE 与测试 MSE 曲线，观察（B）组在多少轮之后测试误差掉头上升（过拟合），并实现一个基于 20\% 留出验证集的早停策略（连续 15 轮验证 MSE 不降即停）。
+  \exHint{注意观察（B）组训练 MSE 迅速逼近 $0$ 而测试 MSE 反弹超过 $1.0$ 的拐点，体会“浅树 + 小学习率”为何是 GBDT 的黄金法则。}
+\end{enumerate}

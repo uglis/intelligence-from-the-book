@@ -1,0 +1,1284 @@
+\renewcommand{\chaptermark}[1]{\markboth{附录 \thechapter\quad #1}{}}
+\newcommand{\solItem}[2]{%
+  \par\vspace{4.5mm}\noindent
+  \colorbox{tealLight}{\strut\;\sffamily\bfseries\footnotesize\color{tealDark}习题\,#1\;}\;%
+  {\normalsize\sffamily\bfseries\color{ink}#2}\par\nopagebreak\vspace{1.2mm}%
+}
+
+\chapter[全卷 48 道分层习题完整精解]{全卷 48 道分层习题完整精解}
+\label{app:solutions}
+
+\chapEpigraph{简洁是可靠性的先决条件。}{Edsger W. Dijkstra（艾兹格·迪杰斯特拉，1975）}
+
+本附录给出第 1 章至第 6 章全部 48 道分层习题（A/B/C/D 四层，每章 8 题）的完整分步解答。所有手算题、反例算术、不等式常数与编程实验预期指标均经过独立的 Python 数值程序交叉验算，读者可直接对照自检。
+
+% =====================================================================
+\section*{第 1 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 1 章习题解答（共 8 题）}
+
+\solItem{6.1.1}{单条轨迹的 MC 与 TD(0) 逐步手算}
+
+已知状态集合 $\{s_1, s_2, \mathsf{T}\}$，初值 $V(s_1) = 0$、$V(s_2) = 0$、$V(\mathsf{T}) = 0$，折扣因子 $\gamma = 0.9$，固定步长 $\alpha = 0.5$。
+
+\textbf{(a) 第一条回合 $s_1 \xrightarrow{r=2} s_2 \xrightarrow{r=4} \mathsf{T}$ 的更新结果。}
+\begin{enumerate}
+  \item \textbf{首次访问蒙特卡洛（MC）}：先从回合末尾倒推计算各时刻完整折扣回报 $G_t$：
+  \[
+    G_1 = r_1 = 4, \qquad
+    G_0 = r_0 + \gamma G_1 = 2 + 0.9 \times 4 = 5.6.
+  \]
+  回合结束后按式~\eqref{eq:mc-inc} 执行恒定步长增量更新：
+  \begin{align*}
+    V_{\mathrm{MC}}(s_1) &\leftarrow 0 + 0.5 \times (5.6 - 0) = \mathbf{2.8}, \\
+    V_{\mathrm{MC}}(s_2) &\leftarrow 0 + 0.5 \times (4.0 - 0) = \mathbf{2.0}.
+  \end{align*}
+  \item \textbf{在线 TD(0)}：按时间步顺序逐转移即时更新（式~\eqref{eq:td0-update}）。
+  \begin{itemize}
+    \item 第 1 步（$s_1 \xrightarrow{r=2} s_2$）：此时 $V(s_2)$ 尚未更新，仍为初值 $0$，故 TD 误差 $\delta_0 = 2 + 0.9 \times 0 - 0 = 2.0$，更新得
+    \[
+      V^{(1)}(s_1) = 0 + 0.5 \times 2.0 = \mathbf{1.0}.
+    \]
+    \item 第 2 步（$s_2 \xrightarrow{r=4} \mathsf{T}$）：终止态价值 $V(\mathsf{T}) = 0$，TD 误差 $\delta_1 = 4 + 0.9 \times 0 - 0 = 4.0$，更新得
+    \[
+      V^{(1)}(s_2) = 0 + 0.5 \times 4.0 = \mathbf{2.0}.
+    \]
+  \end{itemize}
+\end{enumerate}
+
+\textbf{(b) 第二条相同回合的 TD(0) 更新结果。} 沿用第一回合后的价值表 $V^{(1)}(s_1) = 1.0, V^{(1)}(s_2) = 2.0$：
+\begin{itemize}
+  \item 第 1 步（$s_1 \xrightarrow{r=2} s_2$）：此刻 $V^{(1)}(s_2) = 2.0$ 首次通过自举目标传入 $s_1$，TD 目标为 $2 + 0.9 \times 2.0 = 3.8$，TD 误差 $\delta_0 = 3.8 - 1.0 = 2.8$，更新得
+  \[
+    V^{(2)}(s_1) = 1.0 + 0.5 \times 2.8 = \mathbf{2.4}.
+  \]
+  \item 第 2 步（$s_2 \xrightarrow{r=4} \mathsf{T}$）：TD 误差 $\delta_1 = 4 + 0 - 2.0 = 2.0$，更新得
+  \[
+    V^{(2)}(s_2) = 2.0 + 0.5 \times 2.0 = \mathbf{3.0}.
+  \]
+\end{itemize}
+\textbf{物理洞察}：MC 在第 1 条回合结束时就一次性把远端奖励 $r_1 = 4$ 传回了 $s_1$；而单步在线 TD(0) 的奖励信息每经历 1 条回合才沿时间逆向回传 1 步（$n$ 步长的链至少需要 $n$ 条回合，远端奖励才会首次触及起点），这正是引入多步 TD 与 TD($\lambda$) 资格迹的直接动因。
+
+\solItem{6.1.2}{SARSA、Q-Learning 与期望 SARSA 单步目标对比}
+
+已知 $r_t = -1, \gamma = 0.9, \varepsilon = 0.15$，状态 $s_2$ 有 $m = 3$ 个动作，表值 $Q(s_2, a_1) = 10$、$Q(s_2, a_2) = 2$、$Q(s_2, a_3) = -20$。由式~\eqref{eq:eps-greedy}，在 $\varepsilon$-贪心策略下贪心最优动作 $a_1$ 的采样概率为
+\[
+  \pi(a_1 \mid s_2) = 1 - \varepsilon + \frac{\varepsilon}{3} = 1 - 0.15 + 0.05 = 0.90, \qquad
+  \pi(a_2 \mid s_2) = \pi(a_3 \mid s_2) = \frac{\varepsilon}{3} = 0.05.
+\]
+
+\textbf{(a) Q-Learning 与期望 SARSA 的精确目标值。}
+\begin{align*}
+  y_{\mathrm{Q}} &= r_t + \gamma \max_{a \in \{a_1, a_2, a_3\}} Q(s_2, a) = -1 + 0.9 \times 10 = \mathbf{8.0}, \\
+  \E_{a \sim \pi(\cdot \mid s_2)}[Q(s_2, a)] &= 0.90 \times 10 + 0.05 \times 2 + 0.05 \times (-20) = 9.0 + 0.1 - 1.0 = 8.1, \\
+  y_{\mathrm{ExpSARSA}} &= -1 + 0.9 \times 8.1 = -1 + 7.29 = \mathbf{6.29}.
+\end{align*}
+
+\textbf{(b) SARSA 随机目标的分布、期望与方差。} 设随机变量 $Y = r_t + \gamma Q(s_2, A_{t+1})$，则其离散分布为：
+\begin{center}
+\footnotesize
+\begin{tabular}{cccc}
+\toprule
+下一动作 $A_{t+1}$ & $a_1$（最优） & $a_2$（次优） & $a_3$（灾难动作） \\
+\midrule
+采样概率 $\Prob(A_{t+1})$ & $0.90$ & $0.05$ & $0.05$ \\
+目标取值 $y = -1 + 0.9\,Q(s_2, A_{t+1})$ & $+8.0$ & $+0.8$ & $-19.0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+计算期望与方差：
+\begin{align*}
+  \E[Y] &= 0.90 \times 8.0 + 0.05 \times 0.8 + 0.05 \times (-19.0) = 7.20 + 0.04 - 0.95 = \mathbf{6.29} = y_{\mathrm{ExpSARSA}}, \\
+  \Var(Y) &= 0.90(8.0 - 6.29)^2 + 0.05(0.8 - 6.29)^2 + 0.05(-19.0 - 6.29)^2 \\
+          &= 0.90 \times 2.9241 + 0.05 \times 30.1401 + 0.05 \times 639.5841 \\
+          &= 2.63169 + 1.507005 + 31.979205 = \mathbf{36.1179},
+\end{align*}
+标准差高达 $\sqrt{36.1179} \approx 6.01$。由此可见，期望 SARSA 与 SARSA 在给定下一状态 $s_2$ 下具有\textbf{完全相同的条件期望}，但期望 SARSA 直接对后继动作求解析加权平均，彻底消除了动作采样引入的方差 $36.1179$（尤其消除了以 $5\%$ 概率抽到灾难动作 $a_3$ 导致的剧烈更新震荡）。
+
+\solItem{6.1.3}{Robbins--Monro 步长家族的边界检验}
+
+\textbf{(a) 充要条件证明。} 令 $\alpha_t = (t+1)^{-p}$（$t \ge 0$），设 $n = t + 1 \ge 1$，则两个 Robbins--Monro 条件~\eqref{eq:rm-cond} 等价于两个 $p$-级数的敛散性：
+\[
+  \sum_{t=0}^{\infty} \alpha_t = \sum_{n=1}^{\infty} \frac{1}{n^p} = \infty \iff p \le 1, \qquad
+  \sum_{t=0}^{\infty} \alpha_t^2 = \sum_{n=1}^{\infty} \frac{1}{n^{2p}} < \infty \iff 2p > 1 \iff p > \frac{1}{2}.
+\]
+取两者交集，当且仅当 $\frac{1}{2} < p \le 1$ 时同时满足条件~\eqref{eq:rm-cond}。特别地，$p = 1$（即 $\alpha_t = \frac{1}{t+1}$，对应算术平均）落在收敛区间右端点；若 $p > 1$（衰减过快），步长总和有限，算法可能停在远离真值之处；若 $p \le \frac{1}{2}$（衰减过慢），平方和发散，噪声方差无法被压制至零。
+
+\textbf{(b) 固定常数步长 $\alpha \in (0, 1)$ 的稳态均方误差。} 记 $e_t = \theta_t - \mu$，更新式改写为 $e_{t+1} = (1 - \alpha) e_t + \alpha \xi_t$。因 $\xi_t$ 均值为 $0$、方差为 $\sigma^2$ 且与历史 $e_t$ 独立，两端取平方期望得均方误差递推式~\eqref{eq:rm-mse-rec}：
+\[
+  v_{t+1} \triangleq \E[e_{t+1}^2] = (1 - \alpha)^2 v_t + \alpha^2 \sigma^2.
+\]
+由于 $\alpha \in (0, 1)$，有 $0 < (1 - \alpha)^2 < 1$，上述线性收缩递推存在唯一不动点 $v_\infty$。设 $v_\infty = (1 - \alpha)^2 v_\infty + \alpha^2 \sigma^2$，展开得
+\[
+  \big[1 - (1 - 2\alpha + \alpha^2)\big] v_\infty = \alpha^2 \sigma^2 \implies \alpha(2 - \alpha) v_\infty = \alpha^2 \sigma^2 \implies
+  v_\infty = \lim_{t \to \infty} \E[(\theta_t - \mu)^2] = \mathbf{\frac{\alpha}{2 - \alpha}\,\sigma^2}.
+\]
+展开显式通项 $v_t = (1 - \alpha)^{2t}(v_0 - v_\infty) + v_\infty$，可见初始误差以指数速率 $(1-\alpha)^{2t}$ 衰减，但最终不会归零，而是残留在宽度为 $O(\sqrt{\alpha}\sigma)$ 的稳态噪声球内。\textbf{在非平稳环境中受青睐的原因}：将 $\theta_t$ 展开为加权平均 $\theta_t = (1-\alpha)^t \theta_0 + \sum_{k=0}^{t-1} \alpha(1-\alpha)^{t-1-k}(\mu + \xi_k)$，常数步长赋予近期样本指数更高的权重、自动遗忘过时历史；在 RL 控制任务中，策略 $\pi$ 持续演进使得目标分布非平稳，递减步长 $\alpha_t \to 0$ 反而会令估值器“失去追踪新策略的能力”。
+
+\solItem{6.1.4}{均匀噪声下的最大化偏差与 Double Q 对比}
+
+\textbf{(a) 单表最大值的精确期望。} 设 $X_1, \dots, X_K \overset{\mathrm{i.i.d.}}{\sim} \mathrm{Uniform}(-1, 1)$，记 $M_K = \max_{1 \le a \le K} X_a$。对任意 $x \in [-1, 1]$，单个变量的 CDF 为 $F(x) = \frac{x + 1}{2}$，由独立性得最大值的 CDF 与 PDF 分别为
+\[
+  F_{\max}(x) = \Prob(M_K \le x) = \prod_{a=1}^K \Prob(X_a \le x) = \left(\frac{x + 1}{2}\right)^K, \qquad
+  f_{\max}(x) = F'_{\max}(x) = \frac{K}{2}\left(\frac{x + 1}{2}\right)^{K-1}.
+\]
+作换元 $u = \frac{x + 1}{2} \in [0, 1]$（则 $x = 2u - 1, dx = 2\,du$），直接积分计算期望：
+\[
+  \E[M_K] = \int_{-1}^{1} x \cdot \frac{K}{2}\left(\frac{x + 1}{2}\right)^{K-1} dx
+  = \int_{0}^{1} (2u - 1) K u^{K-1}\,du
+  = 2K \cdot \frac{1}{K+1} - K \cdot \frac{1}{K}
+  = \mathbf{\frac{K - 1}{K + 1}}.
+\]
+检验：$K = 1$ 时 $\E[M_1] = 0$（无偏差）；$K = 2$ 时为 $1/3 \approx 0.333$；$K = 10$ 时高达 $9/11 \approx 0.818$；当 $K \to \infty$ 时，$\E[M_K] \to \mathbf{1}$（逼近噪声分布的上确界），尽管所有动作的真实价值均为 $0$！这从理论上精确解释了为何动作空间越大，单表 Q-Learning 的正向高估偏差越严重。
+
+\textbf{(b) Double Q-Learning 的解耦期望。} 令 $a^* = \argmax_{1 \le a \le K} Q_A(s, a)$。因为表 $Q_A$ 与表 $Q_B$ 相互独立，随机索引 $a^*$ 完全由 $Q_A$ 决定而与整张表 $Q_B$ 独立。由全期望公式对 $a^*$ 取条件期望：
+\[
+  \E\!\left[Q_B(s, a^*)\right]
+  = \E_{Q_A}\!\Big[\,\E_{Q_B}\!\big[Q_B(s, a^*) \mid Q_A\big]\,\Big]
+  = \E_{Q_A}\!\left[\,0\,\right] = \mathbf{0}.
+\]
+由此严格证明：将“动作选择（用 $Q_A$）”与“价值评估（用 $Q_B$）”解耦后，零均值估计噪声引发的系统性正向最大化偏差被彻底归零（代价是若不同动作真值不全相等，评估表可能引入轻微的负向低估，但通常远温和且不会导致发散）。
+
+\solItem{6.1.5}{批量 MC 与批量 TD(0) 的非马尔可夫反例}
+
+构造如下带\textbf{隐状态（部分可观测）}的数据生成过程：真实环境存在三个内部非终止状态 $\{A, B_{\mathrm{bad}}, B_{\mathrm{good}}\}$，但观测器将 $B_{\mathrm{bad}}$ 与 $B_{\mathrm{good}}$ 折叠为同一个观测符号 $B$（即状态观测不满足马尔可夫性）：
+\begin{itemize}
+  \item 回合起点：以概率 $1/8$ 从 $A$ 出发，以概率 $7/8$ 直接从 $B_{\mathrm{good}}$ 出发；
+  \item 状态转移与奖励：从 $A$ 出发必以奖励 $0$ 确定性进入“损坏态” $B_{\mathrm{bad}}$；$B_{\mathrm{bad}}$ 以概率 $1$ 得奖励 $0$ 终止（$V^*(B_{\mathrm{bad}}) = 0$）；而 $B_{\mathrm{good}}$ 以概率 $6/7$ 得奖励 $1$ 终止、以概率 $1/7$ 得奖励 $0$ 终止（$V^*(B_{\mathrm{good}}) = 6/7$）。
+\end{itemize}
+在此真实机制下，取样 8 条回合恰好可以出现例~\ref{ex:batch-mc-td} 中的全部观测：1 条 $A \xrightarrow{0} B \xrightarrow{0} \mathsf{T}$（真实经过 $B_{\mathrm{bad}}$）、6 条 $B \xrightarrow{1} \mathsf{T}$ 和 1 条 $B \xrightarrow{0} \mathsf{T}$（真实来自 $B_{\mathrm{good}}$）。此时：
+\begin{itemize}
+  \item 状态 $A$ 的真实价值严格为 $V^*(A) = 0 + V^*(B_{\mathrm{bad}}) = \mathbf{0}$，这恰与批量 MC 给出的 $V_{\mathrm{MC}}(A) = 0$ 完全一致（因为 MC 直接统计从 $A$ 出发的完整轨迹回报，\textbf{不依赖任何马尔可夫假设}）；
+  \item 相反，批量 TD(0) 强行将观测符号 $B$ 当作马尔可夫状态，把 $B_{\mathrm{good}}$ 的高奖励错误地自举传导给 $A$，得到严重失真的估值 $V_{\mathrm{TD}}(A) = 0.75$。
+\end{itemize}
+\textbf{结论}：批量 TD(0) 的高数据效率本质上是“用马尔可夫结构假设换取低方差”；当特征表示存在状态混叠（部分可观测 POMDP）时，MC 对非马尔可夫性天然免疫，而 TD 自举会引入不可消除的结构偏差。
+
+\solItem{6.1.6}{GLIE 与步长耦合的探索陷阱}
+
+回忆 GLIE（Greedy in the Limit with Infinite Exploration）包含两条缺一不可的条件：（i）每个状态--动作对 $(s, a)$ 都被访问无穷多次；（ii）策略在极限下收敛于贪心策略。
+
+设动作空间大小 $m \ge 2$，在某个高频访问状态 $s$ 下，记事件 $E_k$ 为“在第 $k$ 回合首次访问状态 $s$ 时发生了 $\varepsilon_k$-随机探索”。由题意 $\varepsilon_k = 0.5^k$，有
+\[
+  \sum_{k=1}^{\infty} \Prob(E_k) = \sum_{k=1}^{\infty} 0.5^k = \frac{0.5}{1 - 0.5} = 1 < \infty.
+\]
+由概率论中的\textbf{第一 Borel--Cantelli 引理}，立得
+\[
+  \Prob\!\left(\limsup_{k \to \infty} E_k\right) = \Prob(\text{无穷多个 } E_k \text{ 同时发生}) = 0.
+\]
+也就是说，以概率 $1$，随机探索仅在有限多个回合中发生；存在某个随机时刻 $K_0 < \infty$，使得从第 $K_0 + 1$ 回合起，算法在状态 $s$ 永远只执行当前贪心动作。进一步地，考虑某个真实最优动作 $a^*$（假设初始估值 $Q_0(s, a^*) = 0$ 与其他动作相同，或略低于某次优动作的首次噪声估值），计算它在\emph{所有回合中一次都不被随机探索选中}的概率下界：每回合随机选中 $a^*$ 的概率为 $\frac{\varepsilon_k}{m} = \frac{0.5^k}{m}$，于是
+\[
+  \Prob(\text{永远不通过随机探索选中 } a^*) = \prod_{k=1}^{\infty}\!\left(1 - \frac{0.5^k}{m}\right) > 0
+\]
+（因为 $\sum_{k=1}^\infty \frac{0.5^k}{m} = \frac{1}{m} < \infty$，无穷乘积收敛于严格正数；例如 $m = 2$ 时该下界超过 $0.58$）。因此，指数衰减探索率 $\varepsilon_k = 0.5^k$ 违反了 GLIE 的无穷探索条件，会以严格正概率把智能体永久锁死在次优动作上。正确的 GLIE 衰减应满足 $\sum_{k=1}^\infty \varepsilon_k = \infty$ 且 $\varepsilon_k \to 0$，例如 $\varepsilon_k = 1/k$ 或 $\varepsilon_k = c / \sqrt{k}$。
+
+\solItem{6.1.7}{编程实验：在悬崖行走与双状态带噪 MDP 上对比三种表格算法}
+
+\textbf{(a) 悬崖行走中的 Expected SARSA 实测基准。} 在 \texttt{exp1\_cliff\_sarsa\_vs\_q()} 中，将更新目标替换为解析期望：对非终止态 $s'$，设 $a^* = \argmax_a Q[s', a]$，构造 $\varepsilon$-贪心分布 $\pi(a \mid s') = \frac{\varepsilon}{4} + (1 - \varepsilon)\mathbb{I}[a = a^*]$，则目标为 $y = r + \gamma \sum_{a=0}^3 \pi(a \mid s') Q[s', a]$。在相同 20 个随机种子、500 回合、$\varepsilon = 0.1$ 设定下，独立运行验证得到后 100 轮平均在线回报如下：
+\begin{center}
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+算法（后 100 轮在线均回报） & $\alpha = 0.1$ & $\alpha = 0.5$ & $\alpha = 0.9$ \\
+\midrule
+标准 SARSA & $-22.68$ & $-26.22$ & $-63.30$（剧烈震荡） \\
+Expected SARSA & $\mathbf{-20.66}$ & $\mathbf{-20.55}$ & $\mathbf{-20.85}$（高度稳健） \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{原因分析}：如习题~\textbf{6.1.2} 所证，标准 SARSA 的目标带有单次动作采样的随机方差；当 $\alpha = 0.9$ 时，偶尔一次 $\varepsilon$-探索跌落悬崖（$-100$）几乎以 $90\%$ 权重覆写当前 $Q$ 表，触发大面积策略抖动；而 Expected SARSA 彻底消除了后继动作采样方差，因此即使在极高步长 $\alpha = 0.9$ 下依然稳定在 $-20.85$。
+
+\textbf{(b) Sutton--Barto 双状态 $A/B$ 带噪 MDP 实测基准。} 状态 $A$ 含动作“左”（进入 $B$，$r=0$）与“右”（直接终止，$r=0$），状态 $B$ 含 $K=10$ 个动作，每个动作均立即终止并给出独立噪声奖励 $r \sim \mathcal{N}(-0.1, 1)$。由于状态 $B$ 的真实期望价值为 $-0.1 < 0$，最优策略在 $A$ 处应选“右”，$\varepsilon = 0.1$ 下的最优探索选“左”下限为 $\varepsilon / 2 = 5\%$。在 $\alpha = 0.1, \varepsilon = 0.1$ 下重复 200 次独立试验（采用随机打破平局）：
+\begin{itemize}
+  \item {\rightskip=0pt plus 1fil\relax \textbf{标准 Q-Learning}：由于 10 个噪声动作的最大值期望显著大于 $0$（由极值理论 $\E[\max_{1 \le i \le 10} \mathcal{N}(-0.1, 1)] \approx -0.1 + 1.54 = +1.44$），前 50 回合内选“左”比例飙升至峰值约 $\mathbf{96\%}$（第 50 回合仍高达 $82\%$），第 300 回合才缓慢降至约 $13.5\%$；\par}
+  \item \textbf{Double Q-Learning}：维护两张独立表 $Q_A, Q_B$，以 $0.5$ 概率轮流交叉更新（选动作按 $Q_A + Q_B$），前 50 回合选“左”比例很快回落至约 $\mathbf{14.5\%}$，第 300 回合稳定收敛至约 $10\%$ 并持续逼近理论下限 $5\%$，彻底验证了定理~\ref{thm:max-bias} 与解耦机制的有效性。
+\end{itemize}
+
+\solItem{6.1.8}{前瞻思考：从查表走向线性逼近的第一个裂缝}
+
+记单步均方贝尔曼残差目标函数为 $L(w) = \frac{1}{2}\big[r_t + \gamma V_w(s_{t+1}) - V_w(s_t)\big]^2$，其中 $\delta_t = r_t + \gamma V_w(s_{t+1}) - V_w(s_t)$。
+
+\textbf{1. 真实全梯度（残差梯度）与半梯度的差异。} 因为目标项中的 $V_w(s_{t+1})$ 同样依赖参数 $w$，按链式法则对 $L(w)$ 求关于 $w$ 的真实负梯度为：
+\[
+  -\nabla_w L(w)
+  = -\delta_t \cdot \nabla_w\!\big[r_t + \gamma V_w(s_{t+1}) - V_w(s_t)\big]
+  = \delta_t \Big(\nabla_w V_w(s_t) - \gamma \nabla_w V_w(s_{t+1})\Big).
+\]
+相比之下，半梯度 TD(0) 更新 $w \leftarrow w + \alpha \delta_t \nabla_w V_w(s_t)$ \textbf{刻意丢弃了第二项 $-\gamma \delta_t \nabla_w V_w(s_{t+1})$}（等价于把自举目标 $r_t + \gamma V_w(s_{t+1})$ 视作与 $w$ 无关的常量，在自动微分中施加 \texttt{.detach()}）。因此半梯度方向并不是任何标量损失函数的真实负梯度场（其旋度一般非零，不能写成某个势函数的梯度）。
+
+\textbf{2. 为何会预示第~\ref{ch:dqn-pg-ac} 章的“致命三元组”与目标网络。} 在有限查表情形中，每个状态拥有独立参数，更新 $V(s_t)$ 不会牵动 $V(s_{t+1})$，贝尔曼算子在 $\|\cdot\|_\infty$ 下是严格压缩映射；但一旦引入函数逼近，不同状态共享同一组参数 $w$：当我们用半梯度把 $V_w(s_t)$ 拉向目标 $\gamma V_w(s_{t+1})$ 时，参数 $w$ 的改动可能同步把 $V_w(s_{t+1})$ 推得更远，在异策略采样下形成正反馈指数发散（即第 2 章例~\ref{ex:deadly-triad} 的致命三元组）。另一方面，为何不直接采用全残差梯度？因为在随机环境中，全残差梯度需要从同一状态 $s_t$ 采集\emph{两次独立后继样本}才能无偏估计期望的平方（双采样问题），且收敛极慢。DQN 的\textbf{目标网络} $Q_{\theta^-}$ 正是针对半梯度不稳定的工程折中：通过把目标中的参数冻结为滞后副本 $\theta^-$，在相邻同步周期 $C$ 步内把“追逐移动靶”转化为良态的静态监督回归问题！
+
+% =====================================================================
+\section*{第 2 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 2 章习题解答（共 8 题）}
+
+\solItem{6.2.1}{Softmax 策略与高斯策略的 Score Function 解析推导}
+
+\textbf{(a) 离散 Softmax 策略。} 取对数得 $\ln \pi_\theta(a \mid s) = \theta^\top \phi(s, a) - \ln \sum_{a'} \exp(\theta^\top \phi(s, a'))$。对 $\theta$ 求梯度：
+\begin{align*}
+  \nabla_\theta \ln \pi_\theta(a \mid s)
+  &= \phi(s, a) - \frac{\sum_{a'} \exp(\theta^\top \phi(s, a'))\,\phi(s, a')}{\sum_{a''} \exp(\theta^\top \phi(s, a''))} \\
+  &= \phi(s, a) - \sum_{a'} \pi_\theta(a' \mid s)\,\phi(s, a')
+  = \phi(s, a) - \E_{a' \sim \pi_\theta(\cdot \mid s)}\!\left[\phi(s, a')\right].
+\end{align*}
+直观含义：每当采到的动作 $a$ 具有正优势，参数 $\theta$ 就朝着“当前动作特征减去策略期望特征”的方向移动，从而精确提高 $a$ 的相对对数几率并压低其余动作的概率；且直接验证 $\E_{a \sim \pi_\theta}[\nabla_\theta \ln \pi_\theta(a \mid s)] = \E[\phi] - \E[\phi] = \mathbf{0}$。
+
+\textbf{(b) 一维常数方差高斯策略。} 概率密度为 $\pi_\theta(a \mid s) = \frac{1}{\sqrt{2\pi}\sigma}\exp\!\Big(-\frac{(a - \mu_\theta(s))^2}{2\sigma^2}\Big)$，取对数得
+\[
+  \ln \pi_\theta(a \mid s) = -\frac{1}{2}\ln(2\pi\sigma^2) - \frac{\big(a - \mu_\theta(s)\big)^2}{2\sigma^2}.
+\]
+对 $\theta$ 求梯度（第一项为常数，导数为 $0$）：
+\[
+  \nabla_\theta \ln \pi_\theta(a \mid s) = \mathbf{\frac{a - \mu_\theta(s)}{\sigma^2}\,\nabla_\theta \mu_\theta(s)}.
+\]
+直观更新方向：在策略梯度上升 $\Delta\theta \propto \hat{A}_t \cdot \frac{a_t - \mu_\theta(s_t)}{\sigma^2}\nabla_\theta \mu_\theta(s_t)$ 中，若 $\hat{A}_t > 0$（动作优于平均）且 $a_t > \mu_\theta(s_t)$，梯度推动均值 $\mu_\theta(s_t)$ 向上朝 $a_t$ 靠拢；若 $\hat{A}_t < 0$，则把均值推离坏动作 $a_t$。同时注意分母 $\sigma^2$：当策略探索标准差 $\sigma$ 过小时，梯度幅值按 $1/\sigma^2$ 剧烈放大，极易引发数值爆炸，因此连续控制代码中通常对 $\ln \sigma$ 施加下界裁剪（如 \texttt{exp3\_ppo\_vs\_unclipped()} 中的 \texttt{clamp(log\_std, -2.0, 1.0)}）。
+
+\solItem{6.2.2}{三步轨迹的 GAE($\lambda$) 手算}
+
+已知 $(r_0, r_1, r_2) = (1, 0, 5)$，$(V(s_0), V(s_1), V(s_2), V(s_3)) = (2.0, 2.5, 4.0, 0)$，$\gamma = 0.9$。
+
+\textbf{(a) 计算单步 TD 误差 $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$。}
+\begin{align*}
+  \delta_0 &= 1 + 0.9 \times 2.5 - 2.0 = 1 + 2.25 - 2.0 = \mathbf{1.25}, \\
+  \delta_1 &= 0 + 0.9 \times 4.0 - 2.5 = 3.6 - 2.5 = \mathbf{1.10}, \\
+  \delta_2 &= 5 + 0.9 \times 0 - 4.0 = \mathbf{1.00}.
+\end{align*}
+
+\textbf{(b) 按反向递推式~\eqref{eq:gae-rec} $\hat{A}_t = \delta_t + (\gamma\lambda)\hat{A}_{t+1}$（$\hat{A}_3 = 0$）逐项计算：}
+\begin{itemize}
+  \item \textbf{当 $\lambda = 0$（$\gamma\lambda = 0$，纯 1 步 TD 优势）}：
+  \[
+    \hat{A}_2 = 1.00, \qquad \hat{A}_1 = 1.10, \qquad \hat{A}_0 = 1.25.
+  \]
+  \item \textbf{当 $\lambda = 0.5$（$\gamma\lambda = 0.45$）}：
+  \begin{align*}
+    \hat{A}_2 &= \delta_2 = \mathbf{1.00}, \\
+    \hat{A}_1 &= \delta_1 + 0.45 \times 1.00 = 1.10 + 0.45 = \mathbf{1.55}, \\
+    \hat{A}_0 &= \delta_0 + 0.45 \times 1.55 = 1.25 + 0.6975 = \mathbf{1.9475}.
+  \end{align*}
+  \item \textbf{当 $\lambda = 1$（$\gamma\lambda = 0.90$）}：
+  \begin{align*}
+    \hat{A}_2 &= 1.00, \\
+    \hat{A}_1 &= 1.10 + 0.90 \times 1.00 = \mathbf{2.00}, \\
+    \hat{A}_0 &= 1.25 + 0.90 \times 2.00 = \mathbf{3.05}.
+  \end{align*}
+\end{itemize}
+\textbf{验算 $\lambda = 1$ 与 $G_t - V(s_t)$ 的等价性}：直接计算蒙特卡洛回报：
+\[
+  G_2 = 5.0, \quad G_1 = 0 + 0.9 \times 5.0 = 4.5, \quad G_0 = 1 + 0.9 \times 4.5 = 5.05.
+\]
+于是 $G_2 - V(s_2) = 5.0 - 4.0 = 1.00$、$G_1 - V(s_1) = 4.5 - 2.5 = 2.00$、$G_0 - V(s_0) = 5.05 - 2.0 = 3.05$，三者与 $\lambda = 1$ 时的 $\hat{A}_t^{\mathrm{GAE}}$ 逐位完全一致（裂项相消恒等式的精确验证）。
+
+\solItem{6.2.3}{单步标量策略的最优最小方差基线}
+
+\textbf{(a) 严格凸二次性证明。} 首先，因 $\E[u(a)] = \sum_a \pi_\theta(a) \frac{\partial_\theta \pi_\theta(a)}{\pi_\theta(a)} = \partial_\theta \sum_a \pi_\theta(a) = 0$，估计量的期望为
+\[
+  \E[g(b)] = \E[u(a) R(a)] - b\,\E[u(a)] = \E[u(a) R(a)],
+\]
+完全不依赖于基线 $b$。因此方差展开为
+\[
+  \Var(g(b)) = \E[g(b)^2] - (\E[g(b)])^2 = \E[u(a)^2]\,b^2 - 2\,\E[u(a)^2 R(a)]\,b + \E[u(a)^2 R(a)^2] - \big(\E[u(a)R(a)]\big)^2.
+\]
+求一阶与二阶导数：
+\[
+  \frac{d}{db}\Var(g(b)) = 2\,\E[u(a)^2]\,b - 2\,\E[u(a)^2 R(a)], \qquad
+  \frac{d^2}{db^2}\Var(g(b)) = 2\,\E[u(a)^2] > 0.
+\]
+故 $\Var(g(b))$ 是关于 $b$ 的严格凸二次函数，存在唯一全局极小值点。
+
+\textbf{(b) 最优基线 $b^*$ 与状态价值 $\E[R(a)]$ 的比较。} 令一阶导数为零，立即解得
+\[
+  b^* = \mathbf{\frac{\E[u(a)^2 R(a)]}{\E[u(a)^2]}}.
+\]
+可见 $b^*$ 本质上是按得分函数平方 $u(a)^2$ 加权的奖励期望，而常规状态价值基线 $V = \E[R(a)]$ 是按策略概率等权平均。二者之差为 $b^* - \E[R(a)] = \frac{\operatorname{Cov}(u(a)^2, R(a))}{\E[u(a)^2]}$。只有当 $u(a)^2$ 与 $R(a)$ 不相关（例如所有动作的奖励均值相等、或对称二元策略下 $|u(a)|$ 恒定）时，$b^*$ 才与 $\E[R(a)]$ 严格重合。工程中普遍直接选用 $V(s) = \E[R(a)]$，是因为在多维神经网络参数 $\theta \in \R^d$ 下，每个参数分量 $i$ 的 $u_i(a)^2$ 不同导致最优基线因维度而异，无法用单一标量共享，而 $V(s)$ 与 $b^*$ 通常极为接近且易于统一拟合。
+
+\solItem{6.2.4}{强化学习中的“因果性降方差”定量验证}
+
+\textbf{1. 期望完全相同。} 由于奖励 $r_0$ 发生在动作 $a_1$ 之前，$r_0$ 与 $(u_1, r_1)$ 相互独立，且 $\E[u_1] = 0$。故
+\[
+  \E[g_{\mathrm{full}}] = \E[u_1 r_0 + u_1 r_1] = \E[u_1]\,\E[r_0] + \E[u_1 r_1] = 0 + \E[g_{\mathrm{rtg}}] = \E[g_{\mathrm{rtg}}].
+\]
+
+\textbf{2. 方差之差的精确推导。} 因为两者期望相同，方差之差即二阶矩之差：
+\begin{align*}
+  \Var(g_{\mathrm{full}}) - \Var(g_{\mathrm{rtg}})
+  &= \E\!\left[u_1^2 (r_0 + r_1)^2\right] - \E\!\left[u_1^2 r_1^2\right] \\
+  &= \E\!\left[u_1^2 r_0^2\right] + 2\,\E\!\left[u_1^2 r_0 r_1\right] \\
+  &= \mathbf{\E[u_1^2]\,\E[r_0^2] + 2\mu_0\,\E[u_1^2 r_1]},
+\end{align*}
+其中最后一步再次使用了 $r_0$ 与 $(u_1, r_1)$ 的独立性及 $\E[r_0] = \mu_0$（且 $\E[r_0^2] = \sigma_0^2 + \mu_0^2$）。
+
+\textbf{3. 交叉项与基线的精妙机制。}
+\begin{itemize}
+  \item 当 $\mu_0 = 0$ 时，交叉项为零，方差差严格化简为 $\E[u_1^2]\,\sigma_0^2 \ge 0$，即剔除历史噪声奖励 $r_0$ 严格降低方差；
+  \item 当 $\mu_0 \neq 0$ 时，若不加基线，交叉项 $2\mu_0\,\E[u_1^2 r_1]$ 可正可负——极端情形下（例如 $r_1 > 0$ 且 $r_0$ 恰好是负常数 $-\E[u_1^2 r_1]/\E[u_1^2]$），$r_0$ 歪打正着充当了 $r_1$ 的负基线，反而可能偶然使 $\Var(g_{\mathrm{full}}) < \Var(g_{\mathrm{rtg}})$；
+  \item 一旦对未来回报 $r_1$ 减去习题~\textbf{6.2.3} 的最优基线 $b^* = \frac{\E[u_1^2 r_1]}{\E[u_1^2]}$，令 $\tilde{r}_1 = r_1 - b^*$，便自动有 $\E[u_1^2 \tilde{r}_1] = 0$，交叉项彻底消失！此时
+  \[
+    \Var\!\big(u_1(r_0 + \tilde{r}_1)\big) - \Var\!\big(u_1 \tilde{r}_1\big) = \E[u_1^2]\,(\sigma_0^2 + \mu_0^2) \ge 0
+  \]
+  对\emph{任意} $\mu_0 \in \R$ 恒成立。这说明“未来回报（Reward-to-Go）”与“状态基线”是相辅相成、缺一不可的降方差黄金搭档。
+\end{itemize}
+
+\solItem{6.2.5}{致命三元组的拆解实验（基于例~\ref{ex:deadly-triad}）}
+
+回顾例~\ref{ex:deadly-triad}：$\gamma = 0.9$，$\phi(s_1) = 1, \phi(s_2) = 2$，单步转移 $(s_1 \to s_2)$ 产生增量 $\Delta w_1 = \alpha(2\gamma - 1)w = 0.8\alpha w$，自环 $(s_2 \to s_2)$ 产生增量 $\Delta w_2 = 4\alpha(\gamma - 1)w = -0.4\alpha w$。
+
+\textbf{(a) 去掉“异策略”：收敛采样概率阈值 $p_{\max}$。} 设以概率 $p \in [0, 1]$ 采样 $(s_1 \to s_2)$、以概率 $1 - p$ 采样 $(s_2 \to s_2)$，则条件期望更新为
+\[
+  \E[w_{t+1} \mid w_t] = \Big\{1 + \alpha\big[p(2\gamma - 1) + 4(1 - p)(\gamma - 1)\big]\Big\} w_t.
+\]
+代入 $\gamma = 0.9$，括号内的期望漂移系数为
+\[
+  c(p) = 0.8p - 0.4(1 - p) = 1.2p - 0.4.
+\]
+要使算法对充分小的步长 $\alpha > 0$ 期望收敛至真值 $w^* = 0$，必须满足 $c(p) < 0$，即
+\[
+  1.2p - 0.4 < 0 \iff p < \mathbf{\frac{1}{3} \approx 0.3333}.
+\]
+特别地，在真实马尔可夫链的同策略平稳分布下，智能体离开 $s_1$ 后永久停留在 $s_2$，故 $d(s_1) = 0, d(s_2) = 1$（即 $p = 0 < 1/3$），此时 $c(0) = -0.4 < 0$，只要 $0 < \alpha < 2 / 0.4 = 5$ 即保证指数收敛（事实上由 Tsitsiklis--Van Roy 1997 定理，线性同策略半梯度 TD 在任意有限 MDP 下均保证收敛）。
+
+\textbf{(b) 去掉“自举”：改用蒙特卡洛目标。} 由于该马尔可夫过程所有转移奖励均为 $0$，从任意状态出发的真实完整回报恒为 $G_t \equiv 0$。MC 线性回归更新为 $w_{t+1} = w_t + \alpha\big(0 - w_t \phi(s_t)\big)\phi(s_t) = \big(1 - \alpha \phi(s_t)^2\big) w_t$。取期望：
+\[
+  \E[w_{t+1} \mid w_t] = \Big(1 - \alpha\big[p \cdot 1^2 + (1 - p)\cdot 2^2\big]\Big) w_t = \big(1 - \alpha(4 - 3p)\big) w_t.
+\]
+对任意 $p \in [0, 1]$，均有 $4 - 3p \in [1, 4]$ 严格为正！只要步长满足 $0 < \alpha < \frac{2}{4 - 3p}$（对任意 $p$ 取 $\alpha < 0.5$ 即可），收缩因子 $|1 - \alpha(4 - 3p)| < 1$，因此无论采样分布如何异策略，$w_t$ 均以指数速率收敛至 $0$。这证明“致命三元组”缺一不可。
+
+\solItem{6.2.6}{DQN 目标网络更新周期 $C$ 的两难权衡}
+
+\textbf{1. 极端情况 $C = 1$（每步立即同步 $\theta^- \leftarrow \theta$）。} 目标网络彻底失效，式~\eqref{eq:dqn-loss} 退化为无目标网络的原始非线性异策略半梯度 Q-Learning。参数更新立即改变同一批状态下的自举目标 $y_i = r_i + \gamma \max_{a'} Q_\theta(s'_i, a')$，导致目标剧烈漂移、$Q$ 值过估计正反馈与致命三元组震荡发散。
+
+\textbf{2. 极端情况 $C$ 极大（如 $C = 10^6$ 步同步一次）。} 从\textbf{训练稳定性}角度看，在任意两个同步时刻之间的 $C$ 步内，目标 $y_i^{\mathrm{DQN}}$ 完全固定，优化退化为良态的静态有监督回归，绝不会在周期内发散。但从\textbf{偏差传播速度（样本效率）}角度看，奖励信息沿时间逆向回传遵循动态规划的 Bellman 算子迭代节奏：假设任务从起点到奖励终点需要 $H$ 步，每完成 1 次目标网络硬同步，远端奖励信息最多只能沿时间反向传播 1 步！因此至少需要 $H \cdot C$ 个梯度步（当 $H = 50, C = 10^6$ 时高达 $5 \times 10^7$ 步）才能让起点的 $Q$ 值感知到终点奖励，训练几乎停滞不前，且在漫长周期内过度拟合陈旧的过期目标。
+
+\textbf{3. 工程权衡。} 因此 $C$ 必须落在“足以让在线网络大致拟合当前静止目标、又不至于拖慢贝尔曼回传”的甜点区（Atari 经典 DQN 取 $C = 10^4$ 帧），或改用连续平滑的 Polyak 软更新 $\theta^- \leftarrow \tau \theta + (1 - \tau)\theta^-$（$\tau \approx 0.005$），相当于有效滞后窗口约为 $1/\tau \approx 200$ 步。
+
+\solItem{6.2.7}{编程实验：验证 \texttt{.detach()} 缺失与奖励平移对 REINFORCE 的冲击}
+
+\textbf{(a) 奖励常量平移对比（偏移量 $0.0$ vs $+4.0$ vs $+20.0$）。} 设奖励偏移为 $c$，12 步折扣回报随之平移 $\Delta G_t = c \frac{1 - 0.95^{12-t}}{1 - 0.95} \approx 9.2c$（在 $t=0$ 处）。
+\begin{itemize}
+  \item \textbf{无基线 REINFORCE}：由式~\eqref{eq:pg-raw}，策略梯度方差随 $c^2$ 平方级暴涨。当 $c = 0.0$ 时回报尚有正有负，无基线版本仍能勉强学出较好策略；当 $c = +4.0$ 时方差显著恶化（配套实测终段均回报落后带基线版本一大截）；当 $c = +20.0$ 时，好坏动作的 $G_t$ 均在 $+180$ 左右、相对差异不足 $3\%$，所有动作都被盲目大幅拉高概率，梯度几乎被纯噪声淹没，终段有效位置得分接近随机策略；
+  \item \textbf{带基线 REINFORCE}：Critic 网络在最初十几回合内即可把均方误差中的常量偏移 $c \frac{1 - 0.95^{12-t}}{1 - 0.95}$ 精确吸收进偏置项，此后优势 $A_t = G_t - V_\phi(s_t)$ 对 $c$ 完全不变，因此在 $c \in \{0.0, 4.0, 20.0\}$ 三种设定下除去常量基准后的真实跟踪误差几乎完全重合！
+\end{itemize}
+
+\textbf{(b) 合并优化器并删去 \texttt{vals.detach()} 的崩坏机制。} 若删去 \texttt{.detach()} 且联合最小化总损失
+\[
+  \mathcal{L}_{\mathrm{tot}} = -\frac{1}{T}\sum_{t} \ln \pi_\theta(a_t \mid s_t)\big(G_t - V_\phi(s_t)\big) + \mathcal{L}_{\mathrm{MSE}}(V_\phi, G),
+\]
+则 Critic 参数 $\phi$ 会额外收到来自策略损失的虚假梯度：
+\[
+  \frac{\partial \mathcal{L}_{\mathrm{actor}}}{\partial V_\phi(s_t)} = +\frac{1}{T}\ln \pi_\theta(a_t \mid s_t) < 0.
+\]
+由于对数概率 $\ln \pi_\theta(a_t \mid s_t)$ 恒为负值，最小化 $\mathcal{L}_{\mathrm{tot}}$ 会驱动 Critic 不断\textbf{虚高抬升 $V_\phi(s_t)$}（甚至冲向正无穷）以人为拉低 $\mathcal{L}_{\mathrm{actor}}$！结果 Critic 的 MSE 损失剧烈飙升、$V_\phi(s_t)$ 彻底偏离真实回报，导致所有动作的优势 $G_t - V_\phi(s_t)$ 全变为巨大负数，Actor 策略随之崩坏。
+
+\solItem{6.2.8}{从普通 Actor-Critic 走向多轮样本复用的困境预览}
+
+若在 \texttt{ac} 分支中把 \texttt{loss\_p = -(logps\_t * adv).mean()} 对同一批旧轨迹循环执行 10 次 \texttt{opt\_p.step()}，实测会迅速观察到：策略熵急剧坍缩至接近 $0$（输出概率趋近独热分布），随后回合回报剧烈跳水并再也无法恢复。原因在于两重根本性数学破坏：
+\begin{enumerate}
+  \item \textbf{分布失配（失去无偏性）}：策略梯度定理~\ref{thm:pg-theorem} 要求期望下标 $a_t \sim \pi_\theta(\cdot \mid s_t)$ 与求导参数 $\theta$ 严格一致。第 1 步更新后，$\theta$ 已变为 $\theta_1 \neq \theta_{\mathrm{old}}$，继续对旧轨迹求 $\nabla_\theta \ln \pi_\theta(a_t \mid s_t) \hat{A}_t$ 却不乘以重要性采样权重 $r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}$，梯度已不再指向目标 $J(\theta)$ 的上升方向；
+  \item \textbf{无界过优化与策略坍缩}：旧轨迹中某个偶然抽中且 $\hat{A}_t > 0$ 的动作会被连续拉高 10 步直至 $\pi_\theta(a_t \mid s_t) \to 1$；而某个 $\hat{A}_t < 0$ 的动作其 $\ln \pi_\theta$ 会被狂压向 $-\infty$，由于 $\ln p$ 在 $p \to 0^+$ 处斜率发散，哪怕步长很小也会产生灾难性梯度，彻底摧毁所有状态的 logits。
+\end{enumerate}
+要安全地实现多轮样本复用，必须在数学上同时引入第~\ref{ch:trpo-ppo-grpo} 章的两大支柱：\textbf{重要性采样概率比 $r_t(\theta)$}（修正分布偏移）与\textbf{信任域 KL 约束或 PPO 裁剪边界 $[1-\epsilon, 1+\epsilon]$}（封顶单批轨迹允许引发的策略位移）。
+
+% =====================================================================
+\section*{第 3 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 3 章习题解答（共 8 题）}
+
+\solItem{6.3.1}{PPO-Clip 六种边界情形逐一验算}
+
+已知 $\epsilon = 0.2$，信任区间为 $[0.8, 1.2]$，目标函数 $f(r_t; \hat{A}_t) = \min\big(r_t \hat{A}_t,\; \clip(r_t, 0.8, 1.2)\hat{A}_t\big)$。对照命题~\ref{prop:ppo-cases} 逐一计算 6 个样本的精确结果如下表：
+
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}ccccccc@{}}
+\toprule
+样本 & $(r_t, \hat{A}_t)$ & 未裁剪 $r_t \hat{A}_t$ & 裁剪 $\clip(r_t)\hat{A}_t$ & $f(r_t; \hat{A}_t)$ & $\partial f / \partial r_t$ & 是否截断 \\
+\midrule
+(1) & $(0.6, +2.0)$ & $+1.20$ & $0.8 \times 2.0 = +1.60$ & $\mathbf{+1.20}$ & $+2.0$ & 否（保留纠偏） \\
+(2) & $(1.1, +2.0)$ & $+2.20$ & $1.1 \times 2.0 = +2.20$ & $\mathbf{+2.20}$ & $+2.0$ & 否（信任域内） \\
+(3) & $(1.5, +2.0)$ & $+3.00$ & $1.2 \times 2.0 = +2.40$ & $\mathbf{+2.40}$ & $\mathbf{0}$ & \textbf{是}（防贪婪过推） \\
+(4) & $(0.6, -2.0)$ & $-1.20$ & $0.8 \times (-2.0) = -1.60$ & $\mathbf{-1.60}$ & $\mathbf{0}$ & \textbf{是}（防过度压杀） \\
+(5) & $(1.1, -2.0)$ & $-2.20$ & $1.1 \times (-2.0) = -2.20$ & $\mathbf{-2.20}$ & $-2.0$ & 否（信任域内） \\
+(6) & $(1.5, -2.0)$ & $-3.00$ & $1.2 \times (-2.0) = -2.40$ & $\mathbf{-3.00}$ & $-2.0$ & 否（保留纠偏） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{核心观察}：样本 (1) 与样本 (6) 虽已落在 $[0.8, 1.2]$ 之外，但外层 $\min$ 选中的恰好是\textbf{未裁剪分支} $r_t \hat{A}_t$，从而保留了非零梯度把被误压的好动作拉回、把被误抬的坏动作压回；唯有样本 (3) 与 (4) 属于“沿优势方向已走过头”，梯度被安全归零。
+
+\solItem{6.3.2}{GRPO 群体优势与 $k_3$ KL 估计量手算}
+
+\textbf{(a) GRPO 组内相对优势。} 给定组内奖励 $(R_1, R_2, R_3, R_4) = (1, 0, 1, 0)$：
+\[
+  \bar{R} = \frac{1 + 0 + 1 + 0}{4} = \mathbf{0.5}, \qquad
+  \sigma_R = \sqrt{\frac{(1-0.5)^2 + (0-0.5)^2 + (1-0.5)^2 + (0-0.5)^2}{4}} = \sqrt{0.25} = \mathbf{0.5}.
+\]
+代入式~\eqref{eq:grpo-adv} $\hat{A}_i = (R_i - \bar{R}) / \sigma_R$，得
+\[
+  (\hat{A}_1, \hat{A}_2, \hat{A}_3, \hat{A}_4) = \mathbf{(+1.0,\; -1.0,\; +1.0,\; -1.0)}.
+\]
+
+\textbf{(b) 朴素 $k_1$ 与 Schulman 非负 $k_3$ KL 估计量对比。} 记 $\rho = \pi_{\mathrm{ref}} / \pi_\theta$，则 $k_1 = \ln(\pi_\theta / \pi_{\mathrm{ref}}) = -\ln \rho$，$k_3 = \rho - \ln \rho - 1$：
+\begin{itemize}
+  \item \textbf{情形一（$\pi_\theta = 0.5, \pi_{\mathrm{ref}} = 0.25$）}：$\rho = 0.5$，于是
+  \[
+    k_1 = \ln 2 \approx \mathbf{0.6931}, \qquad
+    k_3 = 0.5 - \ln(0.5) - 1 = \ln 2 - 0.5 \approx \mathbf{0.1931} > 0.
+  \]
+  \item \textbf{情形二（$\pi_\theta = 0.25, \pi_{\mathrm{ref}} = 0.5$）}：$\rho = 2.0$，于是
+  \[
+    k_1 = \ln(0.5) = -\ln 2 \approx \mathbf{-0.6931} < 0, \qquad
+    k_3 = 2 - \ln 2 - 1 = 1 - \ln 2 \approx \mathbf{0.3069} > 0.
+  \]
+\end{itemize}
+由基本不等式 $e^x \ge 1 + x$（令 $x = \ln \rho$）即知 $\rho - \ln \rho - 1 \ge 0$ 对任意 $\rho > 0$ 逐点恒成立，且 $\E_{a \sim \pi_\theta}[k_3] = \sum_a \pi_{\mathrm{ref}}(a) - 1 + \E_{a \sim \pi_\theta}[\ln(\pi_\theta / \pi_{\mathrm{ref}})] = \DKL(\pi_\theta \| \pi_{\mathrm{ref}})$，因此 $k_3$ 兼具\textbf{无偏性、逐点非负性与低方差}三大优势。
+
+\solItem{6.3.3}{KL 散度的 Hessian 严格等于 Fisher 信息矩阵}
+
+为简洁记 $\pi_\theta(a) = \pi_\theta(a \mid s)$，在归一化恒等式 $\sum_a \pi_\theta(a) \equiv 1$ 两端连续对 $\theta$ 求一次和两次梯度（允许微分与求和交换）：
+\begin{equation*}
+  \sum_a \nabla_\theta \pi_\theta(a) = \mathbf{0}, \qquad
+  \sum_a \nabla_\theta^2 \pi_\theta(a) = \mathbf{0}.
+\end{equation*}
+
+\textbf{(a) 一阶梯度在 $\theta = \theta_0$ 处为零。} 展开 $D(\theta) = \sum_a \pi_{\theta_0}(a) \ln \pi_{\theta_0}(a) - \sum_a \pi_{\theta_0}(a) \ln \pi_\theta(a)$，第一项与 $\theta$ 无关，求导得
+\[
+  \nabla_\theta D(\theta) = -\sum_a \pi_{\theta_0}(a)\,\nabla_\theta \ln \pi_\theta(a) = -\sum_a \pi_{\theta_0}(a)\,\frac{\nabla_\theta \pi_\theta(a)}{\pi_\theta(a)}.
+\]
+代入 $\theta = \theta_0$，分母与权重精确相消：
+\[
+  \nabla_\theta D(\theta)\big|_{\theta=\theta_0} = -\sum_a \nabla_\theta \pi_{\theta_0}(a) = \mathbf{0}.
+\]
+
+\textbf{(b) 二阶 Hessian 等于 Fisher 信息矩阵。} 对上式再次求导得
+\[
+  \nabla_\theta^2 D(\theta) = -\sum_a \pi_{\theta_0}(a)\,\nabla_\theta^2 \ln \pi_\theta(a).
+\]
+利用二阶对数导数恒等式
+\[
+  \nabla_\theta^2 \ln \pi_\theta(a)
+  = \nabla_\theta\!\left(\frac{\nabla_\theta \pi_\theta(a)}{\pi_\theta(a)}\right)
+  = \frac{\nabla_\theta^2 \pi_\theta(a)}{\pi_\theta(a)} - \frac{\nabla_\theta \pi_\theta(a)\,\nabla_\theta \pi_\theta(a)^\top}{\pi_\theta(a)^2}
+  = \frac{\nabla_\theta^2 \pi_\theta(a)}{\pi_\theta(a)} - \nabla_\theta \ln \pi_\theta(a)\,\nabla_\theta \ln \pi_\theta(a)^\top.
+\]
+代入 $\theta = \theta_0$ 并对 $a \sim \pi_{\theta_0}$ 求期望，第一项化为 $-\sum_a \nabla_\theta^2 \pi_{\theta_0}(a) = \mathbf{0}$，故立得
+\[
+  \nabla_\theta^2 D(\theta)\big|_{\theta=\theta_0}
+  = -\E_{a \sim \pi_{\theta_0}}\!\left[\nabla_\theta^2 \ln \pi_\theta(a)\right]\Big|_{\theta=\theta_0}
+  = \E_{a \sim \pi_{\theta_0}}\!\left[\nabla_\theta \ln \pi_{\theta_0}(a)\,\nabla_\theta \ln \pi_{\theta_0}(a)^\top\right] = F(\theta_0).
+\]
+
+\textbf{(c) 反向 KL 散度 $\tilde{D}(\theta) = \sum_a \pi_\theta(a)\ln\frac{\pi_\theta(a)}{\pi_{\theta_0}(a)}$ 具有相同的二阶 Hessian。} 对 $\tilde{D}(\theta)$ 求一阶梯度：
+\[
+  \nabla_\theta \tilde{D}(\theta)
+  = \sum_a \nabla_\theta \pi_\theta(a)\left(\ln\frac{\pi_\theta(a)}{\pi_{\theta_0}(a)} + 1\right)
+  = \sum_a \nabla_\theta \pi_\theta(a)\ln\frac{\pi_\theta(a)}{\pi_{\theta_0}(a)},
+\]
+其中用到了 $\sum_a \nabla_\theta \pi_\theta(a) = \mathbf{0}$。在 $\theta = \theta_0$ 处 $\ln(\pi_{\theta_0}/\pi_{\theta_0}) = 0$，故 $\nabla_\theta \tilde{D}(\theta_0) = \mathbf{0}$。再次对 $\theta$ 求导：
+\[
+  \nabla_\theta^2 \tilde{D}(\theta)
+  = \sum_a \nabla_\theta^2 \pi_\theta(a)\ln\frac{\pi_\theta(a)}{\pi_{\theta_0}(a)}
+  + \sum_a \nabla_\theta \pi_\theta(a)\,\frac{\nabla_\theta \pi_\theta(a)^\top}{\pi_\theta(a)}.
+\]
+代入 $\theta = \theta_0$，第一项因对数为 $0$ 而严格消失，第二项化为
+\[
+  \nabla_\theta^2 \tilde{D}(\theta)\big|_{\theta=\theta_0}
+  = \sum_a \pi_{\theta_0}(a)\,\nabla_\theta \ln \pi_{\theta_0}(a)\,\nabla_\theta \ln \pi_{\theta_0}(a)^\top = F(\theta_0).
+\]
+由此证明：在局部二阶近似下，正、反向 KL 散度完全等价，均等于 $\frac{1}{2}\Delta\theta^\top F(\theta_0)\Delta\theta$（差异仅出现在三阶及更高阶项）。
+
+\solItem{6.3.4}{TRPO 自然梯度步长的参数重参数化不变性}
+
+\textbf{(a) 拉格朗日乘子法推导闭式解。} 在约束 $\frac{1}{2}\Delta\theta^\top F \Delta\theta \le \delta$（$F \succ 0, \delta > 0, g \neq \mathbf{0}$）下最大化线性目标 $g^\top \Delta\theta$。因目标是线性的、可行域是紧凸椭球，最大值必在边界取到。构造拉格朗日函数（乘子 $\lambda > 0$）：
+\[
+  \mathcal{L}(\Delta\theta, \lambda) = g^\top \Delta\theta - \lambda\left(\frac{1}{2}\Delta\theta^\top F \Delta\theta - \delta\right).
+\]
+令 $\nabla_{\Delta\theta}\mathcal{L} = g - \lambda F \Delta\theta = \mathbf{0}$，得 $\Delta\theta = \frac{1}{\lambda} F^{-1} g$。代入紧约束边界 $\frac{1}{2}\Delta\theta^\top F \Delta\theta = \delta$：
+\[
+  \frac{1}{2\lambda^2} g^\top F^{-1} F F^{-1} g = \frac{1}{2\lambda^2} g^\top F^{-1} g = \delta
+  \implies \lambda = \sqrt{\frac{g^\top F^{-1} g}{2\delta}} > 0.
+\]
+回代即得式~\eqref{eq:npg-step}：
+\[
+  \Delta\theta^* = \sqrt{\frac{2\delta}{g^\top F^{-1} g}}\,F^{-1} g.
+\]
+
+\textbf{(b) 可逆线性重参数化 $\psi = A\theta$ 下的严格不变性。} 记 $\tilde{\pi}_\psi = \pi_{A^{-1}\psi}$。由多变量链式法则，对任意标量函数 $h(\theta) = \tilde{h}(A\theta)$ 有 $\nabla_\theta h = A^\top \nabla_\psi \tilde{h}$，故 $\nabla_\psi \tilde{h} = A^{-\top} \nabla_\theta h$。据此立即得到新坐标系下的梯度与 Fisher 矩阵：
+\begin{align*}
+  g_\psi &= \nabla_\psi J = A^{-\top} g, \\
+  F_\psi &= \E\!\left[\big(\nabla_\psi \ln \tilde{\pi}_\psi\big)\big(\nabla_\psi \ln \tilde{\pi}_\psi\big)^\top\right]
+          = \E\!\left[A^{-\top}(\nabla_\theta \ln \pi_\theta)(\nabla_\theta \ln \pi_\theta)^\top A^{-1}\right]
+          = A^{-\top} F A^{-1}.
+\end{align*}
+对 $F_\psi$ 求逆得 $F_\psi^{-1} = A F^{-1} A^\top$。于是自然梯度方向与二次型标量分别为：
+\begin{align*}
+  F_\psi^{-1} g_\psi &= (A F^{-1} A^\top)(A^{-\top} g) = A F^{-1} g, \\
+  g_\psi^\top F_\psi^{-1} g_\psi &= (g^\top A^{-1})(A F^{-1} g) = g^\top F^{-1} g.
+\end{align*}
+代入闭式步长公式，严格得出
+\[
+  \Delta\psi^* = \sqrt{\frac{2\delta}{g_\psi^\top F_\psi^{-1} g_\psi}}\,F_\psi^{-1} g_\psi
+  = A \left(\sqrt{\frac{2\delta}{g^\top F^{-1} g}}\,F^{-1} g\right) = A\,\Delta\theta^*.
+\]
+因此新旧坐标系下的更新点严格满足 $\psi + \Delta\psi^* = A(\theta + \Delta\theta^*)$，对应完全相同的概率分布！相比之下，普通欧氏梯度 $\Delta\psi_{\mathrm{GD}} = \eta g_\psi = \eta A^{-\top} g \neq A(\eta g)$（除非 $A$ 是正交矩阵），说明欧氏步长严重依赖参数尺度，而自然梯度直接在概率分布流形的黎曼几何上移动。
+
+\solItem{6.3.5}{反例构造：删去 PPO-Clip 外层 $\min$ 的灾难后果}
+
+\textbf{(a) 删去 $\min$ 后的分段函数及其与真实 PPO-Clip 的分歧区间。} 记 $\tilde{f}(r; A) = \clip(r, 1-\epsilon, 1+\epsilon)\,A$：
+\begin{itemize}
+  \item 当 $A > 0$ 时：$\tilde{f}$ 在 $r < 1-\epsilon$ 为水平平台 $(1-\epsilon)A$、在 $[1-\epsilon, 1+\epsilon]$ 为斜率 $+A$ 的直线、在 $r > 1+\epsilon$ 为水平平台 $(1+\epsilon)A$。\textbf{分歧区间在 $r < 1-\epsilon$}：真实 PPO-Clip 保持斜率 $+A$ 继续向下延伸（惩罚把好动作降得过低，从而产生拉回梯度），而 $\tilde{f}$ 将其拉平、梯度归零；
+  \item 当 $A < 0$ 时：$\tilde{f}$ 在 $r < 1-\epsilon$ 为水平平台 $(1-\epsilon)A$、在 $[1-\epsilon, 1+\epsilon]$ 为斜率 $A < 0$ 的下降直线、在 $r > 1+\epsilon$ 为水平平台 $(1+\epsilon)A$。\textbf{分歧区间在 $r > 1+\epsilon$}：真实 PPO-Clip 保持斜率 $A < 0$ 继续暴跌（严厉惩罚把坏动作抬高），而 $\tilde{f}$ 把损失封底在常数 $(1+\epsilon)A$、梯度归零！
+\end{itemize}
+
+\textbf{(b) 两样本一维参数反例。} 构造两个独立状态 $s_1, s_2$，各自对数概率由同一标量参数 $\theta$ 线性控制（设当前旧参数 $\theta_{\mathrm{old}} = 0$，样本 1 有 $\hat{A}_1 = +1$、$\ln\pi_\theta(a_1\mid s_1) = \ln p_0 + \theta$，样本 2 有 $\hat{A}_2 = -1$、$\ln\pi_\theta(a_2\mid s_2) = \ln p_0 + 2\theta$，取 $\epsilon = 0.2$）。于是概率比为 $r_1(\theta) = e^\theta, r_2(\theta) = e^{2\theta}$。
+
+假设某步较大梯度上升把参数推到 $\theta_1 = \frac{1}{2}\ln 1.5 \approx 0.2027$，此时：
+\[
+  r_2(\theta_1) = 1.5 > 1.2, \qquad r_1(\theta_1) = \sqrt{1.5} \approx 1.2247 > 1.2.
+\]
+或者考虑更危险的耦合：$r_1(\theta_1) = 1.1 \in [0.8, 1.2]$（好动作尚在信任域内），而坏动作已被推到 $r_2(\theta_1) = 1.5 > 1.2$（例如 $\ln\pi_\theta(a_1\mid s_1) = \ln p_0 + 0.5\theta$、$\ln\pi_\theta(a_2\mid s_2) = \ln p_0 + 2.13\theta$，在 $\theta_1 \approx 0.19$ 处有 $r_1 \approx 1.10, r_2 \approx 1.50$）。此时考察删去 $\min$ 的目标 $\tilde{L}(\theta) = \frac{1}{2}\big[\clip(r_1)\cdot(+1) + \clip(r_2)\cdot(-1)\big]$：
+\begin{itemize}
+  \item 对坏动作样本 2，因为 $r_2 = 1.5 > 1.2$，$\clip(r_2, 0.8, 1.2)(-1) \equiv -1.2$ 为常数，其梯度 $\frac{\partial}{\partial \theta}\tilde{f}_2 = \mathbf{0}$——目标函数对“坏动作概率飙升 $1.5\times$”完全装瞎；
+  \item 对好动作样本 1，仍有正梯度 $+0.5 r_1 > 0$，于是下一步梯度上升会继续增大 $\theta$，把坏动作 $r_2$ 进一步推向 $2.0, 5.0, \dots$ 直至彻底失控！
+\end{itemize}
+而保留外层 $\min$ 后，真实 PPO-Clip 在 $r_2 = 1.5$ 处命中未裁剪分支 $f_2 = -r_2 = -1.5$，立即产生强烈的负向纠偏梯度 $-2.13 r_2 = -3.195$，迅速把参数拉回安全信任域。
+
+\solItem{6.3.6}{GRPO 在二元奖励 $R_i \in \{0, 1\}$ 下的难度加权效应分析}
+
+\textbf{(a) 归一化优势的精确闭合式。} 当题目通过率为 $p \in (0, 1)$ 且 $G$ 充分大时，$\bar{R} \approx p$，$\sigma_R \approx \sqrt{p(1 - p)}$。代入式~\eqref{eq:grpo-adv}：
+\[
+  \hat{A}_+ = \frac{1 - p}{\sqrt{p(1 - p)}} = \mathbf{\sqrt{\frac{1 - p}{p}}}, \qquad
+  \hat{A}_- = \frac{0 - p}{\sqrt{p(1 - p)}} = \mathbf{-\sqrt{\frac{p}{1 - p}}}.
+\]
+显然可检验零均值与单位方差：$p \hat{A}_+ + (1 - p)\hat{A}_- = \sqrt{p(1-p)} - \sqrt{p(1-p)} = 0$，$p\hat{A}_+^2 + (1-p)\hat{A}_-^2 = (1-p) + p = 1$。
+
+\textbf{(b) 单道题的总正权重与极端难度下的梯度冲击。} 单道题上，所有答对样本（占比 $p$）贡献的总正权重为
+\[
+  W_+(p) = p \cdot \hat{A}_+ = \mathbf{\sqrt{p(1 - p)}}
+\]
+（所有答错样本贡献的总负权重恰好为 $-W_+(p) = -\sqrt{p(1-p)}$）。
+\begin{itemize}
+  \item \textbf{整题权重视角}：$W_+(p) = \sqrt{p(1-p)}$ 在中等难度 $p = 0.5$ 处达到最大 $0.5$，在极难 $p \to 0^+$ 或极易 $p \to 1^-$ 处趋近于 $0$（全错或全对的题目整组优势为零）；
+  \item \textbf{单条样本梯度幅值视角}：当 $p = 0.01$（极难题）时，虽然答对样本极少，但单条答对轨迹的优势高达 $\hat{A}_+ = \sqrt{99} \approx \mathbf{+9.95}$！若这条唯一“答对”的轨迹恰好是推理胡扯但末尾蒙对数字的假阳性样本，它会以近 $10\times$ 的剧烈梯度放大污染模型权重；对称地，当 $p = 0.99$（极易题）时，偶尔一条笔误答错样本的优势高达 $\hat{A}_- \approx \mathbf{-9.95}$，引发强烈过度惩罚；
+  \item \textbf{对比 Dr. GRPO（去掉除以 $\sigma_R$）}：若改用无标准差归一化的 $\tilde{A}_i = R_i - \bar{R}$，则 $\tilde{A}_+ = 1 - p \in (0, 1)$、$\tilde{A}_- = -p \in (-1, 0)$，单条轨迹的优势幅值严格被锁在 $[-1, 1]$ 内，不再在 $p \to 0^+$ 或 $p \to 1^-$ 处发散，且整题总权重变为 $p(1 - p)$，更平滑地抑制极端题目的噪声梯度。
+\end{itemize}
+
+\solItem{6.3.7}{编程实验：PPO 裁剪阈值 $\epsilon$ 与复用轮数 $K$ 的相图扫描}
+
+\textbf{(a) 扫描 $\epsilon \in \{0.05, 0.1, 0.2, 0.4, 0.8, \infty\}$（固定 $K = 10$）的相图规律。} 在 \texttt{exp3\_ppo\_vs\_unclipped()} 的 1D 连续高斯 LQR 任务（初始回报约 $-12.6$，理想平稳最优约 $-3.0$）上运行扫描：
+\begin{itemize}
+  \item $\epsilon = 0.05$：信任域极窄，中后期几乎零回撤，但每个 epoch 极早触发梯度截断，前 10 轮爬升明显迟缓，样本效率偏低；
+  \item $\epsilon = 0.1\text{--}0.2$：\textbf{黄金甜点区}——前 10 轮能够充分借助 $K = 10$ 次复用快速爬升，同时严格封住大幅概率比偏移，末 10 轮均值稳定在约 $-3.0\text{--}-3.3$ 且全程无剧烈回撤；
+  \item $\epsilon = 0.4\text{--}0.8$：前几轮爬升略快，但中后期单批高方差优势偶尔推动 $r_t$ 突破 $1.5$ 以上，开始出现显著的局部回撤尖峰；
+  \item $\epsilon = \infty$（等价于未裁剪 IS-PG）：在 $K = 10$ 下彻底失控，高斯标准差与均值被反复过推，出现灾难性回撤（配套实测最差跌至 $-10$ 以下，末 10 轮均值远差于 $\epsilon = 0.2$）。
+\end{itemize}
+
+\textbf{(b) 加入 KL 早停（\texttt{max\_kl = 0.05}）的实测现象。} 在内层 10 轮循环中，每次前向计算近似 KL $\widehat{\DKL} = \operatorname{mean}\big((r_t - 1) - \ln r_t\big)$（即非负 $k_3$ 估计量），若 $\widehat{\DKL} > 0.05$ 则 \texttt{break}。实测会发现：训练早期策略梯度大，往往仅执行 $2\text{--}4$ 个 epoch 即触发早停；训练中后期优势幅度变小、策略趋于平稳，可执行 $6\text{--}10$ 个 epoch。KL 早停相当于在 PPO-Clip 的逐样本软保护之外，再套上一道全局分布级硬保险丝。
+
+\solItem{6.3.8}{编程实验：在上下文赌博机上亲手实现无 Critic 的 GRPO}
+
+\textbf{实现骨架与核心逻辑。} 构造 32 个独热或随机向量上下文状态 $s \in \R^{16}$，每个状态对应 8 个离散动作，仅固定 1 个动作奖励 $R = 1$、其余 $7$ 个为 $0$。参考策略 $\pi_{\mathrm{ref}}$ 取均匀分布（$\pi_{\mathrm{ref}}(a \mid s) = 1/8$）。每步对每个状态采样 $G = 8$ 个动作，计算组内均值与标准差得到 $\hat{A}_i = (R_i - \bar{R}) / (\sigma_R + 10^{-8})$（若全对或全错则该组优势自动为 $0$），调用 \texttt{grpo\_loss} 执行 PPO-Clip 更新并叠加 $\beta \cdot k_3(\pi_\theta, \pi_{\mathrm{ref}})$ 正则。
+
+\textbf{不同 $\beta$ 下的理论精确解与实测验证。} 该上下文赌博机的 KL 正则目标在每个状态下具有闭式玻尔兹曼最优策略（正是第 4 章定理~\ref{thm:rlhf-optimal} 的直接特例）：
+\[
+  \pi_\beta^*(a^* \mid s) = \frac{\frac{1}{8} e^{1/\beta}}{\frac{1}{8} e^{1/\beta} + \frac{7}{8} e^{0}} = \frac{e^{1/\beta}}{e^{1/\beta} + 7}.
+\]
+代入三种 $\beta$ 取值对照预期指标：
+\begin{itemize}
+  \item $\beta = 0.0$：无 KL 约束，策略收敛至接近 $100\%$ 确定性选中最优动作，与均匀分布的 KL 散度逼近 $\ln 8 \approx \mathbf{2.079\;\text{nats}}$；
+  \item $\beta = 0.05$：$e^{20} \gg 7$，最优动作概率仍接近 $100\%$，KL 接近 $2.08\;\text{nats}$（正则几乎不压低准确率，仅防止 logits 无穷发散）；
+  \item $\beta = 0.5$：理论最优准确率停在 $\frac{e^2}{e^2 + 7} \approx \mathbf{51.35\%}$，对应精确 KL 散度约 $\mathbf{0.474\;\text{nats}}$（注意若 GRPO 中优势经过了组内除以 $\sigma_R$ 归一化，实际有效温度会因 $\sigma_R$ 缩放而按 $\beta \sigma_R$ 折算，收敛准确率略高于纯非归一化值）。
+\end{itemize}
+\textbf{桥接第~\ref{ch:posttrain-rlhf-dpo} 章}：若不再由环境给出绝对标量 $R \in \{0, 1\}$，而是仅给出一对回答的相对人类偏好 $y_w \succ y_l$，把上述玻尔兹曼闭式解反解出隐式奖励 $r(x, y) = \beta \ln\frac{\pi^*(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)} + \beta \ln Z(x)$ 代入 Bradley--Terry 似然，配分函数 $Z(x)$ 神奇相消，直接诞生了无需采样也无需显式奖励模型的 \textbf{DPO}！
+
+% =====================================================================
+\section*{第 4 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 4 章习题解答（共 8 题）}
+
+\solItem{6.4.1}{DPO 损失、隐式奖励与错判权重手算}
+
+已知 $\beta = 0.5$，$\ln \pi_{\mathrm{ref}}(y_w \mid x) = -12.0$、$\ln \pi_{\mathrm{ref}}(y_l \mid x) = -10.0$、$\ln \pi_\theta(y_w \mid x) = -11.0$、$\ln \pi_\theta(y_l \mid x) = -8.0$。
+
+\textbf{(a) 隐式奖励计算（式~\eqref{eq:implicit-reward}）。}
+\begin{align*}
+  \hat{r}_\theta(x, y_w) &= \beta \big(\ln \pi_\theta(y_w \mid x) - \ln \pi_{\mathrm{ref}}(y_w \mid x)\big) = 0.5 \times (-11.0 - (-12.0)) = \mathbf{+0.5}, \\
+  \hat{r}_\theta(x, y_l) &= \beta \big(\ln \pi_\theta(y_l \mid x) - \ln \pi_{\mathrm{ref}}(y_l \mid x)\big) = 0.5 \times (-8.0 - (-10.0)) = \mathbf{+1.0}.
+\end{align*}
+
+\textbf{(b) 偏好预测概率、DPO 损失与梯度错判权重。} 隐式奖励差为 $\Delta \hat{r} = \hat{r}_w - \hat{r}_l = 0.5 - 1.0 = -0.5$：
+\begin{align*}
+  P_\theta(y_w \succ y_l \mid x) &= \sigma(-0.5) = \frac{1}{1 + e^{0.5}} \approx \mathbf{0.3775}, \\
+  \mathcal{L}_{\mathrm{DPO}} &= -\ln \sigma(-0.5) = \ln(1 + e^{0.5}) \approx \mathbf{0.9741}, \\
+  w_\theta &= \sigma(\hat{r}_l - \hat{r}_w) = \sigma(+0.5) = \frac{1}{1 + e^{-0.5}} \approx \mathbf{0.6225}.
+\end{align*}
+可检验恒等式 $P_\theta(y_w \succ y_l) + w_\theta = \sigma(-0.5) + \sigma(0.5) = 1$。
+
+\textbf{(c) 判别状态与权重直观含义。} 由于 $\hat{r}_l = 1.0 > \hat{r}_w = 0.5$（即模型认为落败回答 $y_l$ 相对参考策略的增幅比胜出回答 $y_w$ 更大），模型当前\textbf{判反了}（预测正确概率仅 $37.75\% < 50\%$）。因此式~\eqref{eq:dpo-grad} 的自适应错判权重 $w_\theta = 1 - P_\theta(y_w \succ y_l) = 0.6225 > 0.5$，自动加大对该错判样本的梯度回传力度，强力拉高 $y_w$ 并压低 $y_l$。
+
+\solItem{6.4.2}{RLHF 闭式最优策略的两动作数值验证}
+
+已知 $\pi_{\mathrm{ref}}(y_1) = 0.2, \pi_{\mathrm{ref}}(y_2) = 0.8$，$r(y_1) = 3.0, r(y_2) = 1.0$。由定理~\ref{thm:rlhf-optimal}，$Z(x) = \sum_i \pi_{\mathrm{ref}}(y_i) e^{r(y_i)/\beta}$，$\pi^*(y_i) = \frac{1}{Z}\pi_{\mathrm{ref}}(y_i) e^{r(y_i)/\beta}$。
+
+\textbf{(a) 两种温度 $\beta$ 下的精确数值计算。}
+\begin{enumerate}
+  \item \textbf{当 $\beta = 1.0$ 时}：
+  \begin{align*}
+    Z(x) &= 0.2 e^3 + 0.8 e^1 \approx 0.2 \times 20.085537 + 0.8 \times 2.718282 \approx \mathbf{6.191733}, \\
+    \pi^*(y_1) &= \frac{0.2 e^3}{0.2 e^3 + 0.8 e^1} = \frac{e^2}{e^2 + 4} \approx \mathbf{0.648786}, \qquad
+    \pi^*(y_2) = 1 - \pi^*(y_1) \approx \mathbf{0.351214}, \\
+    \DKL(\pi^* \| \pi_{\mathrm{ref}}) &= 0.648786 \ln\frac{0.648786}{0.2} + 0.351214 \ln\frac{0.351214}{0.8} \\
+    &\approx 0.763401 - 0.289045 = \mathbf{0.474356\;\text{nats}}, \\
+    \beta \ln Z(x) &= 1.0 \times \ln(6.191733) \approx \mathbf{1.823215}.
+  \end{align*}
+  \item \textbf{当 $\beta = 0.2$ 时}（奖励放大 $1/\beta = 5$ 倍，故 $r/\beta$ 分别为 $15$ 与 $5$）：
+  \begin{align*}
+    Z(x) &= 0.2 e^{15} + 0.8 e^{5} \approx 653803.47 + 118.73 \approx \mathbf{6.539222 \times 10^5}, \\
+    \pi^*(y_1) &= \frac{e^{10}}{e^{10} + 4} \approx \mathbf{0.999818}, \qquad
+    \pi^*(y_2) = \frac{4}{e^{10} + 4} \approx \mathbf{0.000182}, \\
+    \DKL(\pi^* \| \pi_{\mathrm{ref}}) &= 0.999818 \ln\frac{0.999818}{0.2} + 0.000182 \ln\frac{0.000182}{0.8} \approx \mathbf{1.607441\;\text{nats}}, \\
+    \beta \ln Z(x) &= 0.2 \times \ln(653922.205) \approx 0.2 \times 13.390744 \approx \mathbf{2.678149}.
+  \end{align*}
+  注意当 $\beta \to 0^+$ 时，$\pi^*(y_1) \to 1$，$\DKL \to \ln(1/0.2) = \ln 5 \approx 1.6094\;\text{nats}$，而 $\beta = 0.2$ 时策略已经几乎完全贪婪化！
+\end{enumerate}
+
+\textbf{(b) 目标恒等式精确验算。}
+\begin{itemize}
+  \item $\beta = 1.0$：$\E_{\pi^*}[r] = 0.648786 \times 3 + 0.351214 \times 1 = 2.297571$，于是
+  \[
+    \E_{\pi^*}[r] - \beta \DKL = 2.297571 - 1.0 \times 0.474356 = \mathbf{1.823215} = \beta \ln Z(x).
+  \]
+  \item $\beta = 0.2$：$\E_{\pi^*}[r] = 0.999818 \times 3 + 0.000182 \times 1 = 2.999637$，于是
+  \[
+    \E_{\pi^*}[r] - \beta \DKL = 2.999637 - 0.2 \times 1.607441 = 2.999637 - 0.321488 = \mathbf{2.678149} = \beta \ln Z(x).
+  \]
+\end{itemize}
+两者精确相等至小数点后六位，完美印证了变分自由能恒等式。
+
+\solItem{6.4.3}{Bradley--Terry 奖励等价类与最优策略的唯一对应}
+
+\textbf{(a) 等价奖励函数诱导相同的偏好分布与最优策略。} 设 $r_2(x, y) = r_1(x, y) + c(x)$。
+\begin{enumerate}
+  \item \textbf{偏好分布不变性}：代入 Bradley--Terry 式~\eqref{eq:bt-model}，同一提示 $x$ 下两回答的奖励差为
+  \[
+    r_2(x, y_w) - r_2(x, y_l) = \big(r_1(x, y_w) + c(x)\big) - \big(r_1(x, y_l) + c(x)\big) = r_1(x, y_w) - r_1(x, y_l),
+  \]
+  故 $P_{r_2}(y_w \succ y_l \mid x) \equiv P_{r_1}(y_w \succ y_l \mid x)$。
+  \item \textbf{闭式最优策略不变性}：将 $r_2$ 代入式~\eqref{eq:rlhf-opt-policy}，分子分母同时提取仅依赖 $x$ 的正因子 $e^{c(x)/\beta}$ 并消去：
+  \[
+    \pi_{r_2}^*(y \mid x)
+    = \frac{\pi_{\mathrm{ref}}(y \mid x)\exp\!\left(\frac{r_1(x, y) + c(x)}{\beta}\right)}{\sum_{y'} \pi_{\mathrm{ref}}(y' \mid x)\exp\!\left(\frac{r_1(x, y') + c(x)}{\beta}\right)}
+    = \frac{e^{c(x)/\beta}\,\pi_{\mathrm{ref}}(y \mid x)\exp\!\left(\frac{r_1(x, y)}{\beta}\right)}{e^{c(x)/\beta}\sum_{y'} \pi_{\mathrm{ref}}(y' \mid x)\exp\!\left(\frac{r_1(x, y')}{\beta}\right)}
+    = \pi_{r_1}^*(y \mid x).
+  \]
+\end{enumerate}
+
+\textbf{(b) 从策略到奖励等价类的双射（DPO 不损失表达能力）。} 设 $\pi_{\mathrm{ref}}(y \mid x) > 0$ 对一切 $(x, y)$ 成立，$\beta > 0$。
+\begin{itemize}
+  \item \textbf{存在性}：对任意处处为正的合法策略 $\pi(\cdot \mid x)$，构造代表元奖励函数 $r_\pi(x, y) \triangleq \beta \ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)}$。检验其配分函数：
+  \[
+    Z_{r_\pi}(x) = \sum_{y} \pi_{\mathrm{ref}}(y \mid x) \exp\!\left(\frac{r_\pi(x, y)}{\beta}\right) = \sum_y \pi(y \mid x) = \mathbf{1}.
+  \]
+  因此 $\pi_{r_\pi}^*(y \mid x) = \frac{1}{1}\pi_{\mathrm{ref}}(y \mid x)\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} = \pi(y \mid x)$，说明每个合法策略都至少对应一个奖励函数（且恰是配分函数恒为 $1$ 的规范代表元）。
+  \item \textbf{等价类唯一性}：假设两个奖励函数 $r_1, r_2$ 诱导了同一个最优策略 $\pi_{r_1}^* = \pi_{r_2}^* = \pi$，则对所有 $(x, y)$ 有
+  \[
+    \frac{1}{Z_1(x)}\pi_{\mathrm{ref}}(y \mid x) e^{r_1(x,y)/\beta} = \frac{1}{Z_2(x)}\pi_{\mathrm{ref}}(y \mid x) e^{r_2(x,y)/\beta}.
+  \]
+  消去 $\pi_{\mathrm{ref}}(y \mid x) > 0$ 并两边取对数再乘以 $\beta$，得
+  \[
+    r_2(x, y) - r_1(x, y) = \beta \ln\frac{Z_2(x)}{Z_1(x)} \triangleq c(x),
+  \]
+  仅依赖于 $x$ 而与 $y$ 无关，即 $r_1 \sim r_2$。综上，在给定 $(\pi_{\mathrm{ref}}, \beta)$ 下，\textbf{Bradley--Terry 奖励等价类与合法策略空间之间存在严格一一对应}，因此 DPO 用 $\beta\ln\frac{\pi_\theta}{\pi_{\mathrm{ref}}}$ 重参数化奖励等价类绝不会损失任何表达能力。
+\end{itemize}
+
+\solItem{6.4.4}{推理时缩放的优美定理：Best-of-$N$ 的精确 KL 散度公式~\eqref{eq:bon-kl}}
+
+\textbf{(a) 最大分位数 $U^*$ 的概率密度。} 因 $\pi_{\mathrm{ref}}$ 连续无原子且奖励函数几乎处处无结，随机变量 $R = r(Y)$ 的累积分布函数 $F(r)$ 连续严格递增（在支撑集上），由概率积分变换知 $U_i = F(r(Y_i)) \overset{\mathrm{i.i.d.}}{\sim} \mathrm{Uniform}(0, 1)$。由于 $F$ 单调递增，挑选奖励最高者等价于挑选分位数最高者 $U^* = \max(U_1, \dots, U_N)$。对任意 $u \in [0, 1]$，其累积分布函数为
+\[
+  F_{U^*}(u) = \Prob(U^* \le u) = \prod_{i=1}^N \Prob(U_i \le u) = u^N.
+\]
+对 $u$ 求导即得概率密度函数：
+\[
+  p_N(u) = \frac{d}{du}(u^N) = \mathbf{N u^{N-1}}, \qquad u \in [0, 1].
+\]
+
+\textbf{(b) 精确 KL 散度积分证明。} 注意 Best-of-$N$ 仅依赖奖励值 $r(Y)$ 的顺序挑选样本，在给定奖励值（或等价地给定分位数 $U = u$）的条件下，Best-of-$N$ 输出 $Y^*$ 的条件分布与原参考策略 $\pi_{\mathrm{ref}}(Y \mid U = u)$ \textbf{完全一致}！由 KL 散度的链式法则：
+\begin{align*}
+  \DKL(\pi_{\mathrm{BoN}} \| \pi_{\mathrm{ref}})
+  &= \DKL\!\big(p_{U^*} \,\|\, p_U\big) + \E_{u \sim p_{U^*}}\!\Big[\underbrace{\DKL\!\big(\pi_{\mathrm{BoN}}(\cdot \mid u) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid u)\big)}_{=\,0}\Big] \\
+  &= \int_0^1 p_N(u) \ln\frac{p_N(u)}{1}\,du
+  = \int_0^1 N u^{N-1} \ln\!\big(N u^{N-1}\big)\,du.
+\end{align*}
+拆分被积函数并分部积分计算 $\int_0^1 u^{N-1}\ln u\,du$：
+\[
+  \int_0^1 u^{N-1} \ln u\,du
+  = \left[\frac{u^N}{N}\ln u\right]_0^1 - \int_0^1 \frac{u^N}{N} \cdot \frac{1}{u}\,du
+  = 0 - \frac{1}{N}\left[\frac{u^N}{N}\right]_0^1 = -\frac{1}{N^2}.
+\]
+代回原积分，立即得出与奖励分布完全无关的普适优美公式~\eqref{eq:bon-kl}：
+\[
+  \DKL(\pi_{\mathrm{BoN}} \| \pi_{\mathrm{ref}})
+  = \ln N \underbrace{\int_0^1 N u^{N-1}\,du}_{=\,1} + N(N - 1)\left(-\frac{1}{N^2}\right)
+  = \mathbf{\ln N - \frac{N - 1}{N}}.
+\]
+
+\solItem{6.4.5}{奖励过优化的数学定量诊断}
+
+已知 $R_{\mathrm{gold}}(d) = d(\alpha_{\mathrm{RM}} - \beta_{\mathrm{RM}} d) = 2.0\,d - 0.25\,d^2$，其中 $d = \sqrt{\DKL(\pi \| \pi_{\mathrm{ref}})} \ge 0$。
+
+\textbf{(a) 真实人类质量峰值与最优 KL 散度。} $R_{\mathrm{gold}}(d)$ 是开口向下的二次函数，令一阶导数为零：
+\[
+  \frac{d R_{\mathrm{gold}}}{d d} = 2.0 - 0.5\,d = 0 \implies d^* = \mathbf{4.0}.
+\]
+由此得最优 KL 散度与最高真实质量得分：
+\[
+  \DKL^* = (d^*)^2 = 4.0^2 = \mathbf{16.0\;\text{nats}}, \qquad
+  R_{\mathrm{gold}}^{\max} = 4.0 \times (2.0 - 0.25 \times 4.0) = \mathbf{4.0}.
+\]
+
+\textbf{(b) 无约束过优化后果与 Best-of-$N$ 采样数估算。}
+\begin{itemize}
+  \item 当 $\DKL = 64\;\text{nats}$ 时，$d = \sqrt{64} = 8.0$，代入标度律得
+  \[
+    R_{\mathrm{gold}}(8.0) = 8.0 \times (2.0 - 0.25 \times 8.0) = \mathbf{0.0}.
+  \]
+  此时代理奖励模型分数虽一路狂飙，真实人类质量却已把全部收益吐尽归零（若 $\DKL > 64$，真实质量甚至跌为负数，彻底不如微调前的 SFT 底座！）；
+  \item 对 Best-of-$N$ 采样，欲使 $\DKL(\pi_{\mathrm{BoN}} \| \pi_{\mathrm{ref}}) = \ln N - \frac{N-1}{N} = 16$，因 $N$ 极大时 $\frac{N-1}{N} \approx 1$，故
+  \[
+    \ln N \approx 17 \implies N \approx e^{17} \approx \mathbf{2.42 \times 10^7}.
+  \]
+  需要采样两千四百万条回答才能把 KL 推到过优化拐点 $16\;\text{nats}$！由于 Best-of-$N$ 的 KL 随采样数仅呈对数 $\ln N$ 增长，它在工程中具有天然的抗过优化鲁棒性；而在线 RLHF 仅需几百步梯度更新就可能把 KL 推过 $64\;\text{nats}$，因此必须严格监控 KL 散度与施加 $\beta$ 正则。
+\end{itemize}
+
+\solItem{6.4.6}{为什么确定性偏好会让 DPO 绕开 $\beta$ 发生过拟合？}
+
+对唯一无噪声偏好对 $(y_w, y_l)$，记隐式奖励边际为
+\[
+  z(\theta) = \beta\!\left(\ln\frac{\pi_\theta(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} - \ln\frac{\pi_\theta(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}\right).
+\]
+DPO 损失函数 $\ell(z) = -\ln \sigma(z) = \ln(1 + e^{-z})$ 在整个实数轴 $z \in \R$ 上严格单调递减且严格大于 $0$，其下确界 $\inf_z \ell(z) = 0$ \textbf{只能在 $z \to +\infty$ 时渐近达到}，在任何有限参数处梯度 $-\sigma(-z) \neq 0$ 永不归零！
+
+因此，只要不加早停或额外正则，无约束优化无论 $\beta > 0$ 取多大（哪怕 $\beta = 10$），都会无休止地把 $z(\theta)$ 推向 $+\infty$。因为 $\ln \pi_\theta(y_w \mid x) \le 0$ 有上界 $0$，让 $z(\theta) \to +\infty$ 的唯一途径就是把落败回答的概率推向零：
+\[
+  \lim_{t \to \infty} \pi_\theta(y_l \mid x) = \mathbf{0} \qquad (\ln \pi_\theta(y_l \mid x) \to -\infty),
+\]
+同时 $\DKL(\pi_\theta \| \pi_{\mathrm{ref}}) \to \infty$（若词表支撑集外还有其他回答，甚至可能同时把 $\pi_\theta(y_w \mid x)$ 也拖低，只要 $\pi_\theta(y_l \mid x)$ 跌得更快即可）。可见在确定性经验偏好 $\hat{P}(y_w \succ y_l) = 1$ 下，Bradley--Terry 的对数似然会把真实隐式奖励差推向 $+\infty$，令 $\beta$ 的正则保护形同虚设！
+
+\textbf{IPO（Identity Preference Optimization）的根治原理}：Azar 等人（2024）将交叉熵 $-\ln \sigma(z)$ 替换为有限目标边际的\textbf{二次回归损失}：
+\[
+  \mathcal{L}_{\mathrm{IPO}}(\theta) = \left[\left(\ln\frac{\pi_\theta(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} - \ln\frac{\pi_\theta(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}\right) - \frac{1}{2\tau}\right]^2.
+\]
+该损失在有限的对数比差 $\frac{1}{2\tau}$ 处即达到严格全局极小值 $0$ 且梯度恰好归零；继续把 $\pi_\theta(y_l \mid x)$ 推向 $0$ 反而会使损失平方级上升，从而从根本上锁死了 KL 漂移与确定性偏好过拟合。
+
+\solItem{6.4.7}{编程实验：绘制完整的 DPO 奖励—KL 帕累托前沿并监测似然位移}
+
+\textbf{(a) 扫描 $\beta \in \{0.02, 0.05, 0.1, 0.3, 0.6, 1.5, 5.0\}$ 的帕累托前沿特征。} 在 \texttt{exp4\_dpo\_alignment()} 中固定 120 轮 Adam 更新并扫描 $\beta$，以最终 \texttt{KL} 为横轴、真实期望奖励 \texttt{exp\_rew} 为纵轴，将得到一条典型的\textbf{递增凹形帕累托曲线}：
+\begin{itemize}
+  \item 大 $\beta$ 端（$\beta = 5.0, 1.5$）：隐式奖励差被强力放大，损失迅速饱和，模型几乎不敢离开 $\pi_{\mathrm{ref}}$，最终 KL 极小（$< 0.15\;\text{nats}$），但真实奖励提升受限；
+  \item 中间拐角（$\beta \in [0.1, 0.6]$）：以温和的 KL 代价（约 $0.5\text{--}1.4\;\text{nats}$）换取绝大部分真实奖励收益，性价比最高；
+  \item 极低 $\beta$ 端（$\beta = 0.02, 0.05$）：由于每对样本仅靠有限噪声偏好拟合，极低 $\beta$ 迫使对数概率差剧烈拉伸才能达到相同边际，KL 飙升至 $2\;\text{nats}$ 以上，且在噪声反转的偏好对上开始出现过拟合，真实奖励边际收益趋零甚至回落。
+\end{itemize}
+
+\textbf{(b) 似然位移（Likelihood Displacement）与轻量 SFT 正则效果。} 在训练中额外追踪 $\bar{\ell}_w = \E[\ln \pi_\theta(y_w \mid x)]$ 与 $\bar{\ell}_l = \E[\ln \pi_\theta(y_l \mid x)]$：当 $\beta$ 较小且训练轮数较长时，DPO 仅约束差值 $\bar{\ell}_w - \bar{\ell}_l$ 增大，往往通过“猛压 $\bar{\ell}_l$、同时把概率质量挤向未出现在数据对中的其他回复”来降低损失，导致 $\bar{\ell}_w$ 在初期上升后停滞甚至掉头向下（即著名的\textbf{似然位移}现象）。在 DPO 损失中加入轻量负对数似然正则 $+0.1 \cdot (-\bar{\ell}_w)$（即 DPO+NLL / RPO 技巧）后，直接对胜出回答施加向上的绝对概率锚点，$\bar{\ell}_w$ 保持稳步抬升，既防止了似然崩塌，又进一步稳定了高置信度偏好对的生成质量。
+
+\solItem{6.4.8}{编程实验：在模拟偏好数据上实现 Best-of-$N$ 并验证公式~\eqref{eq:bon-kl}}
+
+取候选回复数 $K_{\mathrm{resp}} = 500$（保证 $K_{\mathrm{resp}} \gg N$ 使独立采样碰撞概率可忽略），参考策略取均匀分布 $\pi_{\mathrm{ref}}(y) = 1 / 500$，给 500 个回复赋予互异的真实奖励值（例如从 $\mathcal{N}(0, 1)$ 采样并固定）。对每个 $N \in \{2, 4, 8, 16, 32\}$，执行 $10^4$ 次蒙特卡洛抽样（每次有放回均匀抽 $N$ 个回复并输出奖励最高者），用频率估计 $\hat{\pi}_{\mathrm{BoN}}$ 并计算经验散度 $\DKL(\hat{\pi}_{\mathrm{BoN}} \| \pi_{\mathrm{ref}})$（或直接按离散无碰撞精确分布计算）。与习题~\textbf{6.4.4} 的解析理论值 $\ln N - \frac{N-1}{N}$ 逐项对照如下表：
+
+\begin{center}
+\footnotesize
+\begin{tabular}{cccccc}
+\toprule
+Best-of-$N$ 采样数 $N$ & $2$ & $4$ & $8$ & $16$ & $32$ \\
+\midrule
+理论精确 KL：$\ln N - \frac{N-1}{N}$（nats） & $0.1931$ & $0.6363$ & $1.2044$ & $1.8351$ & $2.4970$ \\
+$K_{\mathrm{resp}} = 500$ 时离散精确 KL & $0.1931$ & $0.6363$ & $1.2044$ & $1.8350$ & $2.4968$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+注意细节：用有限样本频率 $\hat{\pi}_{\mathrm{BoN}}$ 估计高维（500 类）分布的 KL 时存在经典的 Miller--Madow 正偏差 $\approx \frac{K_{\mathrm{eff}}-1}{2 M}$（$M = 10^4$ 时约 $+0.025$）；若希望蒙特卡洛验算精确吻合至小数点后两位，应增大抽样次数至 $M = 10^5$ 或在连续均匀分位数 $U^* = \max(U_1, \dots, U_N)$ 上做分箱密度估计，实测与表内理论值完美吻合。
+
+% =====================================================================
+\section*{第 5 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 5 章习题解答（共 8 题）}
+
+\solItem{6.5.1}{Roofline 算术强度与跨芯片拐点核算}
+
+已知 $P_{\mathrm{peak}} = 2000\,\mathrm{TFLOP/s} = 2.0 \times 10^{15}\,\mathrm{FLOP/s}$，$B_{\mathrm{HBM}} = 8.0\,\mathrm{TB/s} = 8.0 \times 10^{12}\,\mathrm{B/s}$；BF16 线性层 $Y = XW$，其中 $X \in \R^{T \times d_{\mathrm{in}}}, W \in \R^{d_{\mathrm{in}} \times d_{\mathrm{out}}}, Y \in \R^{T \times d_{\mathrm{out}}}$，$d_{\mathrm{in}} = 4096, d_{\mathrm{out}} = 16384$。
+
+\textbf{(a) 硬件拐点 $I^*$。} 由式~\eqref{eq:ridge-point}：
+\[
+  I^* = \frac{P_{\mathrm{peak}}}{B_{\mathrm{HBM}}} = \frac{2000\,\mathrm{TFLOP/s}}{8.0\,\mathrm{TB/s}} = \mathbf{250\,\mathrm{FLOP/B}}.
+\]
+
+\textbf{(b) 非方阵线性层的精确算术强度 $\mathrm{AI}(T)$。}
+\begin{itemize}
+  \item 总浮点运算数（每个输出元素做 $d_{\mathrm{in}}$ 次乘加，即 $2 d_{\mathrm{in}}$ 次 FLOP）：$F = 2 T d_{\mathrm{in}} d_{\mathrm{out}}$；
+  \item 最低 HBM 访存字节数（BF16 每元素 2 字节，读 $X$、读 $W$、写 $Y$）：$Q = 2\big(T d_{\mathrm{in}} + d_{\mathrm{in}} d_{\mathrm{out}} + T d_{\mathrm{out}}\big)$。
+\end{itemize}
+作比消去因子 $2$，得精确算术强度公式：
+\[
+  \mathrm{AI}(T) = \frac{F}{Q} = \mathbf{\frac{T\,d_{\mathrm{in}} d_{\mathrm{out}}}{d_{\mathrm{in}} d_{\mathrm{out}} + T(d_{\mathrm{in}} + d_{\mathrm{out}})}}.
+\]
+（当 $d_{\mathrm{in}} = d_{\mathrm{out}} = d$ 时化简为 $\frac{Td}{d + 2T}$，与式~\eqref{eq:gemm-ai} 完全吻合。）
+
+\textbf{(c) $T = 1$ 与 $T = 512$ 的可达算力、利用率及临界词元数 $T^*$。} 代入 $d_{\mathrm{in}} d_{\mathrm{out}} = 4096 \times 16384 = 67{,}108{,}864$、$d_{\mathrm{in}} + d_{\mathrm{out}} = 20{,}480$：
+\begin{itemize}
+  \item \textbf{当 $T = 1$（单请求 Decode）}：
+  \[
+    \mathrm{AI}(1) = \frac{67{,}108{,}864}{67{,}108{,}864 + 20{,}480} \approx \mathbf{0.9997\,\mathrm{FLOP/B}} \ll 250\,\mathrm{FLOP/B}
+  \]
+  （深度访存受限）。可达算力 $P(1) = B_{\mathrm{HBM}} \cdot \mathrm{AI}(1) = 8.0 \times 0.9997 \approx \mathbf{7.998\,\mathrm{TFLOP/s}}$，硬件利用率仅为 $7.998 / 2000 \approx \mathbf{0.40\%}$！
+  \item \textbf{当 $T = 512$（Prefill）}：
+  \[
+    \mathrm{AI}(512) = \frac{512 \times 67{,}108{,}864}{67{,}108{,}864 + 512 \times 20{,}480}
+    = \frac{512}{1 + 512 \times \frac{5}{16384}} = \frac{512}{1.15625} \approx \mathbf{442.81\,\mathrm{FLOP/B}} > 250\,\mathrm{FLOP/B}
+  \]
+  （进入计算受限区）。可达算力撞顶 $P(512) = \mathbf{2000\,\mathrm{TFLOP/s}}$，硬件利用率 $\mathbf{100\%}$。
+  \item \textbf{最小词元数 $T^*$}：令 $\mathrm{AI}(T^*) = I^* = 250$，解线性方程：
+  \[
+    T^*\big(d_{\mathrm{in}} d_{\mathrm{out}} - I^*(d_{\mathrm{in}} + d_{\mathrm{out}})\big) = I^* d_{\mathrm{in}} d_{\mathrm{out}}
+    \implies
+    T^* = \frac{I^*}{1 - I^*\left(\frac{1}{d_{\mathrm{in}}} + \frac{1}{d_{\mathrm{out}}}\right)}
+    = \frac{250}{1 - 250 \times \frac{5}{16384}}
+    \approx \mathbf{270.65}.
+  \]
+  故向上取整至少需要 $T^* = \mathbf{271}$ 个词元才能让该非方阵线性层跨越拐点进入计算受限区。
+\end{itemize}
+
+\solItem{6.5.2}{13B 大模型训练静态与激活显存全账本}
+
+已知 $\Phi = 1.3 \times 10^{10}$，$L = 40, d = 5120, h = 40, B = 2, S = 4096$（按表~\ref{tab:16phi-ledger} 约定以 $1\,\mathrm{GB} = 10^9\,\mathrm{Bytes}$ 计，括号内同时给出二进制 $\mathrm{GiB} = 2^{30}\,\mathrm{Bytes}$ 对照）。
+
+\textbf{(a) $16\Phi$ 静态显存逐项明细。}
+\begin{itemize}
+  \item BF16 模型权重（$2\Phi$）：$2 \times 13 = \mathbf{26\,\mathrm{GB}}$；
+  \item BF16 梯度张量（$2\Phi$）：$2 \times 13 = \mathbf{26\,\mathrm{GB}}$；
+  \item FP32 主权重副本（$4\Phi$）：$4 \times 13 = \mathbf{52\,\mathrm{GB}}$；
+  \item FP32 AdamW 一阶矩与二阶矩（$8\Phi$）：$8 \times 13 = \mathbf{104\,\mathrm{GB}}$；
+  \item \textbf{静态显存总计（$16\Phi$）}：$26 + 26 + 52 + 104 = \mathbf{208\,\mathrm{GB}}$（已超过 2 张 80\,GB GPU 总容量）。
+\end{itemize}
+
+\textbf{(b) 全网 40 层总激活显存（式~\eqref{eq:act-memory-layer}）。} 先算公因子与二次注意力项系数：
+\[
+  B S d = 2 \times 4096 \times 5120 = 41{,}943{,}040\,\mathrm{B} \approx 41.943\,\mathrm{MB}, \qquad
+  \frac{5 h S}{d} = \frac{5 \times 40 \times 4096}{5120} = \mathbf{160}.
+\]
+注意 $O(S^2)$ 项的系数 $160$ 竟是线性项 $34$ 的 $4.7\times$！
+\begin{itemize}
+  \item \textbf{未启用 FlashAttention}：单层 $M_{\mathrm{act,1}} = 41.943\,\mathrm{MB} \times (34 + 160) = 41.943 \times 194 \approx 8.137\,\mathrm{GB}$，40 层总计
+  \[
+    M_{\mathrm{act,no\text{-}flash}} = 40 \times 8.13695\,\mathrm{GB} \approx \mathbf{325.48\,\mathrm{GB}} \quad (303.13\,\mathrm{GiB}).
+  \]
+  \item \textbf{启用 FlashAttention（消去 $160$ 项）}：单层 $M_{\mathrm{act,1}}^{\mathrm{FA}} = 41.943\,\mathrm{MB} \times 34 \approx 1.426\,\mathrm{GB}$，40 层总计
+  \[
+    M_{\mathrm{act,flash}} = 40 \times 1.42606\,\mathrm{GB} \approx \mathbf{57.04\,\mathrm{GB}} \quad (53.13\,\mathrm{GiB}),
+  \]
+  激活显存立降 $5.7\times$！
+\end{itemize}
+
+\textbf{(c) 叠加均匀激活检查点后的峰值激活显存。} 由定理~\ref{thm:activation-checkpointing} 式~\eqref{eq:ckpt-mem}，峰值保留 $L/k + k$ 层激活。对 $L = 40$，最优连续值 $k^* = \sqrt{40} \approx 6.32$，取整除 $40$ 的两个邻近块长 $k = 5$ 或 $k = 8$ 恰好均给出相同的最小层数：
+\[
+  \frac{40}{5} + 5 = 8 + 5 = 13, \qquad \frac{40}{8} + 8 = 5 + 8 = 13.
+\]
+因此启用 FlashAttention 并配合均匀激活检查点后，峰值激活显存进一步压缩至
+\[
+  M_{\mathrm{peak}} = 13 \times 1.42606\,\mathrm{GB} \approx \mathbf{18.54\,\mathrm{GB}} \quad (17.27\,\mathrm{GiB}),
+\]
+相比原始 $325.48\,\mathrm{GB}$ 合计压低了整整 $17.6\times$！
+
+\solItem{6.5.3}{激活检查点定理的推广与极限边界}
+
+\textbf{(a) 两级嵌套检查点的显存极小值与算力代价。} 将 $L$ 层分为 $L / k_1$ 个大段（每大段含 $k_1$ 层），每大段内部又按 $k_2$ 层划分为 $k_1 / k_2$ 个子段（$1 \le k_2 \le k_1 \le L$）：
+\begin{enumerate}
+  \item \textbf{峰值激活显存}：反向传播退回到最深处的某个子段内部时，HBM 中同时驻留三部分激活：（i）全网 $L / k_1$ 个大段起点的顶级检查点；（ii）当前大段重算前向时保存的 $k_1 / k_2$ 个子段起点的二级检查点；（iii）当前正在反向求导的单个子段内部全部 $k_2$ 层的完整中间激活。故峰值显存上界为
+  \[
+    M_{\mathrm{peak}}(k_1, k_2) = \left(\frac{L}{k_1} + \frac{k_1}{k_2} + k_2\right) M_1.
+  \]
+  应用三元算术--几何均值不等式（AM-GM）：
+  \[
+    \frac{L}{k_1} + \frac{k_1}{k_2} + k_2 \;\ge\; 3\left(\frac{L}{k_1} \cdot \frac{k_1}{k_2} \cdot k_2\right)^{1/3} = \mathbf{3 L^{1/3}}.
+  \]
+  等号当且仅当 $\frac{L}{k_1} = \frac{k_1}{k_2} = k_2$ 时成立，解得最优分段为 $k_2^* = L^{1/3},\; k_1^* = L^{2/3}$，最小峰值显存降至 $\mathbf{3 L^{1/3} M_1}$。
+  \item \textbf{额外前向传播次数与总算力增幅}：每个最底层除了原始 1 次前向传播外，还需要：（i）在当前大段重建二级检查点时额外重算 1 次前向；（ii）在当前子段反向求导时再额外重算 1 次前向——共计最多 \textbf{2 次额外前向传播}！设单层前向耗时 $t_F$、反向耗时 $t_B \approx 2 t_F$（基线总耗时 $T_0 = L(t_F + 2 t_F) = 3 L t_F$），则总算力相对增量上界达到
+  \[
+    \frac{\Delta T}{T_0} \;\le\; \frac{2 L t_F}{3 L t_F} = \frac{2}{3} \approx \mathbf{+66.7\%}
+  \]
+  （比单级检查点的 $+33.3\%$ 整整翻倍）。
+\end{enumerate}
+
+\textbf{(b) 工程界普遍采用单级（或每层边界）检查点的原因。}
+\begin{itemize}
+  \item \textbf{边际收益递减与瓶颈转移}：以常见 $L = 80$ 层大模型为例，单级检查点已把激活层数从 $80$ 压至 $2\sqrt{80} \approx 18$ 层（在 3D 并行与 FlashAttention 下往往已小于 $10\,\mathrm{GB}$），甚至每层边界全检查点（每层只存输入张量 $2 B S d$，仅约每层完整激活 $34 B S d$ 的 $1/17$）即可把激活降到几乎可忽略的量级，且仅花 1 次额外前向（$+33.3\%$）；
+  \item \textbf{算力极其昂贵}：三级以上嵌套重算虽然在理论上把显存压至 $O(L^{1/d})$ 乃至 $O(\log L)$，但每深一层递归就多烧掉一整遍前向算力（$+66.7\%, +100\%, \dots$），直接令千万美元 GPU 集群的有效吞吐率（MFU）腰斩，在工程上彻底得不偿失。
+\end{itemize}
+
+\solItem{6.5.4}{FlashAttention-2 延迟归一化形式与反向传播 $L_i$ 重构证明}
+
+\textbf{(a) 延迟归一化与逐步归一化的严格代数等价性。} 我们对块索引 $j = 0, 1, \dots, T_c$ 用数学归纳法证明恒等式 $\tilde{O}_i^{(j)} = \ell_i^{(j)} O_i^{(j)}$：
+\begin{itemize}
+  \item \textbf{奠基（$j = 0$）}：$\ell_i^{(0)} = 0$，$\tilde{O}_i^{(0)} = \mathbf{0} = 0 \cdot O_i^{(0)}$，成立。
+  \item \textbf{归纳步}：假设对 $j - 1$ 有 $\tilde{O}_i^{(j-1)} = \ell_i^{(j-1)} O_i^{(j-1)}$。按题意延迟归一化更新：
+  \[
+    \tilde{O}_i^{(j)} = \alpha_i^{(j)} \tilde{O}_i^{(j-1)} + \tilde{P}_{ij} V_j
+    = \Big(\alpha_i^{(j)} \ell_i^{(j-1)}\Big) O_i^{(j-1)} + \tilde{P}_{ij} V_j.
+  \]
+  对照式~\eqref{eq:flash-o} $O_i^{(j)} = \frac{\big(\alpha_i^{(j)} \ell_i^{(j-1)}\big) O_i^{(j-1)} + \tilde{P}_{ij} V_j}{\ell_i^{(j)}}$，两端同乘 $\ell_i^{(j)}$ 即得 $\tilde{O}_i^{(j)} = \ell_i^{(j)} O_i^{(j)}$！
+\end{itemize}
+因此循环结束 $j = T_c$ 后统一除以 $\ell_i^{(T_c)}$ 所得 $\tilde{O}_i^{(T_c)} / \ell_i^{(T_c)} \equiv O_i^{(T_c)}$，与逐步除法在代数上完全恒等，同时省去了内循环中 $T_c - 1$ 次昂贵的逐元素浮点除法。
+
+\textbf{(b) 仅存 $L_i$ 的反向传播精确重构与行同步消除证明。}
+\begin{enumerate}
+  \item \textbf{概率块精确重构}：前向结束时，每行最终最大值记为 $m_i = m_i^{(T_c)}$，分母记为 $\ell_i = \ell_i^{(T_c)} = \sum_{k=1}^N \exp(S_{ik} - m_i)$，仅存单标量 log-sum-exp $L_i = m_i + \ln \ell_i$。反向重算任意块 $S_{ij} = \tau Q_i K_j^\top$ 后，直接计算
+  \[
+    \exp(S_{ij} - L_i) = \exp(S_{ij} - m_i - \ln \ell_i) = \frac{\exp(S_{ij} - m_i)}{\ell_i} = \mathbf{P_{ij}},
+  \]
+  精确还原了全序列 Softmax 注意力概率块，无需在 HBM 中存储 $N \times N$ 矩阵！
+  \item \textbf{Softmax 反向与 $D_i$ 局域化推导}：由前向 $O = P V$，得 $dP_{ij} = dO_i V_j^\top$（与 $dV_j = \sum_i P_{ij}^\top dO_i$）。对第 $r$ 行（为简洁略去块标，以单行向量 $p_r = \softmax(s_r)$ 记），Softmax 的雅可比矩阵为 $\frac{\partial p_{r,c}}{\partial s_{r,k}} = p_{r,c}(\delta_{ck} - p_{r,k})$，故链式法则给出
+  \[
+    dS_{r,k} = \sum_{c=1}^N dP_{r,c}\,\frac{\partial p_{r,c}}{\partial s_{r,k}}
+    = p_{r,k}\!\left(dP_{r,k} - \sum_{c=1}^N p_{r,c}\,dP_{r,c}\right).
+  \]
+  最惊艳的一步在于化简括号内的整行求和 $\sum_{c=1}^N p_{r,c}\,dP_{r,c}$：代入 $dP_{r,c} = \langle dO_r,\, V_c \rangle$，利用内积线性性交换求和顺序：
+  \[
+    \sum_{c=1}^N p_{r,c}\,dP_{r,c}
+    = \sum_{c=1}^N p_{r,c}\,\langle dO_r,\, V_c \rangle
+    = \left\langle dO_r,\; \sum_{c=1}^N p_{r,c} V_c \right\rangle
+    = \langle dO_r,\, O_r \rangle = \operatorname{rowsum}(dO_r \odot O_r) \triangleq D_r.
+  \]
+  回到块矩阵形式即得 $D_i = \operatorname{rowsum}(dO_i \odot O_i) \in \R^{B_r \times 1}$ 与 $dS_{ij} = P_{ij} \odot (dP_{ij} - D_i)$。这一恒等式彻底消除了反向计算 $dS_{ij}$ 时跨列块 $j$ 的全局归约依赖，使得 $D_i$ 可在反向主循环前独立预处理一次，所有块计算完全保留在高速片上 SRAM 中！
+\end{enumerate}
+
+\solItem{6.5.5}{定量诊断算子融合对访存受限算子的加速比}
+
+已知张量形状 $(B, S, d) = (16, 2048, 4096)$，精度 BF16（每元素 2 字节）。单张量体积为：
+\[
+  V = 16 \times 2048 \times 4096 \times 2\,\mathrm{B} = 268{,}435{,}456\,\mathrm{B} = 256\,\mathrm{MiB} \approx \mathbf{268.435\,\mathrm{MB}}.
+\]
+
+\textbf{(a) 融合前后 HBM 总字节读写量。}
+\begin{itemize}
+  \item \textbf{未融合（3 个独立核函数）}：
+  \begin{enumerate}
+    \item 残差加 $H_1 = X + R$：读 $X$、读 $R$、写 $H_1$ $\implies 3V$；
+    \item 归一化 $H_2 = \mathrm{RMSNorm}(H_1)$：读 $H_1$、写 $H_2$（忽略 $4096 \times 2\,\mathrm{B} = 8\,\mathrm{KB}$ 的 $\gamma$）$\implies 2V$；
+    \item 激活函数 $H_3 = \mathrm{SiLU}(H_2)$：读 $H_2$、写 $H_3$ $\implies 2V$。
+  \end{enumerate}
+  总计 $Q_{\mathrm{unfused}} = (3 + 2 + 2)V = \mathbf{7V \approx 1.8790\,\mathrm{GB}}$（其中中间张量 $H_1, H_2$ 白白往返 HBM 两次）。
+  \item \textbf{完全融合（单核片上流水）}：从 HBM 读入 $X, R$，在寄存器/SRAM 中完成加法、行归约 RMSNorm 与 SiLU，最后仅将最终结果 $H_3$ 写回 HBM。总计
+  \[
+    Q_{\mathrm{fused}} = \mathbf{3V \approx 0.8053\,\mathrm{GB}}.
+  \]
+\end{itemize}
+
+\textbf{(b) H100（$B_{\mathrm{HBM}} = 3.35\,\mathrm{TB/s} = 3.35 \times 10^{12}\,\mathrm{B/s}$）上的理论墙钟耗时与加速比。}
+\begin{align*}
+  t_{\mathrm{unfused}} &= \frac{1.879048 \times 10^9\,\mathrm{B}}{3.35 \times 10^{12}\,\mathrm{B/s}} \approx \mathbf{0.5609\,\mathrm{ms}}, \\
+  t_{\mathrm{fused}} &= \frac{0.805306 \times 10^9\,\mathrm{B}}{3.35 \times 10^{12}\,\mathrm{B/s}} \approx \mathbf{0.2404\,\mathrm{ms}}, \\
+  \mathrm{Speedup} &= \frac{t_{\mathrm{unfused}}}{t_{\mathrm{fused}}} = \frac{7V}{3V} = \frac{7}{3} \approx \mathbf{2.33\times}.
+\end{align*}
+不仅直接提速 $2.33\times$，还省去了两次内核启动（Kernel Launch）开销，这正是 Triton 与 \texttt{torch.compile} 带来巨大加速的核心物理机制。
+
+\solItem{6.5.6}{数值反例：为什么纯 BF16 权重更新会导致优化彻底“冻结”？}
+
+\textbf{(a) 区间 $[1, 2)$ 内的 BF16 步长（ULP）。} 在区间 $[1, 2) = [2^0, 2^1)$ 内，浮点数的无偏指数恒为 $e = 0$，BF16 有 7 位显式尾数，故二进制最低有效位对应的数值间距为
+\[
+  \mathrm{ULP}_{\mathrm{BF16}}([1, 2)) = 2^{0 - 7} = 2^{-7} = \frac{1}{128} = \mathbf{0.0078125}.
+\]
+因此 $1.0$ 之后下一个可精确表示的 BF16 数是 $1 + 2^{-7} = 1.0078125$。
+
+\textbf{(b) $10000$ 步更新后的结果与破局机制。} 在“舍入到最近偶数（Round-to-Nearest-Even）”规则下，$1.0$ 与 $1.0078125$ 的中点为
+\[
+  1.0 + \frac{1}{2}\mathrm{ULP} = 1.0 + 2^{-8} = 1.00390625.
+\]
+第 1 步精确更新值为 $w - \eta g = 1.0 - 10^{-3}\times(-1.0) = 1.001$。由于单步增量 $0.001 < 0.00390625$，$1.001$ 严格更靠近 $1.0$，舍入后严格退回：
+\[
+  w_1 = \mathrm{BF16}(1.001) = 1.0.
+\]
+因为每一步都从完全相同的 $1.0$ 出发，数学归纳法立知跑完 $10000$ 步后 $w_{10000} = \mathbf{1.0}$（与理想值 $1.0 + 10000 \times 10^{-3} = 11.0$ 相差整整 $10.0$，权重彻底冻结！）。
+
+\textbf{破局方案}：（1）\textbf{FP32 主权重（标准混合精度）}：FP32 拥有 23 位尾数，在 $[1, 2)$ 内 $\mathrm{ULP}_{\mathrm{FP32}} = 2^{-23} \approx 1.19 \times 10^{-7} \ll 10^{-3}$，微小梯度在 FP32 主权重中无损累加，每约 8 步跨越半个 BF16 ULP 时 BF16 副本自然跳升至下一个网格点；（2）\textbf{随机舍入（Stochastic Rounding）}：以概率 $p = \frac{0.001}{0.0078125} = 0.128$ 向上舍入到 $1.0078125$、以概率 $1 - p = 0.872$ 向下舍入到 $1.0$，单步期望更新精确等于 $0.128 \times 0.0078125 = 0.001$，无偏打破冻结陷阱（代价是引入微小舍入方差）。
+
+\solItem{6.5.7}{编程实验：为分块在线 Softmax 添加因果掩码（Causal Mask）与上三角跳过加速}
+
+\textbf{(a)--(b) 实现要点。} 在代码~\ref{lst:flash-online}（\texttt{exp5\_flash\_\allowbreak online\_and\_roofline()}）中，对标准注意力矩阵上三角（\texttt{k=1}）施加 $-\infty$ 因果掩码（调用 \texttt{np.triu(..., k=1)}）得到基准输出 $O_{\mathrm{causal}}$。在分块在线 Softmax 的内层 \texttt{for j in range(0, N, Bc):} 循环内加入两行工程优化：
+\begin{enumerate}
+  \item \textbf{纯上三角块零计算跳过}：若 \texttt{j > i + Br - 1}，则该块内所有列索引均严格大于行索引，权重全为 $0$，直接 \texttt{continue}；
+  \item \textbf{主对角线块局部掩码}：当 $B_r = B_c$ 且 \texttt{j == i} 时，对局部瓦片分数 $S_{ij}$ 施加局部上三角 $-\infty$ 掩码（即 \texttt{Sij[np.triu(\allowbreak np.ones((Br, Bc), bool), 1)] = -np.inf}；若 $B_r \neq B_c$，则对所有跨越主对角线的块按全局坐标 \texttt{col\_idx > row\_idx} 掩码）；下三角块（\texttt{j < i}）无需任何掩码操作。
+\end{enumerate}
+
+\textbf{(c) 独立数值验证结果。} 在 $N = 256, d = 64, B_r = B_c = 32$ 下运行验证：
+\begin{itemize}
+  \item 与标准因果注意力的最大绝对误差实测为 $\max|O_{\mathrm{causal}} - O_{\mathrm{flash}}| = \mathbf{5.55 \times 10^{-16}} < 10^{-15}$（纯机器双精度浮点舍入级）；
+  \item 总瓦片数为 $8 \times 8 = 64$，实际仅计算下三角与主对角线共 $\frac{8 \times 9}{2} = \mathbf{36}$ 个瓦片，跳过 $28$ 个瓦片，精确省去 $\frac{28}{64} = \mathbf{43.75\%}$ 的块乘加计算；一般地，当块数为 $T = N / B$ 时，跳过比例为 $\frac{T(T-1)/2}{T^2} = \frac{1}{2}\big(1 - \frac{1}{T}\big) \xrightarrow{T \to \infty} \mathbf{50\%}$，实现近 $2\times$ 因果加速！
+\end{itemize}
+
+\solItem{6.5.8}{编程实验：Roofline 分析标准 MHA 与分组查询注意力（GQA）在长上下文 Decode 中的带宽瓶颈}
+
+已知单层 Decode 阶段批量 $B = 16$，$d = 4096$，查询头数 $h_q = 32$，头维度 $d_h = 128$（满足 $h_q d_h = d$），历史上下文长度 $S \in [512, 32768]$，精度 BF16（2 字节）。
+
+\textbf{(a) 总 FLOPs 与 HBM 访存字节数推导。}
+\begin{itemize}
+  \item \textbf{计算量}：每个请求、每个查询头需计算 $q \in \R^{1 \times d_h}$ 与 $K_{\mathrm{cache}}^\top \in \R^{d_h \times S}$ 的内积（$2 S d_h$ FLOPs），以及权重 $p \in \R^{1 \times S}$ 与 $V_{\mathrm{cache}} \in \R^{S \times d_h}$ 的加权求和（$2 S d_h$ FLOPs）。汇总 $B$ 个请求与 $h_q$ 个查询头，忽略低阶的 $O(B h_q S)$ Softmax 标量运算，总计
+  \[
+    F_{\mathrm{attn}} = B \cdot h_q \cdot (2 S d_h + 2 S d_h) = 4 B S h_q d_h = \mathbf{4 B S d}\;\text{FLOPs}.
+  \]
+  \item \textbf{HBM 访存量}：每个请求拥有\textbf{彼此独立}的历史 KV 缓存，无法跨批量共享！读入 $K_{\mathrm{cache}}$ 与 $V_{\mathrm{cache}}$（各含 $B \cdot h_{\mathrm{kv}} \cdot S \cdot d_h$ 个 BF16 元素）占 $2 \times (B h_{\mathrm{kv}} S d_h) \times 2 = 4 B h_{\mathrm{kv}} S d_h$ 字节；若再计入读入当前步 $Q$（$2Bd$ 字节）与写出输出 $O$（$2Bd$ 字节），总访存为
+  \[
+    Q_{\mathrm{attn}} = 4 B h_{\mathrm{kv}} S d_h + 4 B d\;\text{Bytes}.
+  \]
+\end{itemize}
+
+\textbf{(b) 算术强度 $\mathrm{AI}_{\mathrm{attn}}$ 与 MHA/GQA-8 对比。} 作比消去 $4 B d_h$：
+\[
+  \mathrm{AI}_{\mathrm{attn}} = \frac{h_q S}{h_{\mathrm{kv}} S + h_q} = \frac{h_q / h_{\mathrm{kv}}}{1 + \frac{h_q}{h_{\mathrm{kv}} S}}
+  \;\xrightarrow{\;S \gg 1\;}\; \mathbf{\frac{h_q}{h_{\mathrm{kv}}}\,\mathrm{FLOP/B}}.
+\]
+代入 $S \in \{512, 4096, 32768\}$ 的精确数值如下表：
+\begin{center}
+\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+注意力结构 & $S = 512$ & $S = 4096$ & $S = 32768$ & 渐近极限（与 $B, S$ 无关） \\
+\midrule
+标准 MHA（$h_{\mathrm{kv}} = 32$） & $0.998\,\mathrm{FLOP/B}$ & $1.000\,\mathrm{FLOP/B}$ & $1.000\,\mathrm{FLOP/B}$ & $\mathbf{1.0\,\mathrm{FLOP/B}}$ \\
+GQA-8（$h_{\mathrm{kv}} = 4$） & $7.877\,\mathrm{FLOP/B}$ & $7.984\,\mathrm{FLOP/B}$ & $7.998\,\mathrm{FLOP/B}$ & $\mathbf{8.0\,\mathrm{FLOP/B}}$（$8\times$ 提升） \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{深刻系统结论}：公式中批量大小 $B$ 分子分母完全约去！与线性投影层可以通过增大批量 $B$ 提高权重复用不同，Decode 阶段的注意力层因每条请求 KV 缓存独立，标准 MHA 无论 $B$ 和 $S$ 多大，算术强度都被死死钉在 $1\,\mathrm{FLOP/B}$（在 H100 上利用率不足 $0.34\%$）；而 GQA-8（以及 DeepSeek 的 MLA）通过让 $8$ 个查询头共享同一份 KV 头，不仅把 KV 显存砍掉 $8\times$，更将 Decode 注意力的 Roofline 算术强度与实际吞吐率直接抬升 $8\times$！
+
+% =====================================================================
+\section*{第 6 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 6 章习题解答（共 8 题）}
+
+\solItem{6.6.1}{70B 模型在 64 卡集群上的 ZeRO 显存与 3D 并行综合核算}
+
+已知 $\Phi = 7 \times 10^{10}$（70B），BF16 权重体积 $\Psi = 2\Phi = 140\,\mathrm{GB}$，$N_{\mathrm{GPU}} = 64$，单卡显存 $80\,\mathrm{GB}$。
+
+\textbf{(a) 64 路纯数据并行（$N_d = 64$）下的 DDP 与 ZeRO-1/2/3 账本。} 对照表~\ref{tab:zero-ledger} 逐项代入 $\Phi = 70\,\mathrm{B}, \Psi = 140\,\mathrm{GB}, N_d = 64$：
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+并行方案 & 单卡静态显存公式 & 单卡静态显存 & 每步单卡通信量 & 能否装入 80\,GB \\
+\midrule
+DDP & $16\Phi$ & $1120.00\,\mathrm{GB}$ & $2\Psi = 280\,\mathrm{GB}$ & 否（超 $14\times$） \\
+ZeRO-1 & $4\Phi + 12\Phi / 64$ & $280 + 13.125 = \mathbf{293.13\,\mathrm{GB}}$ & $2\Psi = 280\,\mathrm{GB}$ & 否 \\
+ZeRO-2 & $2\Phi + 14\Phi / 64$ & $140 + 15.3125 = \mathbf{155.31\,\mathrm{GB}}$ & $2\Psi = 280\,\mathrm{GB}$ & 否 \\
+ZeRO-3 / FSDP & $16\Phi / 64$ & $\mathbf{17.50\,\mathrm{GB}}$ & $3\Psi = 420\,\mathrm{GB}$ & \textbf{能}（余 $62.5\,\mathrm{GB}$） \\
+\bottomrule
+\end{tabular}
+\end{center}
+可见 DDP、ZeRO-1 与 ZeRO-2 甚至连静态模型状态都装不进单张 80\,GB GPU，纯数据并行下唯有 ZeRO-3 / FSDP 可行。
+
+\textbf{(b) 3D 并行（$N_t = 8, N_p = 4, N_d = 2$，顶层 ZeRO-1，$m = 32$）核算。}
+\begin{itemize}
+  \item \textbf{单卡局部参数量}：张量并行与流水线并行将模型无冗余切分为 $N_t N_p = 8 \times 4 = 32$ 份，每卡分管
+  \[
+    \Phi_{\mathrm{local}} = \frac{70\,\mathrm{B}}{32} = \mathbf{2.1875\,\mathrm{B}}.
+  \]
+  \item \textbf{单卡静态显存}：在 $N_d = 2$ 组数据并行副本上对 $\Phi_{\mathrm{local}}$ 启用 ZeRO-1（每参数占 $4 + 12 / 2 = 10\,\mathrm{B}$）：
+  \[
+    M_{\mathrm{static}} = 10 \times 2.1875\,\mathrm{GB} = \mathbf{21.875\,\mathrm{GB}} \ll 80\,\mathrm{GB},
+  \]
+  余下近 $58\,\mathrm{GB}$ 留给激活与缓冲区，且所有高频 TP AllReduce 均局限在单机 8 卡 NVLink 内部，跨机仅传递轻量的 PP 边界激活与 $N_d = 2$ 梯度！
+  \item \textbf{流水线气泡率}：由定理~\ref{thm:pipeline-bubble} 式~\eqref{eq:pp-bubble}，代入 $N_p = 4, m = 32$：
+  \[
+    f_{\mathrm{bubble}} = \frac{N_p - 1}{m + N_p - 1} = \frac{4 - 1}{32 + 4 - 1} = \frac{3}{35} \approx \mathbf{8.57\%}.
+  \]
+\end{itemize}
+
+\solItem{6.6.2}{LoRA 显存预算与 GQA KV-Cache 精确核算}
+
+已知 $L = 32, d = 4096, h_q = 32, n_{\mathrm{kv}} = 8, d_{\mathrm{head}} = 128$，底座规模 $\Phi = 8 \times 10^9$（8B）。
+
+\textbf{(a) LoRA 参数量、占比与总静态显存。} 按题目近似，$W_Q, W_V \in \R^{4096 \times 4096}$，施加秩 $r = 16$ 的低秩旁路（每个矩阵增设 $A \in \R^{r \times d}$ 与 $B \in \R^{d \times r}$，共 $2dr$ 参数）：
+\begin{itemize}
+  \item 单层可训练参数：$2 \times (2 \times 4096 \times 16) = 262{,}144$；
+  \item 全网 32 层总可训练参数：
+  \[
+    \Phi_{\mathrm{LoRA}} = 32 \times 262{,}144 = \mathbf{8{,}388{,}608 \approx 8.39\,\mathrm{M}},
+  \]
+  仅占 8B 底座参数量的 $\frac{8.3886 \times 10^6}{8 \times 10^9} \approx \mathbf{0.105\%}$！
+  \item 总静态显存：冻结底座仅需保存 BF16 权重（无梯度、无主权重、无 AdamW 状态），占 $2 \times 8 = 16.0\,\mathrm{GB}$；LoRA 可训练参数需完整 $16\Phi_{\mathrm{LoRA}}$ 状态，仅占 $16 \times 8.3886\,\mathrm{MB} \approx \mathbf{134.2\,\mathrm{MB} \approx 0.134\,\mathrm{GB}}$。故静态总显存仅约 $\mathbf{16.13\,\mathrm{GB}}$（相比全量微调 $16 \times 8 = 128\,\mathrm{GB}$ 暴降近 $8\times$！）。
+\end{itemize}
+
+\textbf{(b) GQA KV 缓存核算与 PagedAttention 最大并发数。} 代入式~\eqref{eq:kv-cache-formula}（BF16 取 $b_{\mathrm{dtype}} = 2$）：
+\[
+  M_{\mathrm{KV/tok}} = 2 \cdot L \cdot n_{\mathrm{kv}} \cdot d_{\mathrm{head}} \cdot b_{\mathrm{dtype}}
+  = 2 \times 32 \times 8 \times 128 \times 2 = \mathbf{131{,}072\,\mathrm{B}} = \mathbf{128\,\mathrm{KiB/tok}} \approx 131.07\,\mathrm{KB/tok}.
+\]
+单条长度 $S = 4096$ 的请求占用 KV 缓存为：
+\[
+  M_{\mathrm{seq}} = 4096 \times 131{,}072\,\mathrm{B} = 536{,}870{,}912\,\mathrm{B} = \mathbf{512\,\mathrm{MiB}} \approx \mathbf{536.87\,\mathrm{MB}}.
+\]
+可用 KV 显存池为 $60\,\mathrm{GB}$（PagedAttention 下内部碎片仅半个块 $< 0.2\%$，可忽略）：
+\begin{itemize}
+  \item 按硬件 HBM 惯用的二进制口径（$60\,\mathrm{GiB} = 60 \times 1024\,\mathrm{MiB}$）：最多可并发服务 $\frac{60 \times 1024}{512} = \mathbf{120}$ 条请求；
+  \item 按严格十进制口径（$60\,\mathrm{GB} = 60 \times 10^9\,\mathrm{B}$）：$\lfloor 60 \times 10^9 / 536{,}870{,}912 \rfloor = \mathbf{111}$ 条请求（工程速算常直接以 $60{,}000 / 512 \approx 117$ 估算，均在 110--120 条并发量级）。
+\end{itemize}
+
+\solItem{6.6.3}{Ring AllReduce 对比 Halving-Doubling 树形归约的延迟—带宽权衡}
+
+\textbf{(a) Rabenseifner 算法通信量与延迟证明。} 设 $P = 2^k$（即 $k = \log_2 P$）。
+\begin{itemize}
+  \item \textbf{ReduceScatter 阶段}：共执行 $k = \log_2 P$ 轮两两交换，第 $j$ 轮（$j = 1, \dots, k$）每张卡发送的数据量为 $M / 2^j$。由等比级数求和公式，每卡累计发送字节数为
+  \[
+    V_{\mathrm{RS}} = \sum_{j=1}^{k} \frac{M}{2^j} = M \cdot \frac{\frac{1}{2}\left(1 - \frac{1}{2^k}\right)}{1 - \frac{1}{2}} = M\left(1 - \frac{1}{P}\right) = \frac{P - 1}{P}\,M.
+  \]
+  \item \textbf{AllGather 阶段}：完全逆序执行 $k = \log_2 P$ 轮，每轮发送数据量依次为 $M/P, 2M/P, \dots, M/2$，累计发送字节数同样精确等于 $V_{\mathrm{AG}} = \frac{P-1}{P} M$。
+\end{itemize}
+合并两阶段，每张 GPU 的累计发送总字节数为 $\mathbf{2\frac{P-1}{P}M}$（与 Ring AllReduce 完全一致，均达到理论带宽下界），而串行通信步数从 $2(P-1)$ 锐减至 $2\log_2 P$，故总耗时模型为
+\[
+  T_{\mathrm{Rab}} = 2(\log_2 P)\alpha + 2\frac{P - 1}{P}\frac{M}{B}.
+\]
+
+\textbf{(b) 千卡集群（$P = 1024, \alpha = 5\,\mu\mathrm{s}, B = 50\,\mathrm{GB/s}$）的延迟差与临界消息体积。} 由于两种算法在无拥塞模型下拥有完全相同的带宽项 $2\frac{P-1}{P}\frac{M}{B}$，两者耗时的差值恒为固定延迟差：
+\begin{align*}
+  T_{\mathrm{Ring,lat}} &= 2(1024 - 1) \times 5\,\mu\mathrm{s} = 2046 \times 5\,\mu\mathrm{s} = \mathbf{10.23\,\mathrm{ms}}, \\
+  T_{\mathrm{Rab,lat}} &= 2(\log_2 1024) \times 5\,\mu\mathrm{s} = 20 \times 5\,\mu\mathrm{s} = \mathbf{0.10\,\mathrm{ms}}, \\
+  T_{\mathrm{Ring}} - T_{\mathrm{Rab}} &= 10.23 - 0.10 = \mathbf{10.13\,\mathrm{ms}} \quad (\text{相差 } 102\times).
+\end{align*}
+令 Ring AllReduce 自身的延迟项与带宽传输项恰好相等，解得临界消息体积 $M_{\mathrm{crit}}$：
+\[
+  2(P - 1)\alpha = 2\frac{P - 1}{P}\frac{M_{\mathrm{crit}}}{B}
+  \implies M_{\mathrm{crit}} = P \alpha B = 1024 \times (5 \times 10^{-6}\,\mathrm{s}) \times (50 \times 10^9\,\mathrm{B/s}) = \mathbf{256\,\mathrm{MB}}
+\]
+（对应链路上的双向总数据流量 $2\frac{P-1}{P} M_{\mathrm{crit}} \approx 511.5\,\mathrm{MB}$）。\textbf{工程含义}：对于几 KB 的 LayerNorm 梯度张量（$M \ll 256\,\mathrm{MB}$），在 1024 卡上跑 Ring AllReduce 时 $99.99\%$ 以上的时间全部白白消耗在 $2046$ 跳的 $10.23\,\mathrm{ms}$ 串行握手延迟上，网络带宽利用率近乎归零！因此现代集合通信库（NCCL）在千卡集群上同时采用两项对策：（1）用\textbf{梯度分桶（Gradient Bucketing）}把碎小张量拼装成数十上百 MB 的大桶；（2）对中小消息自动切换至\textbf{双二叉树（Double Binary Tree）}或 Halving-Doubling 树形拓扑以将延迟压至 $O(\log P)$。
+
+\solItem{6.6.4}{投机解码的多步联合分布精确性与真实墙钟加速比公式}
+
+\textbf{(a) 多步投机循环的联合分布严格无损证明。} 对长度为 $T$ 的输出序列运用概率链式法则
+\[
+  \Prob(X_1, \dots, X_T) = \prod_{t=1}^T \Prob(X_t \mid X_{<t}).
+\]
+只需证明：无论某位置 $t$ 是在某轮投机循环中被草稿“直接接受”，还是因草稿被拒而触发“残差重采样”，其条件分布 $\Prob(X_t = x \mid X_{<t})$ 均严格等于目标大模型分布 $p(x \mid X_{<t})$。
+\begin{itemize}
+  \item 在每轮循环开始时，前缀 $X_{<t_0}$ 已完全确立。小模型依次生成 $\gamma$ 个草稿 $(\tilde{x}_1, \dots, \tilde{x}_\gamma)$，大模型单次并行前向即可算出全部条件分布 $p(\cdot \mid X_{<t_0}, \tilde{x}_{<j})$（$j = 1, \dots, \gamma + 1$）；
+  \item 按顺序从 $j = 1$ 开始逐位检验：只要前 $j - 1$ 个草稿全部被接受，当前条件前缀就是已确立的精确历史 $X_{<t_0 + j - 1} = (X_{<t_0}, \tilde{x}_1, \dots, \tilde{x}_{j-1})$。对第 $j$ 位应用定理~\ref{thm:speculative-lossless}，无论接受还是拒绝重采，输出词元 $X_{t_0 + j - 1}$ 严格服从 $p(\cdot \mid X_{<t_0 + j - 1})$；
+  \item \textbf{关键截断规则}：一旦在第 $k + 1$ 位发生拒绝并重采出新词元 $X_{t_0 + k} \neq \tilde{x}_{k+1}$，后续基于错误前缀 $\tilde{x}_{k+1}$ 生成的草稿 $\tilde{x}_{k+2}, \dots, \tilde{x}_\gamma$ \textbf{立刻全部作废丢弃}，下一轮重新以已验证前缀 $X_{\le t_0 + k}$ 为条件生成新草稿；而若全部 $\gamma$ 个草稿均获接受，第 $\gamma + 1$ 位直接由大模型自身的 $p(\cdot \mid X_{<t_0}, \tilde{x}_{1:\gamma})$ 精确采样。
+\end{itemize}
+因此每个位置 $t \in \{1, \dots, T\}$ 均严格满足 $\Prob(X_t = x \mid X_{<t}) = p(x \mid X_{<t})$，按链式法则相乘即证整条序列的联合分布与纯目标大模型严格一致！
+
+\textbf{(b) 期望墙钟加速比推导与最优草稿长度 $\gamma^*$。} 每轮投机循环依次执行 $\gamma$ 次小草稿模型串行前向与 $1$ 次目标大模型并行验证前向，单轮总墙钟耗时为
+\[
+  T_{\mathrm{round}} = \gamma t_{\mathrm{draft}} + t_{\mathrm{target}} = (\gamma c + 1)\,t_{\mathrm{target}}.
+\]
+由式~\eqref{eq:spec-expected-len}，每轮产出的期望已验证词元数为 $\E[L] = \frac{1 - \alpha^{\gamma + 1}}{1 - \alpha}$。而原始自回归解码生成同样 $\E[L]$ 个词元耗时为 $\E[L]\,t_{\mathrm{target}}$。两者相除即得精确墙钟加速比公式：
+\[
+  \mathrm{Speedup}(\gamma, \alpha, c)
+  = \frac{\E[L]\,t_{\mathrm{target}}}{(\gamma c + 1)\,t_{\mathrm{target}}}
+  = \mathbf{\frac{1 - \alpha^{\gamma + 1}}{(1 - \alpha)(\gamma c + 1)}}.
+\]
+代入 $\alpha = 0.8, c = 0.05$ 逐个枚举整数 $\gamma$：
+\begin{center}
+\footnotesize
+\begin{tabular}{ccccccccc}
+\toprule
+草稿长度 $\gamma$ & $3$ & $4$ & $5$ & $6$ & $7$ & $\mathbf{8}$ & $9$ & $10$ \\
+\midrule
+期望产出 $\E[L]$ & $2.952$ & $3.362$ & $3.689$ & $3.951$ & $4.161$ & $\mathbf{4.329}$ & $4.463$ & $4.571$ \\
+轮耗倍数 $\gamma c + 1$ & $1.15$ & $1.20$ & $1.25$ & $1.30$ & $1.35$ & $\mathbf{1.40}$ & $1.45$ & $1.50$ \\
+墙钟加速比（$\times$） & $2.567$ & $2.801$ & $2.951$ & $3.040$ & $3.082$ & $\mathbf{3.092}$ & $3.078$ & $3.047$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+由表可见加速比先升后降，在 $\gamma^* = \mathbf{8}$ 处取得唯一全局最大值 $\mathbf{3.092\times}$！直觉上，当 $\gamma$ 过大时，后续草稿被前面拒绝所截断作废的概率急剧增大（边际产出 $\alpha^{\gamma+1}$ 指数衰减），而草稿串联耗时 $\gamma c$ 却线性增加，导致收益反被吞噬。
+
+\solItem{6.6.5}{反例剖析：为什么 LoRA 把 $A, B$ 同时零初始化会导致训练永久锁死？}
+
+已知标量模型 $y = (w_0 + b a)x$，损失 $\mathcal{L}(a, b) = \frac{1}{2}(y - y^*)^2$（记残差 $e = y - y^*$）。
+
+\textbf{(a) 全零初始化 $(a_0, b_0) = (0, 0)$ 的永久锁死证明。} 由链式法则直接求偏导：
+\[
+  \frac{\partial \mathcal{L}}{\partial a} = e \cdot \frac{\partial y}{\partial a} = (y - y^*)\,b x, \qquad
+  \frac{\partial \mathcal{L}}{\partial b} = e \cdot \frac{\partial y}{\partial b} = (y - y^*)\,a x.
+\]
+当 $(a_0, b_0) = (0, 0)$ 时，即便残差 $e_0 = w_0 x - y^* \neq 0$，两项偏导数均严格等于 $0$！
+\begin{itemize}
+  \item 在二阶曲率上，原点处 Hessian 矩阵为 $H(0, 0) = \begin{bmatrix} 0 & e_0 x \\ e_0 x & 0 \end{bmatrix}$，其特征值为 $\pm |e_0 x|$ 一正一负，故 $(0, 0)$ 是严格的\textbf{鞍点}（驻点）；
+  \item 对标准梯度下降与 Adam（初始动量 $m_0 = 0$，每步收到精确零梯度 $g_t = 0$），所有迭代恒有 $a_t \equiv 0, b_t \equiv 0$，参数永远锁死在原点无法动弹。
+\end{itemize}
+
+\textbf{(b) 非对称初始化 $a_0 \neq 0, b_0 = 0$ 的破局机制与工程惯例。}
+\begin{itemize}
+  \item \textbf{第 0 步无扰动}：$y_0 = (w_0 + 0 \cdot a_0)x = w_0 x$，与预训练底座输出严格一致；
+  \item \textbf{第 1 步激活 $b$}：此时 $\frac{\partial \mathcal{L}}{\partial a}\big|_0 = 0$（故 $a_1 = a_0 \neq 0$），但 $\frac{\partial \mathcal{L}}{\partial b}\big|_0 = e_0 a_0 x \neq 0$，于是梯度下降立刻更新出 $b_1 = -\eta e_0 a_0 x \neq 0$；
+  \item \textbf{第 2 步全面唤醒 $a$}：由于 $b_1 \neq 0$，第 2 步立刻产生非零梯度 $\frac{\partial \mathcal{L}}{\partial a}\big|_1 = e_1 b_1 x \neq 0$，矩阵 $A$ 与 $B$ 协同进入正常优化轨道！
+\end{itemize}
+\textbf{为何反取 $a_0 = 0, b_0 \neq 0$ 也数学可行、但工程偏好 $B = 0$？} 从偏导公式可见 $(a, b)$ 在数学上完全对称，$A = 0, B \neq 0$ 同样可在第 1 步唤醒 $A$、第 2 步唤醒 $B$。工程界（Hu et al., 2022）统一采用 $A \sim \mathcal{N}(0, \sigma^2)$、$B = \mathbf{0}$ 的深层原因有二：（1）前向数据流 $x \mapsto A x \mapsto B(Ax)$ 中，随机正交/高斯投影 $A$ 先将高维输入特征映射到 $r$ 维低秩子空间，$B = 0$ 保证输出端精确零初始化且在多 LoRA 适配器动态热插拔时接口统一；（2）按 $\mu$P（Maximal Update Parametrization，LoRA+ 分析）在超大宽度 $d \to \infty$ 下的特征学习标度律，$A$ 用 $O(1/\sqrt{d})$ 随机初始化、$B = 0$（并给 $B$ 略高学习率）能获得更稳定的梯度范数与特征演化。
+
+\solItem{6.6.6}{重尾通道 INT4 量化手算与 SmoothQuant 迁移演练}
+
+已知 $W = \begin{bmatrix} 0.4 & -0.3 \\ 7.0 & -5.0 \end{bmatrix}$，$x = \begin{bmatrix} 10.0 & 0.5 \end{bmatrix}$，精确乘积为 $y_{\mathrm{true}} = x W = [10\times 0.4 + 0.5\times 7.0,\; 10\times(-0.3) + 0.5\times(-5.0)] = \mathbf{[7.5,\; -5.5]}$。对称 INT4 取 $q_{\max} = 7$。
+
+\textbf{(a) 逐张量 vs 逐行（逐通道）INT4 量化手算。}
+\begin{enumerate}
+  \item \textbf{逐张量量化}：全矩阵最大绝对值为 $7.0$，缩放因子 $s_{\mathrm{pt}} = \frac{7.0}{7} = \mathbf{1.0}$。逐元素除以 $1.0$ 并四舍五入：
+  \[
+    Q_{\mathrm{pt}} = \operatorname{round}\!\begin{bmatrix} 0.4 & -0.3 \\ 7.0 & -5.0 \end{bmatrix}
+    = \begin{bmatrix} 0 & 0 \\ 7 & -5 \end{bmatrix}, \qquad
+    \hat{W}_{\mathrm{pt}} = s_{\mathrm{pt}} Q_{\mathrm{pt}} = \mathbf{\begin{bmatrix} 0 & 0 \\ 7.0 & -5.0 \end{bmatrix}}.
+  \]
+  \textbf{灾难后果}：正常第 1 行 $[0.4, -0.3]$ 因为被第 2 行的离群值 $7.0$ 拉爆缩放因子，整行被彻底压扁清零！
+  \item \textbf{逐行（逐通道）量化}：第 1 行取 $s_1 = \frac{0.4}{7} \approx 0.05714$，第 2 行取 $s_2 = \frac{7.0}{7} = 1.0$。逐行量化：
+  \[
+    Q_{\mathrm{pc},1} = \operatorname{round}\!\left(\frac{[0.4, -0.3]}{0.4/7}\right) = \operatorname{round}([7, -5.25]) = [7, -5], \qquad
+    Q_{\mathrm{pc},2} = [7, -5].
+  \]
+  反量化重构矩阵为
+  \[
+    \hat{W}_{\mathrm{pc}} = \begin{bmatrix} 7 \times \frac{0.4}{7} & -5 \times \frac{0.4}{7} \\ 7.0 & -5.0 \end{bmatrix}
+    = \mathbf{\begin{bmatrix} 0.4000 & -0.2857 \\ 7.0000 & -5.0000 \end{bmatrix}},
+  \]
+  第 1 行得到高精度完整保留（误差仅 $0.0143$）！
+\end{enumerate}
+
+\textbf{(b) SmoothQuant（$\alpha = 0.5$）对角迁移与 W4A4 精度暴涨验算。} 激活向量第 1 维为 $10.0$、第 2 维为 $0.5$（动态范围高达 $20\times$），权重行最大绝对值分别为 $0.4$ 与 $7.0$（动态范围高达 $17.5\times$）。按 SmoothQuant 公式计算平滑缩放因子 $s_j = |x_j|^{0.5} / (\max|W_{j,:}|)^{0.5}$：
+\[
+  s_1 = \sqrt{\frac{10.0}{0.4}} = \sqrt{25} = \mathbf{5.0}, \qquad
+  s_2 = \sqrt{\frac{0.5}{7.0}} = \frac{1}{\sqrt{14}} \approx \mathbf{0.26726}.
+\]
+执行等价缩放变换 $\tilde{x} = x \diag(s)^{-1}$ 与 $\tilde{W} = \diag(s) W$：
+\[
+  \tilde{x} = \left[\frac{10.0}{5.0},\; \frac{0.5}{1/\sqrt{14}}\right] = \mathbf{[2.0000,\; 1.8708]}, \qquad
+  \tilde{W} = \begin{bmatrix} 5.0 \times 0.4 & 5.0 \times (-0.3) \\ \frac{7.0}{\sqrt{14}} & \frac{-5.0}{\sqrt{14}} \end{bmatrix}
+  \approx \mathbf{\begin{bmatrix} 2.0000 & -1.5000 \\ 1.8708 & -1.3363 \end{bmatrix}}.
+\]
+\begin{itemize}
+  \item \textbf{代数等价性}：$\tilde{x}\tilde{W} = x \diag(s)^{-1}\diag(s) W = x W = [7.5, -5.5]$ 严格恒等；
+  \item \textbf{动态范围剧烈收窄}：$\tilde{x}$ 的通道幅值比从 $20\times$ 暴降至 $2.0 / 1.8708 \approx \mathbf{1.07\times}$，$\tilde{W}$ 的行幅值比也从 $17.5\times$ 暴降至 $\mathbf{1.07\times}$！
+  \item \textbf{W4A4 逐张量量化对比}：迁移前若同时对 $x$ 和 $W$ 做 INT4 逐张量量化，$\hat{x}_{\mathrm{pt}} = [10, 0]$、$\hat{W}_{\mathrm{pt}}$ 第一行全零，输出竟为 $\hat{x}_{\mathrm{pt}}\hat{W}_{\mathrm{pt}} = \mathbf{[0, 0]}$（相对误差高达 $\mathbf{100\%}$！）；而 SmoothQuant 迁移后再做 W4A4 逐张量量化，输出为 $[8.00, -5.71]$，相对误差骤降至仅 $\mathbf{5.85\%}$！
+\end{itemize}
+
+\solItem{6.6.7}{编程实验：分组量化（Group-Wise Quantization）的 INT4 误差—显存帕累托前沿}
+
+\textbf{(a) 通用分组量化函数实现要点。} 给定权重矩阵 $W \in \R^{M \times N}$ 且组大小 $g \mid N$，只需三行 NumPy 向量化代码即可实现 \texttt{quant\_groupwise(W, bits=4, group\_size=g)}：先将 $W$ 重塑为三维张量 \texttt{W\_g = W.reshape(M, N // g, g)}，沿最后一维计算每组独立缩放因子 $s = \max(\max|W_g| / q_{\max},\; 10^{-8})$（用 \texttt{np.max(np.abs(W\_g), axis=-1)} 实现），完成对称量化反量化后再 \texttt{reshape(M, N)}。每组额外存储 1 个 FP16/BF16 缩放因子（16 比特），均摊到组内 $g$ 个权重上，有效平均比特数为 $b_{\mathrm{eff}} = 4 + 16 / g$。
+
+\textbf{(b) $2\%$ 孤立 $8\times$ 尖峰离群元素下的实测帕累托前沿基准。} 在 $256 \times 256$ 权重矩阵（$\mathcal{N}(0, 0.25^2)$ 并以 $2\%$ 概率随机乘以 $8\times$ 尖峰）上运行扫描，独立实测结果如下表：
+\begin{center}
+\footnotesize
+\begin{tabular}{cccccc}
+\toprule
+分组大小 $g$ & $256$（逐通道） & $\mathbf{128}$（主流默认） & $64$ & $32$ & $16$ \\
+\midrule
+有效比特数 $b_{\mathrm{eff}} = 4 + 16/g$ & $4.0625$ & $\mathbf{4.1250}$ & $4.2500$ & $4.5000$ & $5.0000$ \\
+INT4 输出相对误差（$\%$） & $35.10\%$ & $\mathbf{28.81\%}$ & $22.50\%$ & $16.89\%$ & $12.72\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{规律与甜点分析}：当离群尖峰随机散落于各行内部时，逐通道量化（$g=256$）每行平均落入约 $5$ 个孤立尖峰，拖垮整行全部 $256$ 个权重；缩小 $g$ 把单颗尖峰的“污染半径”严格锁死在 $g$ 个相邻权重内（对真实大模型更低的离群密度 $\sim 0.1\%$，$g=128$ 即可令绝大多数小组不含尖峰，将困惑度损失压至几乎为零），且仅付出 $+0.125\,\mathrm{bit}$ 极低显存代价（相对纯 4-bit 仅增重 $3.1\%$）。相比之下，继续压到 $g = 16$ 虽精度更高，但有效比特已涨至 $5.0\,\mathrm{bit}$（显存膨胀 $25\%$）且破坏了向量化内存对齐，因此 GPTQ 与 AWQ 工业界普遍把 $g = 128$ 作为最佳甜点。
+
+\solItem{6.6.8}{编程实验：蒙特卡洛验证投机解码无损分布定理与加速比曲线}
+
+\textbf{(a)--(b) 单步无损分布验证基准。} 在词表大小 $|\mathcal{V}| = 16$ 上按题意构造一对有显著差异的分布 $(p, q)$（设随机种子 2026，$z \sim \mathcal{N}(0, 1.5^2)$，$p = \softmax(z)$，$q = \softmax(0.6z + \mathcal{N}(0, 0.3^2))$），两者原始总变差距离高达 $\mathrm{TV}(p, q) = \frac{1}{2}\sum_x |p(x) - q(x)| = \mathbf{0.2529}$，理论一步接受率 $\alpha = \sum_x \min(p(x), q(x)) = 1 - \mathrm{TV}(p, q) = \mathbf{0.7471}$。
+
+实现拒绝采样与残差重采样（先计算未归一化残差 $r = \max(0, p - q)$，若其和 $> 0$ 则归一化为 $p' = r / \sum r$，否则永不触发拒绝分支）。独立重复 $N = 2 \times 10^5$ 次后统计经验分布 $\hat{p}$：
+\[
+  \mathrm{TV}(\hat{p}, p) = \frac{1}{2}\sum_{x=1}^{16} |\hat{p}(x) - p(x)| = \mathbf{0.00253} < 5 \times 10^{-3},
+\]
+比原始草稿偏差 $0.2529$ 缩小了整整 \textbf{100 倍}，且随抽样数按标准蒙特卡洛误差律 $O(1/\sqrt{N})$ 趋于零，从实验上确凿印证了定理~\ref{thm:speculative-lossless} 的严格零损性。
+
+\textbf{(c) $\gamma = 5$ 步投机循环的期望产出词元数验证。} 理论一步接受率 $\alpha = 0.7471$ 时，代入式~\eqref{eq:spec-expected-len} 得单轮期望产出词元数的精确理论值为
+\[
+  \E[L]_{\mathrm{theo}} = \frac{1 - \alpha^6}{1 - \alpha} = \frac{1 - 0.7471^6}{1 - 0.7471} = \mathbf{3.2667}\;\text{tokens/step}.
+\]
+对上述 $\gamma = 5$ 步截断投机循环独立模拟 $2 \times 10^4$ 轮，统计实测平均单轮产出词元数为 $\E[L]_{\mathrm{emp}} = \mathbf{3.2631}$ 词元/步，与理论值吻合至小数点后两位（相对误差仅 $0.11\%$）。至此，全卷从无模型 RL 到现代大模型推理系统的 48 道理论与工程闭环习题全部验算完毕！

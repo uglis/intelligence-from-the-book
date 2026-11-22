@@ -1,0 +1,126 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME III};
+
+  % Bespoke fine-art geometric search-graph, DAG & Bellman trajectory motif (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.32, transform shape]
+    % Faint search frontier rings
+    \draw[teal, opacity=0.10, line width=0.8pt] (-1.6,-0.2) circle (1.2cm);
+    \draw[teal, opacity=0.08, line width=0.7pt] (-1.6,-0.2) circle (2.2cm);
+    \draw[teal, opacity=0.06, line width=0.6pt] (-1.6,-0.2) circle (3.2cm);
+    % Constellation nodes
+    \coordinate (n0) at (-2.2,-0.5);
+    \coordinate (n1) at (-1.0, 0.7);
+    \coordinate (n2) at (-0.8,-0.9);
+    \coordinate (n3) at ( 0.4, 0.3);
+    \coordinate (n4) at ( 0.6,-1.1);
+    \coordinate (n5) at ( 1.8, 0.9);
+    \coordinate (n6) at ( 2.2,-0.3);
+    % Pruned / secondary edges
+    \draw[navy, opacity=0.18, line width=0.8pt, dashed] (n0)--(n2)--(n4)--(n6);
+    \draw[navy, opacity=0.16, line width=0.8pt] (n1)--(n2);
+    \draw[navy, opacity=0.18, line width=0.8pt] (n3)--(n4);
+    \draw[navy, opacity=0.18, line width=0.8pt] (n3)--(n6);
+    % Optimal A* / Bellman trajectory in gold-teal
+    \draw[gold, opacity=0.55, line width=1.5pt, -{Stealth[length=2.2mm]}] (n0)--(n1);
+    \draw[gold, opacity=0.55, line width=1.5pt, -{Stealth[length=2.2mm]}] (n1)--(n3);
+    \draw[gold, opacity=0.55, line width=1.5pt, -{Stealth[length=2.2mm]}] (n3)--(n5);
+    % Nodes
+    \foreach \p in {n2,n4,n6} {\fill[navy, opacity=0.22] (\p) circle (2.6pt);}
+    \foreach \p in {n0,n1,n3} {\fill[teal, opacity=0.40] (\p) circle (3.2pt);}
+    \fill[gold, opacity=0.65] (n5) circle (4.0pt);
+    \draw[gold, opacity=0.45, thick] (n5) circle (6.5pt);
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 3 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{24}{32}\selectfont\sffamily\bfseries\color{ink}经典人工智能：搜索、博弈、\\概率图与序列决策}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}从图算法与概率推理出发，构建能规划、博弈、推理与长远决策的智能体}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 Stanford CS221 / UC Berkeley CS188 / CMU 07-280 / 北大通班，把 408 算法优势转化为 AI 核心能力}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  borderline west={2.6pt}{0pt}{tealDark},
+  arc=2mm,
+  boxrule=0.5pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位：为什么大模型时代依然离不开经典 AI？}\par\vspace{1.2mm}
+\small
+深度学习擅长“直觉感知”（系统 1），而搜索、约束推理、\\概率图与序列决策构成人工智能的“理性规划”（系统 2）。从 AlphaGo 到现代推理大模型的测试时搜索（Test-Time MCTS），再到强化学习（PPO）的 Bellman 方程底座，全部根植于本卷六章：
+\begin{itemize}
+  \item \textbf{搜索与博弈}：把 408 图遍历与优先队列升级为 A* 启发式最优搜索（可采纳与一致性证明）、Minimax、$\alpha$-$\beta$ 剪枝与蒙特卡洛树搜索（MCTS / UCB1）。
+  \item \textbf{约束满足与组合优化}：用 MRV、前向检验、AC-3 弧相容与 Min-Conflicts 局部搜索，将指数级组合爆炸压缩到毫秒求解。
+  \item \textbf{概率图模型与时序推理}：以贝叶斯网络 d-分离、变量消元精确推断、似然加权/Gibbs 采样与 HMM（前向/后向/Viterbi 算法）驾驭结构化不确定性。
+  \item \textbf{马尔可夫决策过程（MDP）}：严格证明 Bellman 算子 $\gamma$-压缩性与策略改进定理，亲手解出随机网格世界最优策略，直通第 6 卷深度强化学习。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 3 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心算法、理论证明与实测实验} \\
+\midrule
+序\quad 章 & 本卷坐标与八校考点覆盖对照 & 系统 1 vs 系统 2、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 状态空间搜索与 A* 启发式算法 & BFS/UCS/IDS、A* 可采纳与一致性证明、松弛启发式与 $25\times 25$ 迷宫实测 \\
+第 2 章 & 对抗博弈、$\alpha$-$\beta$ 剪枝与 MCTS & Minimax、$\alpha$-$\beta$ 等价证明与剪枝率、Expectimax、UCB1 与 MCTS 胜率实测 \\
+第 3 章 & 约束满足问题（CSP）与局部搜索 & 约束图、MRV/LCV、前向检验、AC-3 弧相容、Min-Conflicts 50 皇后与模拟退火 \\
+第 4 章 & 贝叶斯网络、d-分离与精确推断 & DAG 因子分解、三元组与 d-分离、变量消元（VE）引擎与警报网络精确核验 \\
+第 5 章 & 采样推断与隐马尔可夫模型（HMM） & 拒绝采样、似然加权、Gibbs 采样（MCMC）、HMM 滤波/平滑与 Viterbi 解码 \\
+第 6 章 & 马尔可夫决策过程与 Bellman 方程 & MDP、Bellman 期望/最优方程、值迭代 $\gamma$-压缩证明、策略迭代与网格世界实测 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol3\_experiments.py} 与实测数据随本卷提供。上一卷：第 2 卷；下一卷：第 4 卷《凸优化与经典机器学习》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_search_astar}
+\include{chapters/ch02_games_mcts}
+\include{chapters/ch03_csp_localsearch}
+\include{chapters/ch04_bayesnet_ve}
+\include{chapters/ch05_sampling_hmm}
+\include{chapters/ch06_mdp_bellman}
+
+% ==================== Back Matter / Appendix ====================
+\appendix
+\include{chapters/app_solutions}
+
+\end{document}

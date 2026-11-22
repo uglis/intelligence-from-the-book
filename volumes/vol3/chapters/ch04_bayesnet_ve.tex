@@ -1,0 +1,727 @@
+\chapter[贝叶斯网络、d-分离与精确推断]{贝叶斯网络、d-分离与精确推断}\label{ch:bayesnet}
+\chapEpigraph{概率不是关于数字的学问，而是关于推理结构的学问。}{朱迪亚·珀尔（Judea Pearl）}
+
+\begin{chapIntro}{本章导读}
+前三章的世界大体是确定的：在迷宫搜索、棋盘博弈与约束满足中，每一步状态转换都黑白分明。然而现实中的智能体必须面对\textbf{不确定性}：传感器有噪声、疾病症状有交叠、故障原因往往藏在表象之下。第 2 卷已经给出了贝叶斯定理与条件独立性的数学工具，但当系统包含几十上百个随机变量时，完整联合分布表的规模会以 $2^n$ 爆炸。本章引入\textbf{贝叶斯网络（Bayesian Network）}：用有向无环图（DAG）编码局部因果结构，将指数级联合分布压缩为紧凑因子乘积；用\textbf{d-分离（d-Separation）}在图上直接读取任意条件独立关系；最后构建\textbf{变量消元（Variable Elimination, VE）}引擎，把概率精确推断转化为结构化的张量乘法与求和。
+\end{chapIntro}
+
+% ============================================================
+\section{DAG 因子分解与参数指数级压缩}\label{sec:bn-dag}
+% ============================================================
+
+\subsection{为什么完整联合分布表会遭遇维数灾难？}
+
+先看一个贴近日常的小问题。假设你家安装了一套防盗警报系统，涉及 5 个布尔（$0/1$）随机变量：
+\begin{itemize}
+  \item $B$（Burglary）：家中发生入室盗窃；
+  \item $E$（Earthquake）：附近发生轻微地震；
+  \item $A$（Alarm）：防盗警报器拉响；
+  \item $J$（JohnCalls）：邻居约翰听到警报后打电话给你；
+  \item $M$（MaryCalls）：邻居玛丽听到警报后打电话给你。
+\end{itemize}
+原则上，只要掌握五元完整联合分布表 $P(B, E, A, J, M)$，任何条件概率查询——例如“约翰和玛丽同时打来电话时，家里真遭贼的概率 $P(B=1 \mid J=1, M=1)$”——都能通过对隐藏变量求和精确算出。
+
+但请算一笔存储账。5 个二值变量的联合分布有 $2^5 = 32$ 种组合，扣除归一化约束 $\sum P = 1$，仍需要指定 $2^5 - 1 = 31$ 个独立实数。如果把场景换成一家三甲医院的临床诊断系统，仅包含 $n = 30$ 个二值疾病与症状变量，完整联合分布表便需要
+\[
+  2^{30} - 1 = 1{,}073{,}741{,}823 \approx 10.7\ \text{亿}
+\]
+个参数！不要说通过样本估计这么多参数，单是把这张表存进内存就已消耗数 GB；若 $n = 100$，参数量高达 $2^{100} \approx 1.27 \times 10^{30}$，远超全人类历史积累的数据总和。
+
+\begin{recallBox}{概率链式法则与条件独立性（第 2 卷回顾）}
+对任意 $n$ 个随机变量，概率链式法则恒成立：
+\[
+  P(X_1, X_2, \dots, X_n) = \prod_{i=1}^{n} P(X_i \mid X_1, \dots, X_{i-1}).
+\]
+若已知 $X_i$ 在给定子集 $\Pa(X_i) \subseteq \{X_1,\dots,X_{i-1}\}$ 的条件下，与其余所有前驱变量条件独立，即
+\[
+  P(X_i \mid X_1, \dots, X_{i-1}) = P(X_i \mid \Pa(X_i)),
+\]
+则该条件分布表只需依赖少数“直接原因” $\Pa(X_i)$，而不必牵扯全部历史变量。
+\end{recallBox}
+
+回到警报系统：警报是否响起 $A$ 只直接受盗窃 $B$ 与地震 $E$ 影响；约翰是否来电 $J$ 只直接受警报是否响起 $A$ 影响（给定警报响了，约翰并不关心警报是贼触发的还是地震触发的，也不关心玛丽打没打电话）。把这种“直接因果依赖”画成有向边，就得到了朱迪亚·珀尔（Judea Pearl）著名的\textbf{警报贝叶斯网络（Alarm Network）}。
+
+\subsection{贝叶斯网络的形式化定义与参数压缩}
+
+\begin{defBox}
+\begin{definition}[贝叶斯网络，Bayesian Network]\label{def:bn}
+一个\textbf{贝叶斯网络}由二元组 $(\mathcal{G}, \Theta)$ 构成：
+\begin{enumerate}
+  \item \textbf{图结构} $\mathcal{G} = (V, E)$ 是一个\textbf{有向无环图（DAG）}，其中每个顶点 $X_i \in V$ 对应一个随机变量，记 $\Pa(X_i) = \{X_j \in V : (X_j \to X_i) \in E\}$ 为 $X_i$ 的\textbf{父节点集合}；
+  \item \textbf{局部条件概率分布} $\Theta = \{P(X_i \mid \Pa(X_i))\}_{i=1}^n$，对离散变量表现为\textbf{条件概率表（CPT）}，满足对任意父节点取值组合 $\mathbf{pa}_i$，都有 $\sum_{x_i} P(x_i \mid \mathbf{pa}_i) = 1$。
+\end{enumerate}
+该网络所定义的联合概率分布由 \textbf{DAG 因子分解公式} 唯一给出：
+\begin{equation}\label{eq:bn-factorization}
+  P(X_1, X_2, \dots, X_n) = \prod_{i=1}^{n} P\big(X_i \mid \Pa(X_i)\big).
+\end{equation}
+\end{definition}
+\end{defBox}
+
+我们首先要确认式~\eqref{eq:bn-factorization} 定义的确实是一个合法的概率分布（非负且总和为 $1$）。因为 $\mathcal{G}$ 是有向无环图，它必然存在至少一个\textbf{拓扑排序（Topological Ordering）} $X_{\pi(1)}, X_{\pi(2)}, \dots, X_{\pi(n)}$，使得每个节点的父节点都排在它前面。不失一般性设索引本身已是拓扑序，从最后一个节点 $X_n$ 反向逐个求和（因为 $X_n$ 不是任何其他节点的父节点，只出现在最后一个因子中）：
+\[
+  \sum_{x_1,\dots,x_n} \prod_{i=1}^{n} P(x_i \mid \mathbf{pa}_i)
+  = \sum_{x_1,\dots,x_{n-1}} \prod_{i=1}^{n-1} P(x_i \mid \mathbf{pa}_i)
+    \underbrace{\sum_{x_n} P(x_n \mid \mathbf{pa}_n)}_{=1}
+  = \cdots = 1.
+\]
+\textbf{压缩幅度有多惊人？} 设所有变量均为二值，且每个节点最多有 $k$ 个父节点（入度上限 $k \ll n$）。第 $i$ 个节点的 CPT 只需存储 $2^{|\Pa(X_i)|} \le 2^k$ 个独立参数，因此全网络参数总数至多为
+\[
+  \sum_{i=1}^{n} 2^{|\Pa(X_i)|} \le n \cdot 2^k = O(n 2^k).
+\]
+当 $n = 30, k = 3$ 时，完整联合表需要 $10.7$ 亿个参数，而贝叶斯网络至多只需 $30 \times 2^3 = 240$ 个参数——实现了近 $450$ 万倍的指数级压缩！
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=12mm and 22mm,
+  rv/.style={
+    circle, draw=tealDark, very thick, fill=tealLight,
+    minimum size=11.5mm, font=\sffamily\bfseries\normalsize, text=ink
+  },
+  arr/.style={-{Stealth[length=2.4mm]}, very thick, teal},
+  cpt/.style={
+    rectangle, rounded corners=1.2mm, draw=navy!35, fill=white,
+    font=\scriptsize, inner sep=3.2pt, align=left
+  }
+]
+  % Nodes
+  \node[rv] (B) {$B$};
+  \node[rv, right=38mm of B] (E) {$E$};
+  \node[rv, below=18mm of $(B)!0.5!(E)$] (A) {$A$};
+  \node[rv, below left=19mm and 17mm of A] (J) {$J$};
+  \node[rv, below right=19mm and 17mm of A] (M) {$M$};
+
+  % Subtitles inside/near nodes
+  \node[above=1mm of B, font=\scriptsize\sffamily, text=slate] {盗窃（Burglary）};
+  \node[above=1mm of E, font=\scriptsize\sffamily, text=slate] {地震（Earthquake）};
+  \node[right=1.5mm of A, font=\scriptsize\sffamily, text=slate] {警报（Alarm）};
+  \node[below=1mm of J, font=\scriptsize\sffamily, text=slate] {约翰来电（John）};
+  \node[below=1mm of M, font=\scriptsize\sffamily, text=slate] {玛丽来电（Mary）};
+
+  % Directed Edges
+  \draw[arr] (B) -- (A);
+  \draw[arr] (E) -- (A);
+  \draw[arr] (A) -- (J);
+  \draw[arr] (A) -- (M);
+
+  % CPT Tables
+  \node[cpt, left=8mm of B] (cptB) {%
+    \textbf{\color{navy}$P(B=1)$}\\[-1pt]
+    \begin{tabular}{@{}c@{}}
+      \toprule
+      $0.001$ \\
+      \bottomrule
+    \end{tabular}};
+  \draw[dashed, navy!45] (cptB.east) -- (B.west);
+
+  \node[cpt, right=8mm of E] (cptE) {%
+    \textbf{\color{navy}$P(E=1)$}\\[-1pt]
+    \begin{tabular}{@{}c@{}}
+      \toprule
+      $0.002$ \\
+      \bottomrule
+    \end{tabular}};
+  \draw[dashed, navy!45] (cptE.west) -- (E.east);
+
+  \node[cpt, right=20mm of A] (cptA) {%
+    \textbf{\color{navy}$P(A=1\mid B,E)$}\\[-1pt]
+    \begin{tabular}{@{}ccc@{}}
+      \toprule
+      $B$ & $E$ & $P(A=1)$ \\
+      \midrule
+      $1$ & $1$ & $0.95$ \\
+      $1$ & $0$ & $0.94$ \\
+      $0$ & $1$ & $0.29$ \\
+      $0$ & $0$ & $0.001$ \\
+      \bottomrule
+    \end{tabular}};
+  \draw[dashed, navy!45] (cptA.west) -- ([xshift=17mm]A.east);
+
+  \node[cpt, left=9mm of J] (cptJ) {%
+    \textbf{\color{navy}$P(J=1\mid A)$}\\[-1pt]
+    \begin{tabular}{@{}cc@{}}
+      \toprule
+      $A$ & $P(J=1)$ \\
+      \midrule
+      $1$ & $0.90$ \\
+      $0$ & $0.05$ \\
+      \bottomrule
+    \end{tabular}};
+  \draw[dashed, navy!45] (cptJ.east) -- (J.west);
+
+  \node[cpt, right=9mm of M] (cptM) {%
+    \textbf{\color{navy}$P(M=1\mid A)$}\\[-1pt]
+    \begin{tabular}{@{}cc@{}}
+      \toprule
+      $A$ & $P(M=1)$ \\
+      \midrule
+      $1$ & $0.70$ \\
+      $0$ & $0.01$ \\
+      \bottomrule
+    \end{tabular}};
+  \draw[dashed, navy!45] (cptM.west) -- (M.east);
+\end{tikzpicture}
+\caption{Pearl 经典 5 节点警报贝叶斯网络（Alarm Network）与精确条件概率表（CPT）。完整联合分布需 $2^5 - 1 = 31$ 个独立参数，而该 DAG 因子分解仅需 $1 + 1 + 4 + 2 + 2 = 10$ 个独立参数。}
+\label{fig:alarm-bn}
+\end{figure}
+
+观察图~\ref{fig:alarm-bn} 中的警报网络，其联合分布分解为
+\begin{equation}\label{eq:alarm-joint}
+  P(B, E, A, J, M) = P(B)\, P(E)\, P(A \mid B, E)\, P(J \mid A)\, P(M \mid A).
+\end{equation}
+清点参数个数：$P(B)$ 需 $1$ 个、$P(E)$ 需 $1$ 个、$P(A\mid B,E)$ 需 $4$ 个、$P(J\mid A)$ 需 $2$ 个、$P(M\mid A)$ 需 $2$ 个，总计仅 $10$ 个独立实数，比 $31$ 个减少了三分之二以上。利用式~\eqref{eq:alarm-joint}，可以立刻算出任意单个完整事件的概率；例如“没遭贼、没地震，但警报误响，且约翰与玛丽双双打来电话”的概率为
+\[
+  P(B=0, E=0, A=1, J=1, M=1) = 0.999 \times 0.998 \times 0.001 \times 0.90 \times 0.70 \approx 6.281 \times 10^{-4}.
+\]
+
+\subsection{局部马尔可夫性质}
+
+DAG 的每一条\textbf{缺失的边}都在悄悄声明一条条件独立性假设。最基础的结构定理是局部马尔可夫性质。
+
+\begin{thmBox}
+\begin{theorem}[局部马尔可夫性质，Local Markov Property]\label{thm:local-markov}
+设分布 $P$ 沿有向无环图 $\mathcal{G}$ 按式~\eqref{eq:bn-factorization} 分解。记 $\operatorname{Desc}(X_i)$ 为 $X_i$ 的所有后代节点集合（沿有向边可从 $X_i$ 到达的节点），$\operatorname{NonDesc}(X_i) = V \setminus (\{X_i\} \cup \operatorname{Desc}(X_i))$ 为其非后代节点集合。则对任意节点 $X_i \in V$，均有
+\[
+  X_i \indep \operatorname{NonDesc}(X_i) \setminus \Pa(X_i) \;\Big|\; \Pa(X_i).
+\]
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+因为 $\mathcal{G}$ 是 DAG，可将所有非后代节点 $\operatorname{NonDesc}(X_i)$ 排在 $X_i$ 之前，将所有后代节点 $\operatorname{Desc}(X_i)$ 排在 $X_i$ 之后，得到一个合法的拓扑排序。设 $X_i$ 在该拓扑序中的位置为 $m$，使得 $\{X_1,\dots,X_{m-1}\} = \operatorname{NonDesc}(X_i)$。对式~\eqref{eq:bn-factorization} 中位于 $X_i$ 之后的全部后代变量按逆拓扑序依次求和消去，每一项的 CPT 求和均为 $1$，于是得到前缀边际分布：
+\[
+  P\big(\operatorname{NonDesc}(X_i), X_i\big)
+  = \left[\prod_{j=1}^{m-1} P\big(X_j \mid \Pa(X_j)\big)\right] P\big(X_i \mid \Pa(X_i)\big)
+  = P\big(\operatorname{NonDesc}(X_i)\big)\, P\big(X_i \mid \Pa(X_i)\big).
+\]
+两边同除以 $P(\operatorname{NonDesc}(X_i))$（在正概率支撑集上），即得 $P(X_i \mid \operatorname{NonDesc}(X_i)) = P(X_i \mid \Pa(X_i))$，这正是所求的条件独立性。
+\end{proof}
+
+\begin{failBox}{建图常见误区：环路非法性与逆因果建图的代价}
+\begin{enumerate}
+  \item \textbf{为什么绝对不能出现有向环？} 若存在环路 $A \to B \to A$，试图写成 $P(A,B) = P(A\mid B)P(B\mid A)$ 会破坏归一化。例如设 $P(A=1\mid B=1)=0.9, P(A=1\mid B=0)=0.1$ 且 $P(B=1\mid A=1)=0.9, P(B=1\mid A=0)=0.1$，则四项乘积之和为 $0.9^2 + 0.1^2 + 0.1^2 + 0.9^2 = 1.64 \neq 1$！需要处理无向循环依赖时，应使用无向图模型（马尔可夫随机场，MRF），并显式除以配分函数 $Z$。
+  \item \textbf{按反因果顺序建图虽合法但极其臃肿}：任何联合分布按任意变量排序用链式法则展开都能建成一个完全 DAG，但若把警报网络按“症状 $\to$ 原因”顺序 $(J, M, A, B, E)$ 建图，因为 $J$ 和 $M$ 边际上不独立，$B$ 和 $E$ 在给定 $A$ 后也不独立，最终必须补上大量稠密边，参数数量会暴增回接近完整联合表！因此，\textbf{顺着物理或因果生成方向画边}总能得到最稀疏、最可解释的网络。
+\end{enumerate}
+\end{failBox}
+
+% ============================================================
+\section{三大基本三元组与 d-分离（d-Separation）判定法则}\label{sec:bn-dsep}
+% ============================================================
+
+局部马尔可夫性质只回答了“节点与非后代”的关系。但在实际推理中，我们需要回答任意复杂的全局问题：在图~\ref{fig:alarm-bn} 中，
+\begin{itemize}
+  \item 在没人打电话之前，盗窃 $B$ 和地震 $E$ 是否独立？
+  \item 接到约翰的电话 $J=1$ 之后，$B$ 和 $E$ 还独立吗？
+  \item 若已经确认警报响了（$A=1$），知道约翰打来电话 $J=1$ 还会改变玛丽打电话的概率吗？
+\end{itemize}
+令人拍案叫绝的是，任意复杂的 DAG 中任意两组变量间的条件独立性，全都归结为\textbf{三种最基本三元组（Triple）}上的信息流通规则。
+
+\subsection{三种基本三元组：链式、分叉与对撞}
+
+考虑无向路径上连续的三个节点 $X - Z - Y$，忽略左右对称后只有三种有向组合（图~\ref{fig:triples}）：
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  rv/.style={circle, draw=tealDark, thick, fill=tealLight, minimum size=8.5mm, font=\sffamily\bfseries\small, text=ink},
+  obs/.style={circle, draw=ochre, very thick, fill=ochreLight, minimum size=8.5mm, font=\sffamily\bfseries\small, text=ochre},
+  arr/.style={-{Stealth[length=2.1mm]}, thick, ink!75},
+  openflow/.style={-{Stealth[length=2mm]}, very thick, teal, dashed},
+  blockline/.style={ochre, very thick},
+  panel/.style={rectangle, rounded corners=2mm, draw=tealLine, fill=white, inner sep=4pt}
+]
+  % ===== Panel 1: Chain =====
+  \begin{scope}[xshift=0cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=codebg!45] (-2.4,-3.35) rectangle (2.4,2.25);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0,1.88) {(1) 链式结构（Chain）};
+    \node[font=\scriptsize, text=slate] at (0,1.50) {$X \to Z \to Y$};
+
+    % Unobserved Z -> OPEN
+    \node[rv] (c1x) at (-1.5, 0.65) {$X$};
+    \node[rv] (c1z) at ( 0.0, 0.65) {$Z$};
+    \node[rv] (c1y) at ( 1.5, 0.65) {$Y$};
+    \draw[arr] (c1x) -- (c1z);
+    \draw[arr] (c1z) -- (c1y);
+    \draw[openflow] (-1.45, 0.12) to[bend right=18] (1.45, 0.12);
+    \node[font=\scriptsize\sffamily, text=teal] at (0,-0.45) {$Z$ 未观测：\textbf{畅通（Active）}};
+
+    % Observed Z -> BLOCKED
+    \node[rv]  (c2x) at (-1.5,-1.65) {$X$};
+    \node[obs] (c2z) at ( 0.0,-1.65) {$Z$};
+    \node[rv]  (c2y) at ( 1.5,-1.65) {$Y$};
+    \draw[arr] (c2x) -- (c2z);
+    \draw[arr] (c2z) -- (c2y);
+    \draw[blockline] (-0.20,-2.52) -- (0.20,-2.22) (-0.20,-2.22) -- (0.20,-2.52);
+    \node[font=\scriptsize\sffamily, text=ochre] at (0,-2.95) {$Z$ 已观测：\textbf{阻断（Blocked）}};
+  \end{scope}
+
+  % ===== Panel 2: Fork =====
+  \begin{scope}[xshift=5.4cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=codebg!45] (-2.4,-3.35) rectangle (2.4,2.25);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0,1.88) {(2) 分叉结构（Fork）};
+    \node[font=\scriptsize, text=slate] at (0,1.50) {$X \leftarrow Z \to Y$};
+
+    % Unobserved Z -> OPEN
+    \node[rv] (f1x) at (-1.5, 0.35) {$X$};
+    \node[rv] (f1z) at ( 0.0, 0.95) {$Z$};
+    \node[rv] (f1y) at ( 1.5, 0.35) {$Y$};
+    \draw[arr] (f1z) -- (f1x);
+    \draw[arr] (f1z) -- (f1y);
+    \draw[openflow] (-1.45,-0.08) to[bend right=15] (1.45,-0.08);
+    \node[font=\scriptsize\sffamily, text=teal] at (0,-0.52) {$Z$ 未观测：\textbf{畅通（Active）}};
+
+    % Observed Z -> BLOCKED
+    \node[rv]  (f2x) at (-1.5,-2.05) {$X$};
+    \node[obs] (f2z) at ( 0.0,-1.40) {$Z$};
+    \node[rv]  (f2y) at ( 1.5,-2.05) {$Y$};
+    \draw[arr] (f2z) -- (f2x);
+    \draw[arr] (f2z) -- (f2y);
+    \draw[blockline] (-0.20,-2.52) -- (0.20,-2.22) (-0.20,-2.22) -- (0.20,-2.52);
+    \node[font=\scriptsize\sffamily, text=ochre] at (0,-2.95) {$Z$ 已观测：\textbf{阻断（Blocked）}};
+  \end{scope}
+
+  % ===== Panel 3: Collider / V-Structure =====
+  \begin{scope}[xshift=10.8cm]
+    \draw[rounded corners=2mm, draw=ochre!50, fill=ochreLight!30] (-2.55,-3.35) rectangle (2.55,2.25);
+    \node[font=\sffamily\bfseries\small, text=ochre] at (0,1.88) {(3) 对撞结构（Collider / V-结构）};
+    \node[font=\scriptsize, text=slate] at (0,1.50) {$X \to Z \leftarrow Y$（反转！）};
+
+    % Unobserved Z & D -> BLOCKED
+    \node[rv] (v1x) at (-1.5, 0.95) {$X$};
+    \node[rv] (v1z) at ( 0.0, 0.45) {$Z$};
+    \node[rv] (v1y) at ( 1.5, 0.95) {$Y$};
+    \draw[arr] (v1x) -- (v1z);
+    \draw[arr] (v1y) -- (v1z);
+    \draw[blockline] (-0.18,-0.32) -- (0.18,-0.04) (-0.18,-0.04) -- (0.18,-0.32);
+    \node[font=\scriptsize\sffamily, text=ochre] at (0,-0.62) {$Z$ 及后代均未观测：\textbf{阻断}};
+
+    % Observed Z or Descendant D -> OPEN!
+    \node[rv]  (v2x) at (-1.5,-1.52) {$X$};
+    \node[rv]  (v2z) at ( 0.0,-1.95) {$Z$};
+    \node[rv]  (v2y) at ( 1.5,-1.52) {$Y$};
+    \node[obs, minimum size=6.2mm, font=\sffamily\bfseries\scriptsize] (v2d) at (0.0,-2.72) {$D$};
+    \draw[arr] (v2x) -- (v2z);
+    \draw[arr] (v2y) -- (v2z);
+    \draw[arr] (v2z) -- (v2d);
+    \draw[openflow] (-1.35,-1.08) to[bend left=12] (1.35,-1.08);
+    \node[font=\scriptsize\sffamily, text=teal] at (0,-3.14) {$Z$ 或后代 $D$ 被观测：\textbf{打通！}};
+  \end{scope}
+\end{tikzpicture}}
+\caption{贝叶斯网络三大基本三元组的信息流通规则（橙色实心边框代表已观测节点）。链式与分叉结构在观测中间节点 $Z$ 后被阻断；\textbf{对撞（V-结构）恰好相反}：默认阻断，一旦观测到对撞节点 $Z$ 或其任意后代 $D$，路径反而被打通（解释消除效应）。}
+\label{fig:triples}
+\end{figure}
+
+我们用两行代数分别验证这三种结构的概率行为：
+\begin{enumerate}
+  \item \textbf{链式结构（Chain：$X \to Z \to Y$）}：联合分布为 $P(X)P(Z\mid X)P(Y\mid Z)$。
+  \begin{itemize}
+    \item $Z$ 未观测时，$X$ 通过 $Z$ 间接影响 $Y$，通常 $X \not\indep Y$（例如盗窃 $B \to A \to J$ 提高约翰来电概率）；
+    \item $Z$ 已观测时，$P(Y \mid X, Z) = \frac{P(X)P(Z\mid X)P(Y\mid Z)}{P(X)P(Z\mid X)} = P(Y\mid Z)$，故 $X \indep Y \mid Z$（路径被阻断）。
+  \end{itemize}
+  \item \textbf{分叉结构（Fork：$X \leftarrow Z \to Y$）}：联合分布为 $P(Z)P(X\mid Z)P(Y\mid Z)$。
+  \begin{itemize}
+    \item $Z$ 未观测时，$X$ 和 $Y$ 共享隐含“共同原因” $Z$，通常 $X \not\indep Y$（例如未确认警报 $A$ 时，约翰来电 $J$ 会让人怀疑警报响了，进而预测玛丽 $M$ 也可能来电）；
+    \item $Z$ 已观测时，$P(X, Y \mid Z) = P(X\mid Z)P(Y\mid Z)$，故 $X \indep Y \mid Z$（路径被阻断）。
+  \end{itemize}
+  \item \textbf{对撞结构（Collider / V-Structure：$X \to Z \leftarrow Y$）}：联合分布为 $P(X)P(Y)P(Z\mid X, Y)$。
+  \begin{itemize}
+    \item $Z$ 及其所有后代均未观测时，对 $Z$ 求和得 $P(X, Y) = P(X)P(Y)\sum_z P(z\mid X, Y) = P(X)P(Y)$，故 $X \indep Y$（\textbf{天然阻断}！盗窃与地震毫无瓜葛）；
+    \item 一旦观测到 $Z$（或其任意后代 $D$），$P(X, Y \mid Z) \propto P(X)P(Y)P(Z\mid X, Y)$ 中的耦合项 $P(Z\mid X, Y)$ 无法拆成 $f(X)g(Y)$，因此 $X \not\indep Y \mid Z$（\textbf{路径反被打开！}）。
+  \end{itemize}
+\end{enumerate}
+
+第 2 卷我们曾感性见识过对撞结构带来的\textbf{解释消除（Explaining Away）}效应，现在我们在图~\ref{fig:alarm-bn} 的警报网络上给出精确数值核验：
+\begin{itemize}
+  \item \textbf{无任何证据}：盗窃的先验概率极低，$P(B=1) = 0.0010$；
+  \item \textbf{观测到对撞节点 $A=1$（警报拉响）}：经精确计算，$P(B=1 \mid A=1) = 0.3736$，盗窃嫌疑飙升 $374$ 倍；
+  \item \textbf{再观测到另一原因 $E=1$（新闻播报刚发生地震）}：此时盗窃后验骤降至
+  \[
+    P(B=1 \mid A=1, E=1) = \frac{0.001 \times 0.002 \times 0.95}{0.001 \times 0.002 \times 0.95 + 0.999 \times 0.002 \times 0.29} = 0.003268!
+  \]
+  地震“解释掉了”警报响起的原因，把盗窃概率一口气压低了 $114$ 倍！同样地，即使没亲耳听到警报，只要观测到后代 $J=1, M=1$，再得知 $E=1$ 也会把 $P(B=1 \mid J=1, M=1) = 0.2842$ 压低至 $P(B=1 \mid J=1, M=1, E=1) = 0.003262$。这就是为什么对撞节点的\textbf{后代被观测同样会打开路径}。
+\end{itemize}
+
+\subsection{d-分离的形式化定义与路径追踪算法}
+
+将三元组规则推广到任意长度的无向路径，便得到 Pearl 的 \textbf{d-分离（Directed Separation）}准则。
+
+\begin{defBox}
+\begin{definition}[活跃路径与 d-分离，d-Separation]\label{def:dsep}
+在 DAG $\mathcal{G} = (V, E)$ 中，给定观测证据集 $\mathbf{Z} \subseteq V$，称一条连接节点 $X$ 与 $Y$ 的无向简单路径 $p = (U_1 - U_2 - \cdots - U_m)$（其中 $U_1=X, U_m=Y$）是\textbf{关于 $\mathbf{Z}$ 活跃（Active）}的，当且仅当路径上每一个连续三元组 $(U_{k-1}, U_k, U_{k+1})$ 都满足：
+\begin{enumerate}
+  \item 若为链式（$U_{k-1}\to U_k\to U_{k+1}$ 或 $U_{k-1}\leftarrow U_k\leftarrow U_{k+1}$）或分叉（$U_{k-1}\leftarrow U_k\to U_{k+1}$），则中间节点 $U_k \notin \mathbf{Z}$；
+  \item 若为对撞（$U_{k-1}\to U_k\leftarrow U_{k+1}$），则 $U_k \in \mathbf{Z}$ 或 $U_k$ 的至少一个后代属于 $\mathbf{Z}$。
+\end{enumerate}
+如果只要有哪怕一个三元组不满足上述条件，则称该路径被 $\mathbf{Z}$ \textbf{阻断（Blocked）}。
+
+对互不相交的三个节点子集 $\mathbf{X}, \mathbf{Y}, \mathbf{Z} \subseteq V$，若从任意 $X \in \mathbf{X}$ 到任意 $Y \in \mathbf{Y}$ 的\textbf{所有}无向路径均被 $\mathbf{Z}$ 阻断，则称 $\mathbf{Z}$ \textbf{d-分离} $\mathbf{X}$ 与 $\mathbf{Y}$，记作 $\operatorname{d-sep}_{\mathcal{G}}(\mathbf{X}, \mathbf{Y} \mid \mathbf{Z})$。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[d-分离的可靠性，Soundness of d-Separation]\label{thm:dsep}
+对于任意沿 DAG $\mathcal{G}$ 因子分解的概率分布 $P$，图上的 d-分离必然蕴含概率上的条件独立：
+\[
+  \operatorname{d-sep}_{\mathcal{G}}(\mathbf{X}, \mathbf{Y} \mid \mathbf{Z}) \implies \mathbf{X} \indep_P \mathbf{Y} \mid \mathbf{Z}.
+\]
+\end{theorem}
+\end{thmBox}
+
+\begin{remark}[逆命题与忠实性]
+注意定理~\ref{thm:dsep} 是单向蕴含：若图上存在活跃路径（非 d-分离），则\textbf{几乎所有}满足该 DAG 的 CPT 参数下都有 $\mathbf{X} \not\indep_P \mathbf{Y} \mid \mathbf{Z}$；只有当 CPT 数值被人为凑巧抵消时（例如正负两条路径效应精确相消），才可能出现图连通却巧合独立的“非忠实（Unfaithful）”特例。算法实现上，判断 d-分离无需枚举指数条路径，只需两步线性时间图搜索（称为 \textbf{Bayes-Ball 算法}）：先从 $\mathbf{Z}$ 沿有向边反向 BFS 标出所有祖先节点（用于瞬间判断对撞节点是否有观测后代），再从 $\mathbf{X}$ 出发按上述三元组规则做带方向标记的 BFS，时间复杂度仅 $O(|V| + |E|)$。
+\end{remark}
+
+\begin{example}[警报网络上的 d-分离逐路径实战]\label{ex:alarm-dsep}
+在图~\ref{fig:alarm-bn} 的 5 节点警报网络中，逐一判定以下四条独立性断言：
+\begin{enumerate}
+  \item \textbf{检验 $B \indep E$（$\mathbf{Z} = \emptyset$）}：连接 $B$ 与 $E$ 的唯一无向路径是 $B \to A \leftarrow E$。唯一三元组为对撞节点 $A$；因 $A$ 及其后代 $J, M$ 均不在 $\emptyset$ 中，路径被阻断，故 $B \indep E$ 成立。
+  \item \textbf{检验 $B \indep E \mid J$（$\mathbf{Z} = \{J\}$）}：唯一路径仍为 $B \to A \leftarrow E$。虽然 $A \notin \{J\}$，但 $J$ 是 $A$ 的后代且 $J \in \mathbf{Z}$，因此对撞三元组被\textbf{打通}！存在活跃路径，故 $B \not\indep E \mid J$。
+  \item \textbf{检验 $J \indep M \mid A$（$\mathbf{Z} = \{A\}$）}：连接 $J$ 与 $M$ 的唯一无向路径是 $J \leftarrow A \to M$。这是一个分叉结构，中间节点 $A \in \mathbf{Z}$，路径被阻断，故 $J \indep M \mid A$ 成立。
+  \item \textbf{检验 $J \indep M$（$\mathbf{Z} = \emptyset$）}：同一路径 $J \leftarrow A \to M$ 上分叉节点 $A \notin \emptyset$，路径畅通，故 $J \not\indep M$（约翰来电显著提高玛丽也来电的概率）。
+\end{enumerate}
+\end{example}
+
+\subsection{马尔可夫毯（Markov Blanket）：局部屏蔽全部世界}
+
+在第 5 章学习 Gibbs 采样时，我们会频繁遇到一个问题：已知网络中\textbf{除了节点 $X$ 以外的所有其他变量}，究竟最少需要看哪些邻居才能算出 $P(X \mid V \setminus \{X\})$？答案正是\textbf{马尔可夫毯}。
+
+\begin{defBox}
+\begin{definition}[马尔可夫毯，Markov Blanket]\label{def:mb}
+在贝叶斯网络 $\mathcal{G} = (V, E)$ 中，节点 $X$ 的\textbf{马尔可夫毯} $\MB(X)$ 定义为三类节点的并集：
+\begin{equation}\label{eq:mb-def}
+  \MB(X) = \Pa(X) \;\cup\; \operatorname{Ch}(X) \;\cup\; \Big(\bigcup_{Y \in \operatorname{Ch}(X)} \Pa(Y) \setminus \{X\}\Big),
+\end{equation}
+即 $X$ 的\textbf{所有父节点}、\textbf{所有子节点}以及\textbf{所有子节点的其他父节点（配偶节点，Co-parents）}。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[马尔可夫毯屏蔽定理]\label{thm:mb}
+对贝叶斯网络中任意节点 $X$，在给定其马尔可夫毯 $\MB(X)$ 的条件下，$X$ 与网络中其余全部变量条件独立：
+\[
+  X \indep \big(V \setminus (\{X\} \cup \MB(X))\big) \;\Big|\; \MB(X),
+\]
+并且其全条件分布满足紧凑局部公式：
+\begin{equation}\label{eq:mb-local}
+  P\big(x \mid \mathbf{x}_{-X}\big) = P\big(x \mid \MB(X)\big)
+  \;\propto\; P\big(x \mid \Pa(X)\big) \prod_{Y \in \operatorname{Ch}(X)} P\big(y \mid \Pa(Y)\big).
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+方法一（图论验证）：从 $X$ 出发的任意路径，第一步要么走向某个父节点 $P \in \Pa(X)$（构成链式或分叉，但 $P \in \MB(X)$ 直接阻断），要么走向某个子节点 $Y \in \operatorname{Ch}(X)$。若路径在 $Y$ 处继续走向 $Y$ 的子节点（$X \to Y \to W$），则链式节点 $Y \in \MB(X)$ 阻断该路径；若路径在 $Y$ 处转向 $Y$ 的另一父节点 $C$（构成对撞 $X \to Y \leftarrow C$），虽然 $Y \in \MB(X)$ 会打开该对撞，但配偶节点 $C$ 本身就在 $\MB(X)$ 中，且下一跳无论离开 $C$ 是链式还是分叉都会被 $C$ 截断！因此所有通往外界的路径无一例外全被 $\MB(X)$ 阻断。
+
+方法二（代数直接推导）：利用全条件定义和式~\eqref{eq:bn-factorization}，分子分母中所有不含变量 $X$ 的因子（即既不是 $X$ 的 CPT，也不是 $X$ 的子节点的 CPT）在关于 $x$ 求比例时全部约去：
+\[
+  P(x \mid \mathbf{x}_{-X}) = \frac{P(x, \mathbf{x}_{-X})}{\sum_{x'} P(x', \mathbf{x}_{-X})}
+  = \frac{\prod_{i=1}^n P(x_i \mid \mathbf{pa}_i)}{\sum_{x'} \prod_{i=1}^n P(x_i \mid \mathbf{pa}_i)}
+  = \frac{P(x \mid \Pa(X)) \prod_{Y \in \operatorname{Ch}(X)} P(y \mid \Pa(Y))}{\sum_{x'} P(x' \mid \Pa(X)) \prod_{Y \in \operatorname{Ch}(X)} P(y \mid \Pa(Y))}.
+\]
+右端只依赖 $x$ 以及 $\Pa(X)$、$\operatorname{Ch}(X)$ 和各 $Y \in \operatorname{Ch}(X)$ 的其他父节点——恰好就是 $\MB(X)$！
+\end{proof}
+
+请立即用图~\ref{fig:alarm-bn} 检验：节点 $B$ 的父节点为空，子节点为 $A$，配偶节点（$A$ 的另一父节点）为 $E$，因此 $\MB(B) = \{A, E\}$——一旦知道了警报 $A$ 和地震 $E$，约翰和玛丽是否来电对判断盗窃 $B$ 不再提供任何额外信息！切勿遗漏\textbf{配偶节点 $E$}：若只给定 $\{A\}$，由解释消除效应，$E$ 依然能剧烈改变 $B$ 的后验概率。
+
+\begin{insightBox}{从 d-分离到第 5 章 Gibbs 采样与因果推理}
+\begin{itemize}
+  \item \textbf{直通第 5 章（MCMC）}：式~\eqref{eq:mb-local} 是 Gibbs 采样器得以在百万节点图模型上每步 $O(\text{局部度数})$ 高效更新的数学心脏；
+  \item \textbf{通往现代因果推断}：Pearl 的后门准则（Backdoor Criterion）正是利用 d-分离寻找混杂因子集合 $\mathbf{Z}$，阻断处理变量 $T$ 与结果 $Y$ 之间的所有“后门伪相关路径”（同时谨防误控对撞节点引入选择偏差），从而从观测数据中识别因果效应 $P(Y \mid \operatorname{do}(T))$。
+\end{itemize}
+\end{insightBox}
+
+% ============================================================
+\section{变量消元（Variable Elimination, VE）精确推断}\label{sec:bn-ve}
+% ============================================================
+
+学会了用 DAG 压缩表示分布后，接下来的核心计算任务是\textbf{精确概率推断（Exact Inference）}：给定查询变量集 $\mathbf{Q}$ 与观测证据 $\mathbf{E} = \mathbf{e}$，计算后验条件分布
+\[
+  P(\mathbf{Q} \mid \mathbf{E} = \mathbf{e}) = \frac{P(\mathbf{Q}, \mathbf{e})}{P(\mathbf{e})}
+  \;\propto\; \sum_{\mathbf{h}} P(\mathbf{Q}, \mathbf{e}, \mathbf{h}),
+\]
+其中 $\mathbf{H} = V \setminus (\mathbf{Q} \cup \mathbf{E})$ 是所有既未查询也未观测的\textbf{隐藏变量（Hidden Variables）}。
+
+\subsection{为什么暴力枚举慢？把求和号推到最内层！}
+
+回到警报网络的经典查询：$P(B \mid J=1, M=1)$。这里查询变量 $\mathbf{Q}=\{B\}$，证据 $\mathbf{E}=\{J=1, M=1\}$，隐藏变量 $\mathbf{H}=\{A, E\}$。若按最朴素的暴力枚举（Enumeration），先展开全部联合表再求和：
+\[
+  P(B, J=1, M=1) = \sum_{e \in \{0,1\}} \sum_{a \in \{0,1\}} P(B)\, P(e)\, P(a \mid B, e)\, P(J=1 \mid a)\, P(M=1 \mid a).
+\]
+在 5 节点小图上看似只有 4 项加法，但若网络有 $n$ 个二值变量，暴力枚举必须遍历 $2^{|\mathbf{H}|}$ 种组合，每次把 $n$ 个因子连乘，时间复杂度高达 $O(n 2^n)$——完全浪费了图结构的稀疏性！
+
+关键洞察来自小学就学过的\textbf{乘法分配律}：凡是不含某个求和变量的因子，都可以提到该求和号外面！把上式中的求和号尽可能往内推：
+\begin{equation}\label{eq:ve-pushsum}
+  P(B, J=1, M=1)
+  = P(B) \sum_{e} P(e) \underbrace{\left[\sum_{a} P(a \mid B, e)\, P(J=1 \mid a)\, P(M=1 \mid a)\right]}_{f_6(B, e)}.
+\end{equation}
+请仔细端详括号里的项：一旦算出中间表 $f_6(B, e)$，变量 $A$ 就被彻底\textbf{消元（Eliminated）}掉了；接着再把 $P(e)$ 乘上 $f_6(B, e)$ 并对 $e$ 求和，得到只含 $B$ 的一维表 $f_7(B)$，变量 $E$ 也被消元掉了！整个过程本质上是\textbf{图上的动态规划}——把重复子问题的结果缓存为中间因子，永不重复计算。
+
+\subsection{因子代数与变量消元算法}
+
+为把上述思想写成通用引擎，我们引入\textbf{因子（Factor）}抽象：
+
+\begin{defBox}
+\begin{definition}[因子与三大原子运算]\label{def:factor}
+一个定义在变量子集 $\mathbf{X} = (X_1, \dots, X_k)$（称为作用域 Scope）上的\textbf{因子} $f(\mathbf{X})$，是一个将每种取值组合映射为非负实数的多维数组（不必归一化为概率分布）。变量消元算法只需以下三种原子运算：
+\begin{enumerate}
+  \item \textbf{证据限制（Restrict）}：给定观测 $E = e$，固定维度 $E$ 为切片 $e$，得到作用域缩小为 $\mathbf{X} \setminus \{E\}$ 的新因子 $f_{E=e}$；
+  \item \textbf{因子点乘（Pointwise Product）}：对两个因子 $f_1(\mathbf{X}, \mathbf{Y})$ 与 $f_2(\mathbf{Y}, \mathbf{Z})$（共享变量集 $\mathbf{Y}$），定义合并作用域上的新因子
+  \[
+    (f_1 \times f_2)(\mathbf{x}, \mathbf{y}, \mathbf{z}) := f_1(\mathbf{x}, \mathbf{y}) \cdot f_2(\mathbf{y}, \mathbf{z});
+  \]
+  \item \textbf{因子边际化 / 求和消元（Sum-Out）}：对因子 $f(X, \mathbf{Y})$ 中的变量 $X$ 求和，得到不含 $X$ 的新因子
+  \[
+    \Big(\sum_{X} f\Big)(\mathbf{y}) := \sum_{x \in \operatorname{Dom}(X)} f(x, \mathbf{y}).
+  \]
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\textbf{变量消元（VE）完整流程}只需四步：
+\begin{enumerate}
+  \item \textbf{初始化因子池}：将每个节点的 CPT 放入因子列表 $\mathcal{F}$，并对所有证据变量 $E = e$ 执行限制操作（将证据切片代入对应因子）；
+  \item \textbf{按选定消元序依次消去隐藏变量}：对每个 $H \in \mathbf{H}$：
+  \begin{itemize}
+    \item 从 $\mathcal{F}$ 中取出所有作用域包含 $H$ 的因子 $f_1, \dots, f_r$；
+    \item 将它们点乘为一个联合因子 $\psi = \prod_{j=1}^r f_j$；
+    \item 对 $H$ 求和消元生成新因子 $\tau = \sum_H \psi$，放回 $\mathcal{F}$ 中替代原来的 $f_1, \dots, f_r$；
+  \end{itemize}
+  \item \textbf{合并剩余因子}：此时 $\mathcal{F}$ 中所有因子仅含查询变量 $\mathbf{Q}$，将它们全部点乘得到未归一化联合概率 $f^*(\mathbf{Q}) = P(\mathbf{Q}, \mathbf{e})$；
+  \item \textbf{归一化}：计算配分常数 $Z = \sum_{\mathbf{q}} f^*(\mathbf{q}) = P(\mathbf{e})$，返回后验 $P(\mathbf{Q}\mid \mathbf{e}) = f^*(\mathbf{Q}) / Z$。
+\end{enumerate}
+
+\subsection{手工完整推演：警报网络查询 $P(B=1 \mid J=1, M=1)$}
+
+现在我们用图~\ref{fig:alarm-bn} 的精确数值，一步不跳地手工计算 $P(B=1 \mid J=1, M=1)$，并与配套脚本 \texttt{code/\allowbreak vol3\_experiments.py} 的结果交叉核验至小数点后 6 位。
+
+\paragraph{第 1 步：初始化与证据限制（$J=1, M=1$）}
+代入证据后，因子池 $\mathcal{F}$ 包含 5 个因子：
+\begin{gather*}
+  f_1(B) = P(B),\qquad f_2(E) = P(E),\qquad f_3(A, B, E) = P(A\mid B, E), \\
+  f_4(A) = P(J=1\mid A),\qquad f_5(A) = P(M=1\mid A),
+\end{gather*}
+其中 $f_4(A=1)=0.90, f_4(A=0)=0.05$；$f_5(A=1)=0.70, f_5(A=0)=0.01$。
+
+\paragraph{第 2 步：消去隐藏变量 $A$（消元序 $A \to E$）}
+包含 $A$ 的因子是 $f_3, f_4, f_5$。将它们相乘并对 $a \in \{0, 1\}$ 求和，得到新因子 $f_6(B, E) = \sum_{a} f_3(a, B, E) f_4(a) f_5(a)$。注意当 $a=1$ 时 $f_4(1)f_5(1) = 0.90 \times 0.70 = 0.63$；当 $a=0$ 时 $f_4(0)f_5(0) = 0.05 \times 0.01 = 0.0005$。逐格代入：
+\begin{align*}
+  f_6(B=1, E=1) &= 0.95 \times 0.63 + 0.05 \times 0.0005 = 0.5985250, \\
+  f_6(B=1, E=0) &= 0.94 \times 0.63 + 0.06 \times 0.0005 = 0.5922300, \\
+  f_6(B=0, E=1) &= 0.29 \times 0.63 + 0.71 \times 0.0005 = 0.1830550, \\
+  f_6(B=0, E=0) &= 0.001 \times 0.63 + 0.999 \times 0.0005 = 0.0011295.
+\end{align*}
+此时因子池简化为 $\{f_1(B), f_2(E), f_6(B, E)\}$。
+
+\paragraph{第 3 步：消去隐藏变量 $E$}
+包含 $E$ 的因子是 $f_2(E)$ 与 $f_6(B, E)$，相乘后对 $e \in \{0, 1\}$ 求和得到 $f_7(B) = \sum_e P(e) f_6(B, e)$：
+\begin{align*}
+  f_7(B=1) &= 0.002 \times 0.5985250 + 0.998 \times 0.5922300 = 0.59224259, \\
+  f_7(B=0) &= 0.002 \times 0.1830550 + 0.998 \times 0.0011295 = 0.001493351.
+\end{align*}
+
+\paragraph{第 4 步：合并剩余因子并归一化}
+将 $f_1(B)$ 与 $f_7(B)$ 相乘得到未归一化联合概率 $P(B, J=1, M=1)$：
+\begin{align*}
+  P(B=1, J=1, M=1) &= 0.001 \times 0.59224259 = 0.0005922426, \\
+  P(B=0, J=1, M=1) &= 0.999 \times 0.001493351 = 0.0014918576.
+\end{align*}
+两者相加即为证据似然（归一化常数）：
+\[
+  P(J=1, M=1) = 0.0005922426 + 0.0014918576 = 0.0020841002 \approx \mathbf{0.0020841}.
+\]
+最终归一化得出后验概率：
+\[
+  P(B=1 \mid J=1, M=1) = \frac{0.0005922426}{0.0020841002} = \mathbf{0.284172}, \qquad
+  P(B=0 \mid J=1, M=1) = \mathbf{0.715828}.
+\]
+结果令人深思：虽然约翰和玛丽同时打来电话，真遭贼的概率也只有约 $28.4\%$——因为入室盗窃的先验（$0.1\%$）实在太低，轻微地震（$0.2\%$）与双重误报仍贡献了另外 $71.6\%$ 的概率质量！
+
+\subsection{消元顺序与树宽（Treewidth）直觉}
+
+变量消元无论采用何种消元顺序，最终数学结果\textbf{完全一致}；但计算耗时与内存占用却可能相差天壤之别！整个 VE 算法的时空复杂度完全取决于消元过程中生成的\textbf{最大中间因子的变量个数} $w+1$（称为该消元序诱导的\textbf{宽度}），总代价为 $O(n \cdot d^{w+1})$（$d$ 为变量取值数）。对所有可能消元序取最小的宽度，就是图论中著名的\textbf{树宽（Treewidth）}。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  rv/.style={circle, draw=tealDark, thick, fill=tealLight, minimum size=7.8mm, font=\sffamily\bfseries\scriptsize, text=ink},
+  center/.style={circle, draw=ochre, very thick, fill=ochreLight, minimum size=8.4mm, font=\sffamily\bfseries\scriptsize, text=ochre},
+  arr/.style={-{Stealth[length=2mm]}, thick, teal},
+  fillin/.style={ochre, thick, dashed}
+]
+  % Left: Star graph leaves-first -> O(n)
+  \begin{scope}[xshift=-4.0cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=codebg!40] (-2.95,-2.5) rectangle (2.95,2.45);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0,2.08) {好顺序：先消叶节点 $L_1,\dots,L_n$};
+    \node[center] (C1) at (0,0.05) {$C$};
+    \foreach \i/\ang in {1/90, 2/18, 3/-54, 4/-126, 5/162} {
+      \node[rv] (L1\i) at ([shift=(\ang:1.25cm)]C1) {$L_{\i}$};
+      \draw[arr] (C1) -- (L1\i);
+    }
+    \node[font=\scriptsize, text=teal, align=center] at (0,-1.98) {每步仅涉 $\{C, L_i\}$，最大因子大小 $2^2=4$\\总复杂度 \textbf{$O(n)$（线性！）}};
+  \end{scope}
+
+  % Right: Star graph center-first -> O(2^n)
+  \begin{scope}[xshift=4.0cm]
+    \draw[rounded corners=2mm, draw=ochre!50, fill=ochreLight!30] (-3.05,-2.5) rectangle (3.05,2.45);
+    \node[font=\sffamily\bfseries\small, text=ochre] at (0,2.08) {坏顺序：先消中心节点 $C$};
+    \node[center, dashed, opacity=0.45] (C2) at (0,0.05) {$C$};
+    \foreach \i/\ang in {1/90, 2/18, 3/-54, 4/-126, 5/162} {
+      \node[rv] (L2\i) at ([shift=(\ang:1.25cm)]C2) {$L_{\i}$};
+    }
+    % Complete clique among all leaves!
+    \foreach \i in {1,...,5} {
+      \foreach \j in {\i,...,5} {
+        \ifnum\i<\j
+          \draw[fillin] (L2\i) -- (L2\j);
+        \fi
+      }
+    }
+    \node[font=\scriptsize, text=ochre, align=center] at (0,-2.02) {消去 $C$ 产生覆盖全部叶子的团因子\\最大因子大小 $2^n$，总复杂度 \textbf{$O(2^n)$（爆炸！）}};
+  \end{scope}
+\end{tikzpicture}
+\caption{星形图上的消元顺序对复杂度的极端影响。先消叶子节点始终只需处理二元因子，线性时间完成；若贸然先消中心枢纽 $C$，全部 $n$ 个叶子将被填入边（虚线）锁成一个 $n$ 元大团，瞬间指数爆炸。}
+\label{fig:ve-star}
+\end{figure}
+
+如图~\ref{fig:ve-star} 所示，在拥有中心枢纽 $C$ 和 $n$ 个叶子 $L_1,\dots,L_n$ 的星形图（例如朴素贝叶斯分类器，树宽仅 $w=1$）上：
+\begin{itemize}
+  \item \textbf{好顺序（先消叶子 $L_1,\dots,L_n$）}：消去 $L_i$ 只涉及 $P(L_i\mid C)$，产出一元因子 $\tau_i(C)$，最大中间因子永远只有 2 个变量，总复杂度 $O(n)$；
+  \item \textbf{坏顺序（先消中心 $C$）}：包含 $C$ 的因子多达 $n+1$ 个，乘在一起瞬间生成依赖 $(L_1,\dots,L_n)$ 的巨型因子，内存直接飙升到 $O(2^n)$！
+\end{itemize}
+寻找任意图的最优消元序是 NP-难问题，但工程上常用贪心启发式（如 \textbf{Min-Degree}：每次消去当前邻居最少的节点，或 \textbf{Min-Fill}：每次消去产生最少新填边的节点）往往能接近最优树宽。需要牢记的是：即使采用最优消元序，\textbf{高树宽图（例如 $k\times k$ 二维网格，树宽为 $k$）上的精确推断仍是 \#P-难的}——这正是第 5 章引入近似采样推断的根本动机。
+
+\begin{extBox}{团树（Junction Tree）与信念传播（Belief Propagation）直觉}
+如果我们需要同时查询网络中\textbf{每一个节点}的后验边际分布 $P(X_1\mid \mathbf{e}), \dots, P(X_n\mid \mathbf{e})$，对每个节点重跑一遍 VE 会做大量重复的乘法与求和。如果图本身是一棵树，可以把 VE 产生的中间因子视为沿着边传递的\textbf{消息（Message）}：
+\begin{itemize}
+  \item 任选一个根节点，先做一轮\textbf{从叶到根（Collect）}的消息汇聚，再做一轮\textbf{从根到叶（Distribute）}的消息广播，称为\textbf{和-积信念传播（Sum-Product Belief Propagation, BP）}；
+  \item 仅需两遍扫描（每条边正反各传一次消息），就能以 $O(n d^2)$ 总代价精确算出全部 $n$ 个节点的边际分布！
+  \item 对含环的一般图，可将节点聚合成团构成一棵满足运行交集性质的\textbf{团树（Clique Tree / Junction Tree）}，再在团树上运行消息传递；这就是图模型精确推断的集大成框架，也构成了现代图神经网络（GNN）消息传递机制的古典先驱。
+\end{itemize}
+\end{extBox}
+
+\subsection{可运行的 Python/NumPy 变量消元引擎}
+
+下面用不到 55 行纯 NumPy 代码实现支持任意离散贝叶斯网络的 \texttt{Factor} 类与 \texttt{variable\_elimination} 函数，并在警报网络上自动比对暴力枚举结果（误差 $< 10^{-15}$）。
+
+\begin{lstlisting}[caption={通用离散贝叶斯网络变量消元（VE）引擎与暴力枚举精确核验},label={lst:ve}]
+import numpy as np
+
+class Factor:
+    def __init__(self, scope, table):
+        self.scope = list(scope)                # variable names, e.g. ["A", "B", "E"]
+        self.table = np.asarray(table, dtype=float)
+
+    def restrict(self, var, val):
+        if var not in self.scope:
+            return self
+        ax = self.scope.index(var)
+        new_scope = [v for v in self.scope if v != var]
+        return Factor(new_scope, np.take(self.table, val, axis=ax))
+
+    def multiply(self, other):
+        # Align axes of self and other onto their union scope
+        union = list(self.scope) + [v for v in other.scope if v not in self.scope]
+        s_axes = [union.index(v) for v in self.scope]
+        o_axes = [union.index(v) for v in other.scope]
+        a = np.expand_dims(self.table, axis=tuple(range(len(self.scope), len(union))))
+        b = np.expand_dims(other.table, axis=tuple(range(len(other.scope), len(union))))
+        # Move each axis to its target position in union
+        a = np.moveaxis(a, range(len(self.scope)), s_axes)
+        b = np.moveaxis(b, range(len(other.scope)), o_axes)
+        return Factor(union, a * b)
+
+    def sum_out(self, var):
+        ax = self.scope.index(var)
+        new_scope = [v for v in self.scope if v != var]
+        return Factor(new_scope, self.table.sum(axis=ax))
+
+def variable_elimination(factors, query, evidence, elim_order):
+    pool = [f for f in factors]
+    for ev, val in evidence.items():
+        pool = [f.restrict(ev, val) for f in pool]
+    for h in elim_order:
+        with_h = [f for f in pool if h in f.scope]
+        rest = [f for f in pool if h not in f.scope]
+        if with_h:
+            prod = with_h[0]
+            for f in with_h[1:]:
+                prod = prod.multiply(f)
+            rest.append(prod.sum_out(h))
+        pool = rest
+    res = pool[0]
+    for f in pool[1:]:
+        res = res.multiply(f)
+    z = res.table.sum()
+    return res.table / z, z
+
+# Build Pearl's Alarm BN (index 0=False, 1=True)
+fB = Factor(["B"], [0.999, 0.001])
+fE = Factor(["E"], [0.998, 0.002])
+# P(A | B, E) with shape (2, 2, 2) for (A, B, E)
+pA1 = np.array([[0.001, 0.29], [0.94, 0.95]])
+fA = Factor(["A", "B", "E"], np.stack([1.0 - pA1, pA1], axis=0))
+fJ = Factor(["J", "A"], [[0.95, 0.10], [0.05, 0.90]])
+fM = Factor(["M", "A"], [[0.99, 0.30], [0.01, 0.70]])
+
+post, p_ev = variable_elimination([fB, fE, fA, fJ, fM], "B", {"J": 1, "M": 1}, ["A", "E"])
+print(f"VE: P(J=1,M=1) = {p_ev:.7f}, P(B=1|J=1,M=1) = {post[1]:.6f}")
+
+# Brute-force check across all 8 assignments of (B, E, A)
+joint_num = joint_den = 0.0
+for b in (0, 1):
+    for e in (0, 1):
+        for a in (0, 1):
+            p = fB.table[b] * fE.table[e] * fA.table[a, b, e] * fJ.table[1, a] * fM.table[1, a]
+            joint_den += p
+            if b == 1: joint_num += p
+assert abs(post[1] - joint_num / joint_den) < 1e-15
+\end{lstlisting}
+
+% ============================================================
+\section{本章习题}\label{sec:ch4-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{熟悉 DAG 因子分解、参数计数与基本三元组规则}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}]
+  \item \textbf{参数压缩计算}：考虑一个由 12 个三值离散变量（每个变量可取 $\{0, 1, 2\}$）构成的贝叶斯网络。其中 2 个根节点无父节点，6 个节点各有 1 个父节点，4 个节点各有 2 个父节点。请计算：（1）完整联合概率分布需要多少个独立参数？（2）该贝叶斯网络总共只需要多少个独立参数？参数压缩比约为多少？
+  \exHint{三值变量在父节点取定一种组合后，只需 $3-1=2$ 个独立概率参数（第三项由归一化决定）。}
+
+  \item \textbf{学生成绩网络 d-分离快速判定}：考虑经典 5 节点学生成绩网络：课程难度 $D$ 与学生智力 $I$ 共同指向成绩 $G$（$D \to G \leftarrow I$）；智力 $I$ 另指向 SAT 分数 $S$（$I \to S$）；成绩 $G$ 指向教授推荐信 $L$（$G \to L$）。请利用 d-分离法则逐一判断下列断言是否成立并给出路径理由：
+  （1）$D \indep I$；（2）$D \indep I \mid G$；（3）$D \indep I \mid L$；（4）$S \indep L \mid I$；（5）$D \indep S \mid L$。
+  \exHint{列出两点间全部无向简单路径，逐个检查链式、分叉与对撞节点（尤其留意对撞节点 $G$ 的后代 $L$）。}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{掌握马尔可夫毯、贝叶斯网络手算与消元复杂性分析}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{警报网络逆向推理与解释消除}：在图~\ref{fig:alarm-bn} 的 Pearl 警报网络中，使用变量消元法手工计算：（1）仅接到约翰来电（不知玛丽情况）时的盗窃后验 $P(B=1 \mid J=1)$；（2）在同时得知约翰来电与地震发生时的盗窃后验 $P(B=1 \mid J=1, E=1)$。比较两者的数量级变化并从 d-分离视角解释原因。
+  \exHint{查询 $P(B\mid J=1)$ 时，叶节点 $M$ 未被观测且不在查询集中，对 $M$ 求和 $\sum_m P(m\mid A) \equiv 1$ 可在第一步直接修剪掉！}
+
+  \item \textbf{马尔可夫毯与最小屏蔽集}：在习题 4.2 的 5 节点学生成绩网络中：（1）写出节点 $I$ 与节点 $G$ 各自的马尔可夫毯 $\MB(I)$ 和 $\MB(G)$；（2）证明对任意贝叶斯网络，若 $\mathbf{S}$ 是满足 $X \indep (V \setminus (\{X\}\cup \mathbf{S})) \mid \mathbf{S}$ 的节点集，且分布对图忠实，则必有 $\MB(X) \subseteq \mathbf{S}$（即马尔可夫毯是最小的屏蔽集）。
+  \exHint{第（2）问采用反证法：分别假设漏掉一个父节点、一个子节点或一个配偶节点，构造一条从 $X$ 出发未被阻断的短路径。}
+\end{enumerate}
+
+\exTier{C 层：深入证明与反例}{剖析等价类、树宽界限与非忠实反例}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{马尔可夫等价类与不可逆的 V-结构}：证明两个不同的 DAG：链式 $X \to Z \to Y$ 与分叉 $X \leftarrow Z \to Y$ 编码完全相同的条件独立性集合（因而仅凭观测数据无法区分箭头方向）；但对撞结构 $X \to Z \leftarrow Y$ 编码的独立性集合与前两者严格不同。由此说明为什么任何两个马尔可夫等价（Markov Equivalent）的 DAG 必须具有相同的无向骨架和相同的“无屏蔽 V-结构”（即 $X \to Z \leftarrow Y$ 且 $X, Y$ 之间无直接边）。
+  \exHint{比较三变量所有条件独立陈述：$X \indep Y$ 与 $X \indep Y \mid Z$ 在三种结构中的真假值表。}
+
+  \item \textbf{消元顺序与非忠实分布反例}：（1）考虑一条 $n$ 节点有向链 $X_1 \to X_2 \to \cdots \to X_n$，若查询 $P(X_n)$，分别给出按 $X_1, X_2, \dots, X_{n-1}$ 顺次消元与按 $X_2, X_4, \dots$ 隔点消元时最大中间因子的作用域大小；（2）构造一个三节点链式网络 $X \to Z \to Y$ 的具体二值 CPT，使得虽然图上 $X$ 与 $Y$ 未被 $\emptyset$ d-分离，但实际分布中却恰好满足边际独立 $X \indep Y$（非忠实分布反例）。
+  \exHint{第（2）问只需让 $P(Y=1\mid Z=1) = P(Y=1\mid Z=0)$ 或设计对称取消的转移矩阵。}
+\end{enumerate}
+
+\exTier{D 层：编程实践与基准自检}{构建独立 VE 求解器与消元序启发式对比}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{通用变量消元与剪枝优化}：扩展代码~\ref{lst:ve} 的 \texttt{variable\_elimination}，加入\textbf{无关节点预剪枝（Barren Node Pruning）}：在消元前递归删除所有既不在查询集 $\mathbf{Q}$、也不在证据集 $\mathbf{E}$ 中的无观测叶子节点。将其运行在 5 节点警报网络与习题 4.2 的学生成绩网络（自设合法 CPT）上，核验以下两项自检基准：
+  （1）对警报网络任意 6 组不同查询与证据组合，VE 输出与暴力枚举的绝对误差均 $< 10^{-14}$；
+  （2）查询 $P(B=1\mid J=1)$ 时，剪枝后需处理的因子数由 $5$ 个减至 $4$ 个，输出 $P(B=1\mid J=1) = 0.016284$（误差 $< 10^{-6}$）。
+  \exHint{若变量 $X \notin \mathbf{Q} \cup \mathbf{E}$ 且所有子节点已被删除，则 $\sum_x P(x\mid \Pa(X)) = 1$，删除 $X$ 对后验无任何影响。}
+
+  \item \textbf{Min-Degree 启发式与最大因子规模基准}：在一个 $3 \times 4$ 网格状贝叶斯网络（共 12 个二值变量，所有边向右和向下指向）上查询右下角节点给定左上角节点时的条件分布。分别实现：（a）按行主序消元；（b）\textbf{Min-Degree 贪心消元}（维护交互图，每步消去度数最小节点并把其邻居连成团）；（c）随机打乱 20 次消元序。打印每种策略在消元过程中产生的\textbf{最大中间因子变量数}与总浮点乘法次数。
+  \textbf{数值自检基准}：在 $3\times 4$ 网格上，所有合法消元序算出的后验概率必须完全一致（差值 $< 10^{-14}$）；Min-Degree 策略的最大中间因子变量数应 $\le 4$（表长 $\le 16$），而最坏随机序通常会产生 $\ge 6$ 个变量的中间因子（表长 $\ge 64$）。
+  \exHint{每当消去一个隐藏变量 $H$ 时，当前因子池中所有与 $H$ 同处一个因子的变量在交互图上构成 $H$ 的邻居集。}
+\end{enumerate}

@@ -1,0 +1,468 @@
+\chapter[采样推断与隐马尔可夫模型（HMM）]{概率近似采样与隐马尔可夫模型（HMM）}\label{ch:sampling-hmm}
+\chapEpigraph{时间永远分岔，通向无数的将来。}{豪尔赫·路易斯·博尔赫斯（Jorge Luis Borges），《小径分岔的花园》}
+
+\begin{chapIntro}{本章导读}
+第 4 章的变量消元（VE）在低树宽贝叶斯网络上如鱼得水，但当图结构变得稠密（树宽超过 $30$）时，精确推断会不可避免地撞上指数内存墙。本章分两条主线破局：前半章转向\textbf{近似采样推断}，依次剖析先验/拒绝采样、似然加权（重要性采样的图模型化身）与基于马尔可夫毯的 \textbf{Gibbs 采样（MCMC）}，并用真实实验对比三者在罕见证据下的方差悬殊；后半章将贝叶斯网络沿时间轴展开，建立时序推理的经典骨架——\textbf{隐马尔可夫模型（HMM）}，完整推导前向滤波、前向-后向平滑与对数空间 \textbf{Viterbi 解码}三大动态规划算法。
+\end{chapIntro}
+
+% ============================================================
+\section{贝叶斯网络近似采样推断：拒绝采样、似然加权与 Gibbs 采样}\label{sec:bn-sampling}
+% ============================================================
+
+\subsection{为什么需要近似采样？从精确到蒙特卡洛}
+
+回顾第 4 章末尾的结论：在树宽为 $w$ 的贝叶斯网络上，变量消元的计算代价为 $O(n d^{w+1})$。现实中许多问题（例如包含上百个交叉诊断节点的医学网络，或 $20\times 20$ 像素格网的图像去噪模型）树宽动辄达到 $20\sim 50$，精确推断在多项式时间内根本不可行（理论上是 \#P-难的）。
+
+然而，我们往往并不需要把后验概率算到小数点后 15 位——知道“盗窃概率约为 $28.4\% \pm 0.2\%$”足以支撑理性决策。此时，第 2 卷学过的\textbf{蒙特卡洛（Monte Carlo）采样}便成为绕开指数高墙的万能钥匙：不再构建巨型中间因子表，而是直接按网络结构生成大量独立或弱相关的样本，以经验频率逼近真实后验。
+
+\begin{recallBox}{蒙特卡洛收敛率、重要性采样与马尔可夫链平稳分布（第 1、2 卷回顾）}
+\begin{itemize}
+  \item \textbf{大数定律与 $O(1/\sqrt{M})$ 误差}：对 $M$ 个独立同分布样本，经验均值估计的标准差为 $\sigma/\sqrt{M}$，\textbf{收敛速度与变量总维数 $n$ 无关}！
+  \item \textbf{重要性采样（Importance Sampling）}：当目标分布 $P$ 难以直接采样时，可从提议分布 $Q$ 采样并赋予重要性权重 $w(\mathbf{x}) = P(\mathbf{x})/Q(\mathbf{x})$，则 $\E_P[g(X)] = \E_Q[w(X)g(X)]$。
+  \item \textbf{马尔可夫链平稳分布（第 1 卷第 3 章）}：若不可约、非周期马尔可夫链的转移核 $T$ 满足\textbf{细致平衡条件} $\pi(\mathbf{x}) T(\mathbf{x}\to \mathbf{x}') = \pi(\mathbf{x}') T(\mathbf{x}'\to \mathbf{x})$，则 $\pi$ 必为其唯一平稳分布。
+\end{itemize}
+\end{recallBox}
+
+\subsection{先验采样与拒绝采样：简单却在罕见证据下崩盘}
+
+最朴素的采样方法叫做\textbf{祖先采样（Ancestral / Prior Sampling）}：按 DAG 的拓扑排序 $X_1, X_2, \dots, X_n$ 依次遍历每个节点，因为排在前面的父节点 $\Pa(X_i)$ 已经抽出了具体取值 $\mathbf{pa}_i$，只需直接按条件分布 $x_i \sim P(X_i \mid \mathbf{pa}_i)$ 抽样即可。整条样本向量 $\mathbf{x} = (x_1,\dots,x_n)$ 的抽样概率恰好是
+\[
+  P_{\text{sample}}(\mathbf{x}) = \prod_{i=1}^{n} P(x_i \mid \mathbf{pa}_i) = P(\mathbf{x}),
+\]
+也就是说，祖先采样能在 $O(n)$ 时间内严格按照贝叶斯网络的精确联合分布生成无偏样本！
+
+为了回答带证据的条件查询 $P(\mathbf{Q} \mid \mathbf{E}=\mathbf{e})$，最直接的想法便是\textbf{拒绝采样（Rejection Sampling）}：
+\begin{enumerate}
+  \item 运行祖先采样生成 $M$ 条完整样本 $\mathbf{x}^{(1)}, \dots, \mathbf{x}^{(M)}$；
+  \item \textbf{丢弃（拒绝）}所有不满足证据 $\mathbf{E} = \mathbf{e}$ 的样本；
+  \item 在幸存的 $M_{\text{acc}}$ 条样本中，统计查询变量 $\mathbf{Q} = \mathbf{q}$ 出现的频率作为后验估计 $\hat{P}(\mathbf{q}\mid \mathbf{e}) = N(\mathbf{q}, \mathbf{e}) / M_{\text{acc}}$。
+\end{enumerate}
+由大数定律，当 $M \to \infty$ 时，$N(\mathbf{q}, \mathbf{e})/M \to P(\mathbf{q}, \mathbf{e})$ 且 $M_{\text{acc}}/M \to P(\mathbf{e})$，因此比值几乎必然收敛到精确后验 $P(\mathbf{q}\mid \mathbf{e})$。但这一看似完美的算法存在致命软肋。
+
+\begin{failBox}{拒绝采样在罕见证据下的“雪崩式浪费”}
+在拒绝采样中，样本的期望接受率恰好等于证据的联合先验概率 $P(\mathbf{E}=\mathbf{e})$。回顾第 4 章 Pearl 警报网络的精确结果：
+\[
+  P(J=1, M=1) = 0.0020841 \approx 0.21\%!
+\]
+这意味着每生成 $1000$ 条完整样本，平均有 \textbf{$997.9$ 条（高达 $99.8\%$）被直接扔进垃圾桶}，仅剩 $2$ 条有效样本！如果想攒够 $1000$ 条有效样本将估计标准差压到 $1.5\%$ 以内，必须白白模拟将近 $480{,}000$ 次全网络采样。如果证据包含 $10$ 个独立小概率观测（比如 $P(\mathbf{e}) \approx 10^{-10}$），拒绝采样直到宇宙热寂也等不到几条有效样本！
+\end{failBox}
+
+\subsection{似然加权（Likelihood Weighting）：固定证据的重要性采样}
+
+既然拒绝采样的症结在于“抽出来的样本绝大多数都不符合证据”，一个自然而聪明的改进是：\textbf{强行把证据节点固定为观测值 $\mathbf{E}=\mathbf{e}$，只对非证据节点按拓扑序采样}！这就是\textbf{似然加权（Likelihood Weighting, LW）}。
+
+但是，强行把证据固定下来会破坏真实分布——例如若先抽到 $A=0$（警报没响），再强行钉死 $J=1, M=1$，这条样本在现实中本应极其罕见，绝不能和 $A=1$ 的样本平起平坐！补救办法恰恰是第 2 卷的\textbf{重要性加权}：每当拓扑遍历遇到一个证据节点 $E_j = e_j$ 时，不抽样，而是把总权重 $w$ 乘上当前父节点下观测到该证据的条件概率 $P(e_j \mid \mathbf{pa}_{E_j})$。
+
+\begin{thmBox}
+\begin{proposition}[似然加权的无偏性与一致性]\label{prop:lw}
+设非证据变量集合为 $\mathbf{Z} = V \setminus \mathbf{E}$。在似然加权算法中，每条样本 $\mathbf{z}^{(m)}$ 按提议分布
+\[
+  q(\mathbf{z}) = \prod_{Z_i \in \mathbf{Z}} P\big(z_i \mid \Pa(Z_i)\big)
+\]
+生成（其中属于 $\mathbf{E}$ 的父节点取观测值 $\mathbf{e}$），并赋予权重
+\begin{equation}\label{eq:lw-weight}
+  w(\mathbf{z}) = \prod_{E_j \in \mathbf{E}} P\big(e_j \mid \Pa(E_j)\big).
+\end{equation}
+则对任意查询事件 $\mathbf{Q}=\mathbf{q}$，自归一化加权估计量
+\[
+  \hat{P}_{\text{LW}}(\mathbf{q} \mid \mathbf{e})
+  = \frac{\sum_{m=1}^M w(\mathbf{z}^{(m)})\, \mathbb{I}[\mathbf{z}^{(m)}_{\mathbf{Q}} = \mathbf{q}]}{\sum_{m=1}^M w(\mathbf{z}^{(m)})}
+\]
+当 $M \to \infty$ 时几乎必然收敛到精确后验 $P(\mathbf{q} \mid \mathbf{e})$。
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+将提议分布 $q(\mathbf{z})$ 与权重 $w(\mathbf{z})$ 相乘，恰好补齐了 DAG 中全部节点的 CPT 乘积：
+\[
+  q(\mathbf{z})\, w(\mathbf{z})
+  = \left[\prod_{Z_i \in \mathbf{Z}} P\big(z_i \mid \Pa(Z_i)\big)\right]
+    \left[\prod_{E_j \in \mathbf{E}} P\big(e_j \mid \Pa(E_j)\big)\right]
+  = P(\mathbf{z}, \mathbf{e}).
+\]
+因此分子除以 $M$ 的期望为 $\E_q[w(\mathbf{Z})\mathbb{I}[\mathbf{Z}_{\mathbf{Q}}=\mathbf{q}]] = \sum_{\mathbf{z}:\mathbf{z}_{\mathbf{Q}}=\mathbf{q}} q(\mathbf{z})w(\mathbf{z}) = P(\mathbf{q}, \mathbf{e})$；分母除以 $M$ 的期望为 $\E_q[w(\mathbf{Z})] = \sum_{\mathbf{z}} P(\mathbf{z}, \mathbf{e}) = P(\mathbf{e})$。由大数定律，二者之比几乎必然收敛至 $P(\mathbf{q}, \mathbf{e})/P(\mathbf{e}) = P(\mathbf{q}\mid \mathbf{e})$。
+\end{proof}
+
+\textbf{似然加权的隐蔽痛点（权重退化）}：尽管似然加权零浪费地保留了 100\% 的样本，但请注意拓扑采样顺序中\textbf{证据位于底层（叶子）时的信息盲区}！在警报网络中查询 $P(B=1 \mid J=1, M=1)$ 时，采样 $B, E, A$ 发生在接触证据 $J, M$ \textbf{之前}，因此算法完全按照极低的先验去抽 $B \sim \operatorname{Bern}(0.001)$ 和 $E \sim \operatorname{Bern}(0.002)$：
+\begin{itemize}
+  \item 在 $M = 1000$ 次似然加权采样中，大约有 $997$ 条样本抽到 $(B=0, E=0, A=0)$，权重极小：$w = 0.05 \times 0.01 = 0.0005$；
+  \item 而只要哪怕抽到 $1$ 条 $(B=1, A=1)$，权重就高达 $w = 0.90 \times 0.70 = 0.63$，是普通样本的 \textbf{$1260$ 倍}！
+  \item 更糟糕的是，在 $M \le 1000$ 时，由于 $P(B=1) = 0.001$，经常一整批样本里\textbf{一条 $B=1$ 都没抽到}，导致似然加权直接输出荒谬的 $0.0000$（绝对误差高达 $0.2842$）！
+\end{itemize}
+要想让底层证据也能反向“拉动”上层隐藏变量的采样，我们需要真正意义上的双向交互采样——\textbf{Gibbs 采样}。
+
+\subsection{Gibbs 采样（MCMC 入门）：沿着马尔可夫毯双向漫步}
+
+\textbf{Gibbs 采样（Gibbs Sampling）}属于\textbf{马尔可夫链蒙特卡洛（MCMC）}大家族。它不再每步从头独立生成样本，而是先固定全部证据节点 $\mathbf{E} = \mathbf{e}$，随机初始化所有非证据变量 $\mathbf{Z}^{(0)}$，然后反复迭代：每一步选中一个非证据变量 $Z_i$，固定其余所有变量的当前值 $\mathbf{z}^{(t)}_{-i}$ 与证据 $\mathbf{e}$，按精确全条件分布重新采样 $Z_i$：
+\begin{equation}\label{eq:gibbs-update}
+  Z_i^{\text{new}} \sim P\big(Z_i \mid \mathbf{z}_{-i}, \mathbf{e}\big) = P\big(Z_i \mid \MB(Z_i)\big)
+  \;\propto\; P\big(Z_i \mid \Pa(Z_i)\big) \prod_{Y \in \operatorname{Ch}(Z_i)} P\big(y \mid \Pa(Y)\big).
+\end{equation}
+请立刻体会第 4 章定理~\ref{thm:mb}（马尔可夫毯屏蔽定理）在这里展现的威力：在警报网络中，当我们固定 $J=1, M=1$ 并轮流重采样 $(B, E, A)$ 时：
+\begin{align*}
+  P(B=1 \mid E, A, J=1, M=1) &= P(B=1 \mid E, A) \propto P(B=1)\, P(A \mid B=1, E), \\
+  P(E=1 \mid B, A, J=1, M=1) &= P(E=1 \mid B, A) \propto P(E=1)\, P(A \mid B, E=1), \\
+  P(A=1 \mid B, E, J=1, M=1) &\propto P(A=1 \mid B, E)\, P(J=1 \mid A=1)\, P(M=1 \mid A=1).
+\end{align*}
+看最后一行：证据 $J=1, M=1$ 瞬间把 $A=1$ 的条件概率顶高，下一拍 $A=1$ 立刻通过 $P(A=1\mid B, E)$ 把 $B=1$ 和 $E=1$ 拉入高后验区域！证据信息沿着图边\textbf{自底向上反传}，彻底摆脱了先验盲区。
+
+\begin{thmBox}
+\begin{theorem}[Gibbs 采样的细致平衡与平稳性]\label{thm:gibbs-stationarity}
+在严格正概率分布 $P(\mathbf{Z}, \mathbf{e}) > 0$ 上，单坐标 Gibbs 转移核 $T_i(\mathbf{z} \to \mathbf{z}') = \mathbb{I}[\mathbf{z}'_{-i} = \mathbf{z}_{-i}]\, P(z'_i \mid \mathbf{z}_{-i}, \mathbf{e})$ 关于目标后验分布 $\pi(\mathbf{z}) := P(\mathbf{z} \mid \mathbf{e})$ 满足\textbf{细致平衡条件}：
+\[
+  \pi(\mathbf{z})\, T_i(\mathbf{z} \to \mathbf{z}') = \pi(\mathbf{z}')\, T_i(\mathbf{z}' \to \mathbf{z}),
+\]
+从而目标后验 $\pi(\mathbf{z}) = P(\mathbf{z} \mid \mathbf{e})$ 是 Gibbs 马尔可夫链的唯一平稳分布。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+若 $\mathbf{z}'_{-i} \neq \mathbf{z}_{-i}$，等式两边同为 $0$，平凡成立。若 $\mathbf{z}'_{-i} = \mathbf{z}_{-i}$，将条件概率拆解为联合与边际之比，直接展开左端：
+\begin{align*}
+  \pi(\mathbf{z})\, T_i(\mathbf{z} \to \mathbf{z}')
+  &= P(z_i, \mathbf{z}_{-i} \mid \mathbf{e})\, P(z'_i \mid \mathbf{z}_{-i}, \mathbf{e}) \\
+  &= P(\mathbf{z}_{-i} \mid \mathbf{e})\, P(z_i \mid \mathbf{z}_{-i}, \mathbf{e})\, P(z'_i \mid \mathbf{z}_{-i}, \mathbf{e}) \\
+  &= P(z'_i, \mathbf{z}'_{-i} \mid \mathbf{e})\, P(z_i \mid \mathbf{z}'_{-i}, \mathbf{e})
+   = \pi(\mathbf{z}')\, T_i(\mathbf{z}' \to \mathbf{z}).
+\end{align*}
+因为对所有变量 $Z_i$ 轮流扫描（或均匀随机选坐标）均以 $\pi$ 为不变分布，且正概率条件保证了状态空间连通（不可约）与存在自环（非周期），由第 1 卷第 3 章有限马尔可夫链遍历定理，链的经验分布必然收敛到唯一平稳分布 $P(\mathbf{z} \mid \mathbf{e})$。
+\end{proof}
+
+实际使用 Gibbs 采样有两个工程要点：
+\begin{enumerate}
+  \item \textbf{预烧期（Burn-in）}：初始状态 $\mathbf{Z}^{(0)}$ 往往远离高概率区域，因此通常丢弃前 $B_{\text{burn}}$ 轮迭代（如 $200\sim 1000$ 轮），等马尔可夫链混匀进入平稳分布后再开始计数；
+  \item \textbf{样本自相关性}：相邻两步样本高度相关（特别是网络存在强耦合或确定性 $0/1$ 约束时，链可能被困在局部孤岛），有效样本量低于总步数 $M$，必要时可采用\textbf{分块 Gibbs（Blocked Gibbs）}——把强相关变量打包成一个联合小块同时重采样。
+\end{enumerate}
+
+\subsection{真实实验对比：似然加权 vs Gibbs 采样（警报网络实测）}
+
+我们将配套实验脚本 \texttt{code/vol3\_experiments.py} 在 Pearl 警报网络上运行查询 $P(B=1 \mid J=1, M=1)$（真值 $0.284172$），实测数据保存于 \texttt{data/bn\_sampling.csv}，双对数误差曲线如图~\ref{fig:bn-sampling-err} 所示。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=0.84\linewidth,
+  height=6.2cm,
+  xlabel={采样步数 / 样本量 $M$（对数刻度）},
+  ylabel={后验绝对误差 $|\hat{P}(B=1\mid J=1,M=1) - 0.284172|$},
+  xmin=80, xmax=42000,
+  ymin=0.00025, ymax=0.95,
+  grid=both,
+  major grid style={tealLine!60, line width=0.45pt},
+  minor grid style={tealLine!25, line width=0.25pt},
+  legend style={at={(0.5,1.03)},anchor=south},
+  legend style={font=\footnotesize\sffamily, fill=white, draw=tealLine, rounded corners=1mm},
+  tick label style={font=\footnotesize},
+  label style={font=\small\sffamily, color=ink}
+]
+  \addplot[color=ochre, very thick, mark=square*, mark size=2.3pt]
+    table[x=M, y=lw_err, col sep=comma] {data/bn_sampling.csv};
+  \addlegendentry{似然加权（Likelihood Weighting）}
+
+  \addplot[color=teal, very thick, mark=*, mark size=2.4pt]
+    table[x=M, y=gibbs_err, col sep=comma] {data/bn_sampling.csv};
+  \addlegendentry{Gibbs 采样（MCMC，burn-in $=200$）}
+
+  % Reference O(M^-0.5) slope line
+  \addplot[color=slate, dashed, thick, domain=100:30000, samples=2] {0.18 * x^(-0.5)};
+  \addlegendentry{理论参考斜率 $O(M^{-1/2})$}
+
+  % Callout annotations
+  \node[font=\scriptsize\sffamily, color=ochre, anchor=west] at (axis cs:125, 0.50)
+    {$M \le 1000$ 时未抽到 $B=1$，误差卡死在 $0.284$};
+  \node[font=\scriptsize\sffamily, color=tealDark, anchor=east] at (axis cs:23000, 0.00048)
+    {$M=30000$：Gibbs 误差仅 \textbf{$0.0005$}};
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{Pearl 警报网络查询 $P(B=1\mid J=1, M=1)$ 上似然加权与 Gibbs 采样的绝对误差双对数曲线（真实数据来自 \texttt{data/bn\_sampling.csv}）。在罕见底层证据下，似然加权因先验抽样盲区而剧烈震荡；Gibbs 采样借助马尔可夫毯自底向上传播证据，在 $M=30000$ 时将误差压低至 $0.00047$（$\approx 0.0005$），精度超越似然加权 $24$ 倍。}
+\label{fig:bn-sampling-err}
+\end{figure}
+
+图~\ref{fig:bn-sampling-err} 生动印证了理论分析：
+\begin{itemize}
+  \item 在 $M = 100, 300, 1000$ 时，似然加权一条 $B=1$ 的样本都没抽到，估计值恒为 $0$，误差纹丝不动地卡在 $0.2842$；直到 $M=30000$，其估计值为 $0.2726$（误差仍有 $0.0116$）；
+  \item 反观 Gibbs 采样，即使在 $M = 1000$ 时估计值已达 $0.2960$（误差 $0.0118$）；在 $M = 10000$ 时为 $0.2858$（误差 $0.0016$）；到 $M = 30000$ 时达到 $0.2837$，绝对误差锐减至 \textbf{$0.0005$}！
+\end{itemize}
+
+\begin{insightBox}{采样推断在现代机器学习中的延续（通往第 4、5 卷）}
+Gibbs 采样只是 MCMC 浩瀚宇宙的第一站：当遇到连续高维变量且全条件分布没有闭式解时，人们将其推广为\textbf{Metropolis-Hastings 算法}与利用梯度加速探索的\textbf{哈密顿蒙特卡洛（HMC）}；而为了避免采样耗时，第 4 卷将学习另一条确定性近似路线——\textbf{变分推断（Variational Inference）与 EM 算法}；第 5 卷前沿的扩散生成模型（Diffusion Models）则进一步把采样与得分匹配联系起来。
+\end{insightBox}
+
+% ============================================================
+\section{隐马尔可夫模型（HMM）：时序推理的骨架}\label{sec:hmm}
+% ============================================================
+
+到目前为止，我们的贝叶斯网络描绘的都是静态世界的“一张快照”。但真实智能体活在流动的时间中：雷达连续追踪移动目标、语音识别逐帧切分音素、生物信息学沿着 DNA 碱基序列标定基因区域。如果在每个离散时刻 $t = 1, 2, \dots, T$ 复制一份结构相同的贝叶斯网络，并用时间演化边串联起来，就得到了最经典、生命力最旺盛的动态概率图模型——\textbf{隐马尔可夫模型（Hidden Markov Model, HMM）}。
+
+\subsection{具体问题引入与 HMM 形式化定义}
+
+先看 Russell 与 Norvig 教材中家喻户晓的\textbf{“雨伞世界”问题}：你是一位驻守在无窗地下室的安保员，每天看不到外面的真实天气（隐藏状态 $S_t \in \{\text{Rain}, \text{Sun}\}$），唯一能观测到的线索是主管每天上班时有没有带雨伞（观测变量 $O_t \in \{\text{U}, \neg\text{U}\}$）。假设世界满足两条简洁的时齐规律：
+\begin{itemize}
+  \item \textbf{天气转移概率 $T$}：今天下雨，明天继续下雨的概率为 $0.7$，转晴为 $0.3$；今天晴天，明天继续晴天的概率为 $0.7$，转雨为 $0.3$（初始第 $0$ 天先验为 $\pi_0 = [0.5, 0.5]$）；
+  \item \textbf{雨伞观测概率 $E$}：下雨时主管带伞的概率为 $0.9$，忘带伞为 $0.1$；晴天时主管（防晒或误带）带伞的概率为 $0.2$，不带伞为 $0.8$。
+\end{itemize}
+现在连续五天，你观察到主管带伞记录为 $O_{1:5} = [\text{U}, \text{U}, \neg\text{U}, \text{U}, \text{U}]$。请问：第 3 天没带伞时外面到底下雨了吗？连续五天最有可能的真实天气序列是什么？
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  state/.style={circle, draw=tealDark, very thick, fill=tealLight, minimum size=11mm, font=\sffamily\bfseries\small, text=ink},
+  obs/.style={circle, draw=ochre, very thick, fill=ochreLight, minimum size=11mm, font=\sffamily\bfseries\small, text=ochre},
+  arr/.style={-{Stealth[length=2.2mm]}, very thick, teal},
+  emit/.style={-{Stealth[length=2.2mm]}, very thick, ochre!85}
+]
+  \node[state] (s1) at (0, 0) {$S_1$};
+  \node[state] (s2) at (2.7, 0) {$S_2$};
+  \node[state] (s3) at (5.4, 0) {$S_3$};
+  \node[font=\Large\bfseries, text=slate] (dots) at (7.55, 0) {$\cdots$};
+  \node[state] (st) at (9.7, 0) {$S_T$};
+
+  \node[obs] (o1) at (0, -2.0) {$O_1$};
+  \node[obs] (o2) at (2.7, -2.0) {$O_2$};
+  \node[obs] (o3) at (5.4, -2.0) {$O_3$};
+  \node[obs] (ot) at (9.7, -2.0) {$O_T$};
+
+  \draw[arr] (s1) -- node[above, font=\scriptsize\sffamily, text=tealDark] {$T$} (s2);
+  \draw[arr] (s2) -- node[above, font=\scriptsize\sffamily, text=tealDark] {$T$} (s3);
+  \draw[arr] (s3) -- (dots);
+  \draw[arr] (dots) -- node[above, font=\scriptsize\sffamily, text=tealDark] {$T$} (st);
+
+  \foreach \i in {1,2,3,t} {
+    \draw[emit] (s\i) -- node[right, font=\scriptsize\sffamily, text=ochre] {$E$} (o\i);
+  }
+
+  % Left row labels
+  \node[anchor=east, font=\footnotesize\sffamily\bfseries, text=tealDark] at (-1.05, 0) {隐藏状态链};
+  \node[anchor=east, font=\footnotesize\sffamily\bfseries, text=ochre] at (-1.05, -2.0) {观测证据序列};
+
+  % Initial prior arrow
+  \draw[arr, dashed] (-1.05, 0.75) -- node[above right, font=\scriptsize, text=slate, pos=0.25] {$\pi_1$} (s1);
+\end{tikzpicture}
+\caption{沿时间轴展开的隐马尔可夫模型（HMM）贝叶斯网络骨架。隐藏状态链 $S_1 \to S_2 \to \cdots \to S_T$ 由转移矩阵 $T$ 驱动，每个时刻通过发射矩阵 $E$ 独立生成当前观测 $O_t$。整张图本质上是一棵树宽为 $1$ 的毛毛虫树（Caterpillar Tree），因此所有核心推断均可在线性时间 $O(T |\mathcal{S}|^2)$ 内精确求解！}
+\label{fig:hmm-unrolled}
+\end{figure}
+
+\begin{defBox}
+\begin{definition}[隐马尔可夫模型，Hidden Markov Model]\label{def:hmm}
+一个离散时齐隐马尔可夫模型由五元组 $(\mathcal{S}, \mathcal{O}, \boldsymbol{\pi}_1, T, E)$ 唯一确定，其中 $\mathcal{S} = \{1, \dots, K\}$ 为有限隐藏状态集，$\mathcal{O}$ 为观测值集，参数包括：
+\begin{enumerate}
+  \item \textbf{初始状态分布} $\pi_1(s) = P(S_1 = s)$（若从 $t=0$ 的先验 $\boldsymbol{\pi}_0$ 转移一步进入 $t=1$，则 $\boldsymbol{\pi}_1 = \boldsymbol{\pi}_0 T$）；
+  \item \textbf{状态转移矩阵} $T_{i,j} = P(S_t = j \mid S_{t-1} = i)$（满足\textbf{一阶马尔可夫假设}：$S_t \indep S_{1:t-2}, O_{1:t-1} \mid S_{t-1}$）；
+  \item \textbf{观测发射矩阵} $E_{s, o} = P(O_t = o \mid S_t = s)$（满足\textbf{传感器马尔可夫假设}：$O_t \indep S_{-t}, O_{-t} \mid S_t$）。
+\end{enumerate}
+按照图~\ref{fig:hmm-unrolled} 的 DAG 结构，长度为 $T$ 的序列联合概率分解为：
+\begin{equation}\label{eq:hmm-joint}
+  P(S_{1:T}, O_{1:T}) = P(S_1)\, P(O_1 \mid S_1) \prod_{t=2}^{T} P(S_t \mid S_{t-1})\, P(O_t \mid S_t).
+\end{equation}
+\end{definition}
+\end{defBox}
+
+请立刻用第 4 章的眼力审视图~\ref{fig:hmm-unrolled}：HMM 本质上是一棵\textbf{无环且树宽仅为 $1$} 的贝叶斯网络！这意味着我们完全不需要近似采样——沿着时间轴顺次做变量消元（动态规划），就能以 $O(T K^2)$ 的极速精确解答时序推理的三大核心问题。
+
+\subsection{三大核心 HMM 推断算法与“雨伞世界”完整手算}
+
+我们紧扣观测序列 $O_{1:5} = [\text{U}, \text{U}, \neg\text{U}, \text{U}, \text{U}]$，逐一推导并验算三大算法（状态编码 $0=\text{Rain}, 1=\text{Sun}$，$\boldsymbol{\pi}_0 = [0.5, 0.5]$，因 $T$ 对称故 $\boldsymbol{\pi}_1 = \boldsymbol{\pi}_0 T = [0.5, 0.5]$）。
+
+\subsubsection{算法一：前向滤波（Forward Filtering）——在线实时追踪当前状态}
+
+\textbf{任务}：给定截至时刻 $t$ 的全部观测 $O_{1:t}$，计算当前隐藏状态的后验分布 $\boldsymbol{\alpha}_t(s) := P(S_t = s \mid O_{1:t})$（在线估计，不看未来）。
+
+利用一阶马尔可夫与传感器独立性，将 $t$ 时刻后验拆成\textbf{时间预测（Predict）}与\textbf{观测更新（Update）}两步递归：
+\begin{align}
+  P(S_t = s \mid O_{1:t-1}) &= \sum_{s' \in \mathcal{S}} T_{s', s}\, \alpha_{t-1}(s') \qquad\text{（全概率时间推进）}, \label{eq:hmm-pred}\\
+  \alpha_t(s) = P(S_t = s \mid O_{1:t}) &= \frac{1}{Z_t}\, E_{s, o_t}\, P(S_t = s \mid O_{1:t-1}) \qquad\text{（贝叶斯观测修正）}, \label{eq:hmm-upd}
+\end{align}
+其中归一化常数 $Z_t = \sum_s E_{s, o_t} P(S_t=s \mid O_{1:t-1}) = P(O_t = o_t \mid O_{1:t-1})$，副产品 $\prod_{t=1}^T Z_t$ 恰好给出整条观测序列的对数似然 $\log P(O_{1:T}) = \sum_{t=1}^T \log Z_t$！这本质上就是按 $S_1 \to S_2 \to \cdots \to S_{t-1}$ 顺序执行变量消元。
+
+\textbf{手算前两步与全序列核验}：
+\begin{itemize}
+  \item $t=1$（观测 $O_1=\text{U}$）：预测 $\boldsymbol{\pi}_1 = [0.5, 0.5]$；乘以带伞似然 $[0.9, 0.2]$ 得未归一化 $[0.45, 0.10]$，$Z_1 = 0.55$，归一化得 $\boldsymbol{\alpha}_1 = [0.45/0.55,\, 0.10/0.55] = [\mathbf{0.8182},\, 0.1818]$；
+  \item $t=2$（观测 $O_2=\text{U}$）：预测 $[0.8182, 0.1818]\,T = [0.6273, 0.3727]$；乘以 $[0.9, 0.2]$ 得 $[0.5645, 0.0745]$，归一化得 $\boldsymbol{\alpha}_2 = [\mathbf{0.8834},\, 0.1166]$；
+  \item $t=3$（观测 $O_3=\neg\text{U}$）：预测 $[0.6533, 0.3467]$；乘以未带伞似然 $[0.1, 0.8]$ 得 $[0.0653, 0.2773]$，归一化得 $\boldsymbol{\alpha}_3 = [\mathbf{0.1907},\, 0.8093]$（没带伞让下雨概率骤降至 $19.1\%$）；
+  \item 依此类推，5 天前向滤波的下雨概率序列为（与 \texttt{vol3\_experiments.py} 完全一致）：
+  \[
+    \big[P(S_t = \text{Rain} \mid O_{1:t})\big]_{t=1}^5
+    = [\mathbf{0.8182},\; \mathbf{0.8834},\; \mathbf{0.1907},\; \mathbf{0.7308},\; \mathbf{0.8673}].
+  \]
+\end{itemize}
+
+\subsubsection{算法二：前向-后向平滑（Forward-Backward Smoothing）——借助未来证据复盘过去}
+
+\textbf{任务}：拿到完整观测序列 $O_{1:T}$ 后，回头重新估计过去每一时刻 $t$ 的后验分布 $\gamma_t(s) := P(S_t = s \mid O_{1:T})$（离线事后复盘）。
+
+在图~\ref{fig:hmm-unrolled} 中应用 d-分离一眼可得：给定当前状态 $S_t$，未来观测 $O_{t+1:T}$ 与过去观测 $O_{1:t}$ 在链式节点 $S_t$ 处被阻断，即 $O_{t+1:T} \indep O_{1:t} \mid S_t$！因此：
+\begin{equation}\label{eq:hmm-smooth}
+  \gamma_t(s) = P(S_t = s \mid O_{1:t}, O_{t+1:T})
+  \;\propto\; \underbrace{P(S_t = s \mid O_{1:t})}_{\alpha_t(s)\ \text{（前向消息）}}
+             \cdot \underbrace{P(O_{t+1:T} \mid S_t = s)}_{\beta_t(s)\ \text{（后向消息）}}.
+\end{equation}
+而后向消息 $\beta_t(s)$ 从终点初始化 $\beta_T(s) \equiv 1$，反向递推（即从右向左做变量消元）：
+\begin{equation}\label{eq:hmm-backward}
+  \beta_t(s) = \sum_{s' \in \mathcal{S}} T_{s, s'}\, E_{s', o_{t+1}}\, \beta_{t+1}(s'), \qquad t = T-1, T-2, \dots, 1.
+\end{equation}
+在数值实现中，每一步可对向量 $\boldsymbol{\beta}_t$ 归一化以防下溢（常数因子在式~\eqref{eq:hmm-smooth} 归一化时自动抵消）。将前向与后向消息逐点相乘并归一化，得到表~\ref{tab:hmm-umbrella} 中 5 天的精确对比。
+
+\begin{table}[htbp]
+\centering
+\caption{“雨伞世界”五天观测序列 $O_{1:5} = [\text{U}, \text{U}, \neg\text{U}, \text{U}, \text{U}]$ 的滤波、平滑与 Viterbi 精确结果对比}
+\label{tab:hmm-umbrella}
+\small
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+时刻 $t$ & 观测 $O_t$ & 前向滤波 $P(\text{Rain}\mid O_{1:t})$ & 前向-后向平滑 $P(\text{Rain}\mid O_{1:5})$ & 变化量 $\Delta$ & Viterbi 最优路径 \\
+\midrule
+$1$ & 带伞（$\text{U}$）   & $0.8182$ & $0.8673$ & $+0.0491$ & $\text{Rain}$ \\
+$2$ & 带伞（$\text{U}$）   & $0.8834$ & $0.8204$ & $-0.0630$ & $\text{Rain}$ \\
+$3$ & 未带伞（$\neg\text{U}$） & $\mathbf{0.1907}$ & $\mathbf{0.3075}$ & $\mathbf{+0.1168}$ & $\text{Sun}$ \\
+$4$ & 带伞（$\text{U}$）   & $0.7308$ & $0.8204$ & $+0.0896$ & $\text{Rain}$ \\
+$5$ & 带伞（$\text{U}$）   & $0.8673$ & $0.8673$ & $0.0000$ & $\text{Rain}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+请细细品味表~\ref{tab:hmm-umbrella} 第 3 行的戏剧性变化：第 3 天主管没带伞，当天实时滤波认为下雨概率只有 \textbf{$19.1\%$}；但当我们得知第 4、5 两天主管又连续带伞后，后向平滑将第 3 天的下雨概率显著上修至 \textbf{$30.8\%$}（上升了 $11.7$ 个百分点）——未来的证据反过来提高了“第 3 天其实也在下雨、只是主管忘带伞了”的可能性！同时注意观测序列关于第 3 天完全对称，因此平滑分布也呈现出完美的左右对称性 $[0.8673, 0.8204, 0.3075, 0.8204, 0.8673]$。
+
+\subsubsection{算法三：对数空间 Viterbi 解码——寻找最可能的完整隐状态路径}
+
+\textbf{任务}：寻找使整条隐状态序列联合后验最大的全局最优解释（MAP 解码）：
+\[
+  \hat{s}_{1:T} = \argmax_{s_{1:T}} P(s_{1:T} \mid O_{1:T}) = \argmax_{s_{1:T}} \log P(s_{1:T}, O_{1:T}).
+\]
+与前向滤波的唯一区别在于：我们不再把所有可能的前驱路径的概率\textbf{加起来（$\sum$）}，而是只保留通往当前状态 $s$ 的\textbf{最大概率路径（$\max$）}！同时，在实际工程（如长达数千帧的语音或基因序列）中，连乘几千个 $<1$ 的概率值会迅速突破 IEEE-754 双精度浮点数下限（如 $0.5^{1200} \approx 10^{-361} \to 0.0$），导致全盘下溢为零。因此\textbf{工业级 Viterbi 必须全程在对数空间（Log-Space）中实现}，把连乘变为加法！
+
+定义对数维特比表 $\delta_t(s) := \max_{s_{1:t-1}} \log P(s_{1:t-1}, S_t = s, O_{1:t})$ 与回溯指针 $\psi_t(s)$：
+\begin{align}
+  \delta_1(s) &= \log \pi_1(s) + \log E_{s, o_1}, \label{eq:viterbi-init}\\
+  \delta_t(s) &= \log E_{s, o_t} + \max_{s' \in \mathcal{S}} \Big[\delta_{t-1}(s') + \log T_{s', s}\Big], \qquad t = 2, \dots, T, \label{eq:viterbi-dp}\\
+  \psi_t(s) &= \argmax_{s' \in \mathcal{S}} \Big[\delta_{t-1}(s') + \log T_{s', s}\Big]. \label{eq:viterbi-ptr}
+\end{align}
+扫描至终点 $T$ 后，选出最优终点 $\hat{s}_T = \argmax_s \delta_T(s)$，再沿 $\hat{s}_{t-1} = \psi_t(\hat{s}_t)$ 从 $t=T$ 反向回溯到 $t=1$，即以 $O(T K^2)$ 时间和 $O(T K)$ 空间精确输出全局 MAP 路径。在“雨伞世界”中，经对数 Viterbi 计算（最终最大联合对数概率 $\delta_5(\text{Rain}) = -4.4590$，对应联合概率 $e^{-4.4590} \approx 0.01157$），解码出的最优天气轨迹为：
+\[
+  \hat{s}_{1:5} = \big[\text{Rain},\; \text{Rain},\; \text{Sun},\; \text{Rain},\; \text{Rain}\big].
+\]
+
+\begin{failBox}{为什么不能直接对平滑边际逐时刻取 $\argmax$ 代替 Viterbi？}
+初学者常问：“既然已经用前向-后向算出了每一时刻的精确平滑概率 $P(S_t\mid O_{1:T})$，我每天挑概率最大的状态拼起来，不就是最优路径吗？”\textbf{错！逐时刻边际 MAP 甚至可能拼出概率严格为 $0$ 的非法路径！}
+
+构造一个仅 3 状态 $\{0, 1, 2\}$、2 步的极简反例：设第 1 步后验为 $(0.40, 0.35, 0.25)$；转移矩阵禁止 $0\to 0$（即 $T_{0,0}=0, T_{0,1}=T_{0,2}=0.5$，且 $T_{1,0}=T_{2,0}=1.0$）；第 2 步观测无额外区分度。所有合法路径的联合概率只有 4 条非零：
+\[
+  P(0,1)=0.20,\quad P(0,2)=0.20,\quad P(1,0)=0.35,\quad P(2,0)=0.25.
+\]
+计算两时刻的边际分布：
+\begin{itemize}
+  \item $t=1$ 边际：$(0.40,\, 0.35,\, 0.25) \implies$ 边际最大状态是 $S_1 = 0$；
+  \item $t=2$ 边际：$(0.60,\, 0.20,\, 0.20) \implies$ 边际最大状态是 $S_2 = 0$；
+  \item 逐时刻边际 MAP 拼出的路径是 $(0, 0)$，但它的真实联合概率为 \textbf{$P(0, 0) = 0.0$（根本不可能发生！）}；
+  \item 而 Viterbi 正确输出全局联合概率最大的合法路径 $(1, 0)$，概率高达 \textbf{$0.35$}！
+\end{itemize}
+\textbf{决策原则}：若目标是最大化单步准确率（最小化逐位 Hamming 误差），选前向-后向平滑；若目标是整条序列整体正确（如词性标注合法性、语音解码），必须用 Viterbi！
+\end{failBox}
+
+\begin{extBox}{未知参数学习（Baum-Welch / EM）与连续状态扩展（粒子滤波）}
+本章假定转移矩阵 $T$ 与发射矩阵 $E$ 已知。但在现实语音或金融建模中，我们手里往往只有观测序列 $O_{1:T}$，并不知道 $T$ 和 $E$ 的真实数值。第 4 卷将系统推导\textbf{期望最大化（EM）算法}，在 HMM 上的特例便是著名的 \textbf{Baum-Welch 算法}：E 步恰好运行本节的前向-后向算法计算各状态与相邻状态对的期望占据次数，M 步则直接用期望计数比值刷新 $T$ 和 $E$，交替迭代直至对数似然收敛！此外，若隐状态是连续坐标（如自动驾驶车辆的 $(x, y, v_x, v_y)$），离散求和化为高维积分：线性高斯情形化为经典的\textbf{卡尔曼滤波（Kalman Filter）}，非线性非高斯情形则用把似然加权动态化的\textbf{粒子滤波（Particle Filtering / Sequential Monte Carlo）}求解。
+\end{extBox}
+
+\subsection{可运行的 Python/NumPy HMM 滤波、平滑与对数 Viterbi 实现}
+
+\begin{lstlisting}[caption={HMM 前向滤波、前向-后向平滑与对数空间 Viterbi 完整实现},label={lst:hmm}]
+import numpy as np
+
+def hmm_forward_backward(pi0, T, E, obs):
+    n_steps, K = len(obs), T.shape[0]
+    alpha = np.zeros((n_steps, K))
+    cur = pi0.copy()
+    for t, o in enumerate(obs):
+        pred = cur @ T                          # predict: sum_{s'} alpha_{t-1}(s') T_{s',s}
+        cur = pred * E[:, o]                    # update with sensor likelihood
+        cur /= cur.sum()
+        alpha[t] = cur
+
+    beta = np.ones((n_steps, K))
+    for t in range(n_steps - 2, -1, -1):
+        b = T @ (E[:, obs[t + 1]] * beta[t + 1])
+        beta[t] = b / b.sum()                   # normalized backward message
+
+    gamma = alpha * beta
+    gamma /= gamma.sum(axis=1, keepdims=True)
+    return alpha, gamma
+
+def hmm_viterbi_log(pi0, T, E, obs):
+    n_steps, K = len(obs), T.shape[0]
+    eps = 1e-300                                # guard against log(0)
+    logT = np.log(np.maximum(T, eps))
+    logE = np.log(np.maximum(E, eps))
+    dp = np.zeros((n_steps, K))
+    ptr = np.zeros((n_steps, K), dtype=int)
+
+    dp[0] = np.log(np.maximum(pi0 @ T, eps)) + logE[:, obs[0]]
+    for t in range(1, n_steps):
+        # scores[prev, cur] = dp[t-1, prev] + logT[prev, cur]
+        scores = dp[t - 1, :, None] + logT
+        ptr[t] = np.argmax(scores, axis=0)
+        dp[t] = scores[ptr[t], np.arange(K)] + logE[:, obs[t]]
+
+    path = [int(np.argmax(dp[-1]))]
+    for t in range(n_steps - 1, 0, -1):
+        path.append(int(ptr[t, path[-1]]))
+    path.reverse()
+    return path, float(np.max(dp[-1]))
+
+# Verify on Weather-Umbrella HMM: states 0=Rain, 1=Sun; obs 0=U, 1=~U
+T = np.array([[0.7, 0.3], [0.3, 0.7]])
+E = np.array([[0.9, 0.1], [0.2, 0.8]])
+pi0 = np.array([0.5, 0.5])
+obs = [0, 0, 1, 0, 0]
+
+filt, smooth = hmm_forward_backward(pi0, T, E, obs)
+path, logp = hmm_viterbi_log(pi0, T, E, obs)
+print("Filter P(Rain):", np.round(filt[:, 0], 4))
+print("Smooth P(Rain):", np.round(smooth[:, 0], 4))
+print("Viterbi path  :", ["Rain" if s == 0 else "Sun" for s in path], f"(logP={logp:.4f})")
+\end{lstlisting}
+
+% ============================================================
+\section{本章习题}\label{sec:ch5-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{掌握采样基本计算、HMM 联合概率与前向滤波手算}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}]
+  \item \textbf{似然加权权重手算}：在图~\ref{fig:alarm-bn} 的 Pearl 警报网络中，已知证据为 $E = 1, J = 1, M = 0$。若似然加权算法按拓扑序 $B \to E \to A \to J \to M$ 生成了两条样本：（a）$B=0, A=1$；（b）$B=1, A=0$。请分别写出这两条样本的似然权重 $w_a, w_b$，并仅根据这两条样本给出 $\hat{P}(B=1 \mid E=1, J=1, M=0)$ 的加权估计值。
+  \exHint{每遇到一个证据节点（$E, J, M$），都将权重乘以该节点在当前父节点赋值下的条件概率。}
+
+  \item \textbf{雨伞世界新观测序列手工滤波}：沿用第~\ref{sec:hmm} 节的雨伞 HMM 参数（$\pi_0=[0.5, 0.5]$，$T=\begin{psmallmatrix}0.7&0.3\\0.3&0.7\end{psmallmatrix}$，$E=\begin{psmallmatrix}0.9&0.1\\0.2&0.8\end{psmallmatrix}$），但改为连续 3 天都\textbf{没有带伞} $O_{1:3} = [\neg\text{U}, \neg\text{U}, \neg\text{U}]$。手工逐步计算前向滤波分布 $\boldsymbol{\alpha}_1, \boldsymbol{\alpha}_2, \boldsymbol{\alpha}_3$（保留 4 位小数）以及整条观测序列的边际概率 $P(O_{1:3}) = Z_1 Z_2 Z_3$。
+  \exHint{第 1 步未带伞似然为 $[0.1, 0.8]$，先算未归一化向量，再求和得 $Z_t$ 并归一化。}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{推导 Gibbs 更新公式与 HMM 平滑/Viterbi 算法变体}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{Gibbs 采样器手写条件分布}：在习题 4.2 的 5 节点学生成绩网络（$D \to G \leftarrow I$，$I \to S$，$G \to L$）中，设已观测证据为推荐信 $L=1$ 和分数 $S=1$。请写出运行 Gibbs 采样时，依次重采样隐藏变量 $D$、$I$、$G$ 各自所需的精确全条件分布比例式（只需用网络中的原始 CPT 因子表达，化简到最简形式）。
+  \exHint{根据定理~\ref{thm:mb}，每个节点的全条件分布仅包含自身 CPT 及其所有子节点的 CPT。}
+
+  \item \textbf{一步预测与滞后平滑公式推导}：在 HMM 中，除了滤波与平滑外，工程中还常用：（1）\textbf{$k$ 步前瞻预测} $P(S_{t+k} \mid O_{1:t})$（$k \ge 1$）；（2）\textbf{固定滞后平滑（Fixed-Lag Smoothing）} $P(S_{t-d} \mid O_{1:t})$。请利用矩阵乘法推导 $P(S_{t+k} \mid O_{1:t})$ 关于滤波分布 $\boldsymbol{\alpha}_t$ 与转移矩阵 $T$ 的闭式表达，并分析当 $k \to \infty$ 且 $T$ 为正则转移矩阵时该预测分布趋于什么极限。
+  \exHint{在未来无新观测的情况下，每向前一步仅执行式~\eqref{eq:hmm-pred} 的右乘 $T$ 操作，故 $k$ 步后相当于右乘 $T^k$。}
+\end{enumerate}
+
+\exTier{C 层：深入证明与反例}{分析采样方差退化、遍历性失效与 Viterbi 正确性}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{Gibbs 采样的可约性陷阱（确定性约束反例）}：定理~\ref{thm:gibbs-stationarity} 要求分布严格为正 $P(\mathbf{Z}, \mathbf{e}) > 0$。请构造一个仅包含两个二值变量 $(X, Y)$ 的简单联合分布（允许部分组合概率为 $0$），证明单坐标 Gibbs 采样在该分布上会陷入孤岛、\textbf{无法收敛到真实目标分布}，并说明如何通过分块更新或引入平滑扰动修复这一缺陷。
+  \exHint{令 $P(X=0, Y=0) = 0.5$、$P(X=1, Y=1) = 0.5$，其余为 $0$，检查从 $(0, 0)$ 出发的一步 Gibbs 转移概率。}
+
+  \item \textbf{似然加权有效样本量（ESS）与 Viterbi 最优子结构证明}：（1）在重要性采样中，常用有效样本量 $\mathrm{ESS} = \big(\sum_{m=1}^M w_m\big)^2 / \sum_{m=1}^M w_m^2$ 衡量权重退化程度。证明 $1 \le \mathrm{ESS} \le M$，并说明何时取到下界 $1$（单一样本垄断）与上界 $M$（等权无退化）；（2）用数学归纳法严格证明对数空间 Viterbi 递推式~\eqref{eq:viterbi-dp} 满足最优子结构性质，从而必然输出全局最大联合概率路径。
+  \exHint{第（1）问用 Cauchy-Schwarz 不等式证明上界，用非负项平方和 $\sum w_m^2 \le (\sum w_m)^2$ 证明下界。}
+\end{enumerate}
+
+\exTier{D 层：编程实践与基准自检}{实现高对比度采样基准与长序列对数 Viterbi 压测}
+
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{三种贝叶斯网络采样器定量基准测试}：在 Pearl 警报网络上针对查询 $P(B=1 \mid J=1, M=1)$，从零编写并对比以下三种采样器在 $M \in \{1000, 5000, 20000, 50000\}$ 下的估计值、绝对误差与有效样本数：（a）拒绝采样；（b）似然加权（额外输出 $\mathrm{ESS}$）；（c）Gibbs 采样（burn-in $= 500$）。
+  \textbf{数值自检基准}：在 $M = 50000$ 时，（1）拒绝采样的实际接受率应落在 $[0.0016, 0.0026]$ 区间内（仅约 $100$ 条有效样本）；（2）似然加权的 $\mathrm{ESS}$ 远小于 $50000$（通常 $< 400$）；（3）Gibbs 采样的后验估计与真值 $0.284172$ 的绝对误差应 $< 0.005$。
+  \exHint{可在似然加权中用 NumPy 向量化一次性生成 $M$ 条样本，毫秒级完成实验。}
+
+  \item \textbf{超长序列下的 Viterbi 数值下溢压测与语音/碱基模拟解码}：构造一个 2 状态（如“富 GC 基因区” vs “背景区”）HMM，模拟生成长度为 $T = 2000$ 的观测序列。分别运行：（a）朴素概率乘积版 Viterbi；（b）代码~\ref{lst:hmm} 的对数空间 Viterbi。
+  \textbf{数值自检基准}：（1）记录朴素概率版在第几步左右发生 IEEE-754 全零下溢（通常在 $t \in [600, 1100]$ 区间内 \texttt{dp[t].max() == 0.0}），导致解码完全崩溃；（2）对数空间 Viterbi 在 $T = 2000$ 时无任何 \texttt{NaN}/\texttt{-inf} 异常，且解码隐状态与真实生成状态的逐位匹配准确率显著高于仅靠单步观测发射概率猜状态的基线（至少高出 $10$ 个百分点）。
+  \exHint{可设转移自留概率为 $0.95$，两状态发射分布略有重叠（如 $[0.75, 0.25]$ 与 $[0.30, 0.70]$），此时时序上下文优势最明显。}
+\end{enumerate}

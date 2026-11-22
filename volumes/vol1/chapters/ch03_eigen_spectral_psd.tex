@@ -1,0 +1,816 @@
+\chapter[特征分解、谱定理与半正定矩阵]{特征分解、实对称阵谱定理、半正定矩阵与特殊 AI 矩阵}
+\label{ch:ch3}
+
+\chapEpigraph{对称性，无论你赋予它多宽泛或多狭窄的含义，都是人类千百年来用以理解并创造秩序、美与完美的观念。}{赫尔曼·外尔（Hermann Weyl），《对称》}
+
+\begin{chapIntro}{本章定位与零循环路线}
+如果说第 2 章用正交投影驯服了线性方程组，那么本章则要把方阵当成一台反复运转的动力机器：看清哪些特殊方向在矩阵作用下只做伸缩、绝不偏转。在人工智能中，我们\textbf{不需要}花几十页去手算高阶矩阵的复杂 Jordan 块；相反，我们将从特征值与特征向量的 2D 几何直觉出发，依托第 2 章已经建立的\textbf{行列式体积直觉、内积、正交补分解 $\R^n = U \oplus U^\perp$ 与四大基本子空间}，沿一条\textbf{零循环、零跳步}的路线推进：
+\begin{enumerate}
+  \item 从几何画面直观看懂\textbf{特征值、特征向量与特征方程 $\det(A-\lambda I)=0$}，并用 $2\times 2$ 剪切矩阵直观理解 Jordan 链引发的“瞬态暴涨”现象，看清为何现代数值 AI 避开一般 Jordan 分解；
+  \item 从零严格证明\textbf{实对称矩阵谱定理} $S = Q\Lambda Q^T$，一步推出 Rayleigh 商界；
+  \item 作为谱定理的直接推论，\textbf{无循环地}证出正定/半正定判据（$Q \succ 0 \iff \lambda_i > 0$），并解剖半正定矩阵（PSD）在 AI 中的三大核心化身（协方差阵、核矩阵、Hessian）与条件数 $\kappa$；
+  \item 轻量认识两类在 AI 中随处可见的特殊矩阵：\textbf{行随机矩阵}（马尔可夫链与 Transformer Softmax 注意力）与\textbf{图拉普拉斯矩阵}（图信号平滑度与谱聚类）。
+\end{enumerate}
+\end{chapIntro}
+
+% =========================================================================
+\section{特征值几何直觉、特征分解与 Jordan 链}
+\label{sec:ch3-eigen-jordan}
+
+\subsection{从几何直觉理解特征值、特征向量与特征多项式}
+
+回忆第 2 章第~\ref{sec:linalg-bridge}~节的线性变换视角：当我们用方阵 $A \in \R^{n\times n}$ 作用在空间里的向量 $x$ 上时，绝大多数向量都会被推离原来的直线（既旋转又伸缩）。然而，在整片空间翻腾变形之际，往往藏着几条极为特殊的方向——落在这些直线上的非零向量被 $A$ 作用后\textbf{依然留在自己原来的直线上}，仅仅被拉长、缩短或反向翻转！
+
+\begin{defBox}
+\begin{definition}[特征值与特征向量]\label{def:ch3-eigen}
+设 $A \in \R^{n\times n}$ 为方阵。若存在标量 $\lambda$（可能为实数或复数）与\textbf{非零}向量 $v \neq 0$，使得
+\begin{equation}\label{eq:ch3-eig-def}
+  A v = \lambda v,
+\end{equation}
+则称 $\lambda$ 为 $A$ 的\textbf{特征值（Eigenvalue）}，$v$ 为 $A$ 属于 $\lambda$ 的\textbf{特征向量（Eigenvector）}。几何上，$v$ 是变换 $A$ 下方向不变的“宿命轴线”，$\lambda$ 是沿该轴线的纯粹伸缩倍数（$\lambda < 0$ 表示反向翻转，$\lambda = 0$ 表示被压扁归零）。
+\end{definition}
+\end{defBox}
+
+以矩阵 $A = \begin{pmatrix} 3 & 1 \\ 0 & 2 \end{pmatrix}$ 为例，图~\ref{fig:ch3-eig-geom} 直观展示了它对平面上三支向量的作用：
+\begin{itemize}
+  \item $v_1 = (1, 0)^T \mapsto A v_1 = (3, 0)^T = 3v_1$：稳稳留在水平轴上，纯粹拉长 $3$ 倍；
+  \item $v_2 = (-1, 1)^T \mapsto A v_2 = (-2, 2)^T = 2v_2$：稳稳留在 $-45^\circ$ 对角线上，纯粹拉长 $2$ 倍；
+  \item 普通向量 $u = (0, 1)^T \mapsto A u = (1, 2)^T$：被彻底推离了竖直轴，不是特征向量。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+% Left Panel: Before transformation
+\begin{scope}[shift={(0,0)}]
+  \node[font=\sffamily\bfseries\small, text=ink] at (0.35, 2.75) {(1) 变换前：两条不变直线与普通向量};
+  \draw[step=0.65cm, codeborder!75, very thin] (-1.6,-0.55) grid (2.3, 2.05);
+  \draw[->, slate!75, thin] (-1.65, 0) -- (2.45, 0) node[right] {$x_1$};
+  \draw[->, slate!75, thin] (0, -0.60) -- (0, 2.15) node[right=2pt] {$x_2$};
+  % Span lines of eigenvectors (unit = 0.65cm)
+  \draw[tealLine, thick, dashed] (-1.55, 0) -- (2.25, 0);
+  \draw[navy!40, thick, dashed] (-1.55, 1.55) -- (0.45, -0.45);
+  \draw[ochre!45, thin, dotted] (0, -0.45) -- (0, 1.95);
+  % Vectors: v1=(1,0), v2=(-1,1), u=(0,1)
+  \draw[-{Stealth[length=2.2mm]}, teal, very thick] (0,0) -- (0.65, 0) node[below right=1pt and -4pt, text=tealDark] {$v_1=(1,0)^T$};
+  \draw[-{Stealth[length=2.2mm]}, navy, very thick] (0,0) -- (-0.65, 0.65) node[below left=-1pt, text=navy] {$v_2=(-1,1)^T$};
+  \draw[-{Stealth[length=2.2mm]}, ochre, very thick] (0,0) -- (0, 0.65) node[above right=-1pt, text=ochre] {$u=(0,1)^T$};
+  \fill[ink] (0,0) circle (1.7pt);
+\end{scope}
+
+% Transition Arrow
+\draw[-{Stealth[length=2.6mm]}, teal, very thick] (2.85, 0.85) -- (4.35, 0.85)
+  node[midway, above=2pt, text=tealDark, font=\footnotesize\bfseries] {$x \mapsto Ax$}
+  node[midway, below=2pt, text=slate, font=\scriptsize] {$A=\begin{psmallmatrix}3&1\\0&2\end{psmallmatrix}$};
+
+% Right Panel: After transformation
+\begin{scope}[shift={(6.45,0)}]
+  \node[font=\sffamily\bfseries\small, text=tealDark] at (0.35, 2.75) {(2) 变换后：$v_1,v_2$ 方向不变，$u$ 偏离原轴};
+  \draw[step=0.65cm, codeborder!75, very thin] (-1.6,-0.55) grid (2.3, 2.05);
+  \draw[->, slate!75, thin] (-1.65, 0) -- (2.45, 0) node[right] {$x_1$};
+  \draw[->, slate!75, thin] (0, -0.60) -- (0, 2.15) node[right=2pt] {$x_2$};
+  % Same invariant lines
+  \draw[tealLine, thick, dashed] (-1.55, 0) -- (2.25, 0);
+  \draw[navy!40, thick, dashed] (-1.55, 1.55) -- (0.45, -0.45);
+  \draw[ochre!45, thin, dotted] (0, -0.45) -- (0, 1.95);
+  % Ghost originals
+  \draw[-{Stealth[length=1.8mm]}, teal!40, thick] (0,0) -- (0.65, 0);
+  \draw[-{Stealth[length=1.8mm]}, navy!35, thick] (0,0) -- (-0.65, 0.65);
+  \draw[-{Stealth[length=1.8mm]}, ochre!40, thick] (0,0) -- (0, 0.65);
+  % Transformed vectors: Av1=(3,0)->(1.95,0), Av2=(-2,2)->(-1.30,1.30), Au=(1,2)->(0.65,1.30)
+  \draw[-{Stealth[length=2.3mm]}, teal, very thick] (0,0) -- (1.95, 0)
+    node[below=2pt, text=tealDark] {$Av_1 = 3v_1$};
+  \draw[-{Stealth[length=2.3mm]}, navy, very thick] (0,0) -- (-1.30, 1.30)
+    node[above=1pt, text=navy] {$Av_2 = 2v_2$};
+  \draw[-{Stealth[length=2.3mm]}, ochre, very thick] (0,0) -- (0.65, 1.30)
+    node[above right=-1pt, text=ochre] {$Au=(1,2)^T$};
+  % Curved deflection arrow from vertical axis to Au
+  \draw[-{Stealth[length=1.8mm]}, ochre, dashed] (0.04, 1.25) to[bend left=18] (0.58, 1.25);
+  \node[text=ochre, font=\scriptsize] at (1.42, 0.85) {被推离原轴！};
+  \fill[ink] (0,0) circle (1.7pt);
+\end{scope}
+\end{tikzpicture}}
+\caption{特征值与特征向量的 2D 几何画面：经 $A=\begin{psmallmatrix}3&1\\0&2\end{psmallmatrix}$ 变换后，只有落在特征直线上的 $v_1, v_2$ 保持方向不变、只做倍数伸缩，普通向量 $u$ 则被推离原直线}\label{fig:ch3-eig-geom}
+\end{figure}
+
+那么，给定任意方阵 $A$，怎么系统找出所有特征值 $\lambda$？把定义式 $Av = \lambda v$ 改写成齐次方程：
+\[
+  (A - \lambda I) v = 0 \qquad (v \neq 0).
+\]
+此刻，第 2 章第~\ref{sec:linalg-bridge}~节建立的\textbf{行列式压扁直觉}（式~\eqref{eq:singular-equiv}）立即发威：矩阵 $A - \lambda I$ 会把某个非零向量 $v$ 压扁归零（即 $\nul(A - \lambda I) \neq \{0\}$），\textbf{当且仅当它把整个空间的体积压扁为零}！于是立刻得到\textbf{特征方程}：
+\begin{equation}\label{eq:ch3-charpoly}
+  \det(A - \lambda I) = 0 \quad \Longleftrightarrow \quad p_A(\lambda) \coloneqq \det(\lambda I - A) = 0.
+\end{equation}
+拿刚才的 $A = \begin{psmallmatrix}3 & 1 \\ 0 & 2\end{psmallmatrix}$ 手算验证一遍：
+\[
+  p_A(\lambda) = \det\begin{pmatrix} \lambda - 3 & -1 \\ 0 & \lambda - 2 \end{pmatrix} = (\lambda - 3)(\lambda - 2) = 0 \implies \lambda_1 = 3,\; \lambda_2 = 2.
+\]
+代回求解零空间：$(A - 3I)v = \begin{psmallmatrix}0 & 1 \\ 0 & -1\end{psmallmatrix}v = 0 \Rightarrow v_1 = (1, 0)^T$；$(A - 2I)v = \begin{psmallmatrix}1 & 1 \\ 0 & 0\end{psmallmatrix}v = 0 \Rightarrow v_2 = (-1, 1)^T$。同时验证两条极其好用的速查恒等式：$\tr(A) = 3 + 2 = 5 = \lambda_1 + \lambda_2$，且 $\det(A) = 3 \times 2 = 6 = \lambda_1 \lambda_2$！
+
+\begin{recallBox}{特征多项式、相似不变性与重数速览}
+一般地，对 $n$ 阶矩阵 $A \in \R^{n\times n}$，特征多项式 $p_A(\lambda) = \det(\lambda I - A)$ 是关于 $\lambda$ 的 $n$ 次首一多项式，在复数域 $\C$ 上有 $n$ 个根（计重数），且恒满足 $\tr(A) = \sum_{i=1}^n \lambda_i$ 与 $\det(A) = \prod_{i=1}^n \lambda_i$。若存在可逆阵 $P$ 使 $B = P^{-1}AP$（几何上相当于换了一组坐标系看同一线性变换），则称 $A$ 与 $B$ \textbf{相似}，它们具有完全相同的特征多项式、迹、行列式与特征值。对任意特征值 $\lambda$，它在 $p_A$ 中的重根次数称为\textbf{代数重数} $m_a(\lambda)$，特征子空间维数 $m_g(\lambda) \coloneqq \dim\nul(A - \lambda I)$ 称为\textbf{几何重数}，恒有 $1 \le m_g(\lambda) \le m_a(\lambda)$。
+\end{recallBox}
+
+\subsection{特征分解、矩阵幂与离散动力稳定性}
+
+在人工智能的迭代算法中（例如第 6 章的梯度下降 $e^{(t)} = (I - \eta Q)^t e^{(0)}$，以及第 5 卷循环神经网络 RNN 的隐状态演化 $h^{(t)} = W h^{(t-1)}$），我们反复面对同一个问题：\textbf{把矩阵 $A$ 连乘 $k$ 次，向量 $A^k x^{(0)}$ 最终会趋于零、保持稳定，还是指数爆炸？}特征分解给出了最清晰的坐标解耦视角。我们先补全一条短小精悍的基础定理。
+
+\begin{thmBox}
+\begin{theorem}[互异特征值对应特征向量的线性无关性]
+\label{thm:ch3-distinct-indep}
+设 $v_1, \dots, v_m$ 分别是方阵 $A$ 对应于\textbf{互不相同}的特征值 $\lambda_1, \dots, \lambda_m$ 的特征向量，则 $v_1, \dots, v_m$ 线性无关。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对向量个数 $m$ 施数学归纳法。当 $m=1$ 时，特征向量非零，自然线性无关。假设对任意 $m-1$ 个互异特征值的特征向量结论成立，现设存在标量 $c_1, \dots, c_m$ 使得
+\begin{equation}
+  c_1 v_1 + c_2 v_2 + \dots + c_m v_m = 0. \label{eq:ch3-lincomb}
+\end{equation}
+将 \eqref{eq:ch3-lincomb} 两边左乘 $A$，利用 $Av_i = \lambda_i v_i$ 得
+\[
+  c_1 \lambda_1 v_1 + c_2 \lambda_2 v_2 + \dots + c_m \lambda_m v_m = 0.
+\]
+再将 \eqref{eq:ch3-lincomb} 两边乘以 $\lambda_m$ 后与上式相减，消去最后一项：
+\[
+  c_1(\lambda_1 - \lambda_m) v_1 + c_2(\lambda_2 - \lambda_m) v_2 + \dots + c_{m-1}(\lambda_{m-1} - \lambda_m) v_{m-1} = 0.
+\]
+由归纳假设，$v_1, \dots, v_{m-1}$ 线性无关，故对每个 $i \le m-1$ 均有 $c_i(\lambda_i - \lambda_m) = 0$。因特征值互异（$\lambda_i \neq \lambda_m$），必有 $c_1 = \dots = c_{m-1} = 0$。代回 \eqref{eq:ch3-lincomb} 得 $c_m v_m = 0$，又 $v_m \neq 0$，从而 $c_m = 0$。
+\end{proof}
+
+由此立即得到可对角化判据与矩阵幂的显式公式。
+
+\begin{proposition}[可对角化充要条件与解耦矩阵幂]
+\label{prop:ch3-diag}
+$n$ 阶矩阵 $A$ 可相似对角化为 $A = P \Lambda P^{-1}$（其中 $\Lambda = \diag(\lambda_1,\dots,\lambda_n)$，$P = [v_1,\dots,v_n]$ 可逆），当且仅当 $A$ 存在 $n$ 个线性无关的特征向量（等价于在 $\C$ 上每个特征值都满足 $m_g(\lambda) = m_a(\lambda)$）。特别地，若 $A$ 有 $n$ 个互异特征值，则 $A$ 必可对角化。此时对任意正整数 $k$，
+\begin{equation}
+  A^k = (P\Lambda P^{-1})^k = P \Lambda^k P^{-1}, \qquad A^k x^{(0)} = \sum_{i=1}^n c_i \lambda_i^k v_i, \label{eq:ch3-matpower}
+\end{equation}
+其中坐标向量 $c = P^{-1} x^{(0)}$。
+\end{proposition}
+
+式 \eqref{eq:ch3-matpower} 把耦合的 $n$ 维矩阵连乘彻底拆解成了 $n$ 条互不干扰的标量等比数列 $c_i \lambda_i^k$。定义 $A$ 的\textbf{谱半径}（spectral radius）为 $\rho(A) := \max_i |\lambda_i|$。对于可对角化矩阵，只需一眼看 $\rho(A)$：若 $\rho(A) < 1$，每个分量 $\lambda_i^k \to 0$，系统全局指数衰减；若 $\rho(A) > 1$，沿主特征方向的分量将指数爆炸。
+
+\subsection{不可对角化时发生了什么：Jordan 链与剪切瞬态增长}
+
+然而，并非所有方阵都可对角化——当某个重特征值的几何重数严格小于代数重数（$m_g(\lambda) < m_a(\lambda)$）时，特征向量不够凑满一组基。最简单的例子就是 $2\times 2$ 的\textbf{Jordan 块}：
+\[
+  J_2(\lambda) = \begin{pmatrix} \lambda & 1 \\ 0 & \lambda \end{pmatrix}.
+\]
+显然它唯一的特征值是 $\lambda$（$m_a(\lambda)=2$），但解 $(J_2(\lambda)-\lambda I)v = \begin{psmallmatrix}0&1\\0&0\end{psmallmatrix}v = 0$ 仅得一维特征子空间 $\nul(J_2(\lambda)-\lambda I) = \spanop\{e_1\}$（$m_g(\lambda)=1$）。
+
+缺失的第二个基向量去哪儿了？观察 $e_2 = (0,1)^T$ 在 $N := J_2(\lambda) - \lambda I = \begin{psmallmatrix}0&1\\0&0\end{psmallmatrix}$ 下的作用：
+\[
+  e_2 \xrightarrow{\;J_2(\lambda)-\lambda I\;} e_1 \xrightarrow{\;J_2(\lambda)-\lambda I\;} 0,
+\]
+从而我们得到一条严格递增的零空间链（即 \textbf{Jordan 链}）：
+\[
+  \nul\bigl(J_2(\lambda)-\lambda I\bigr) = \spanop\{e_1\} \;\subsetneq\; \nul\bigl((J_2(\lambda)-\lambda I)^2\bigr) = \R^2.
+\]
+从几何上看，$J_2(\lambda) = \lambda I + N$ 在把空间按 $\lambda$ 缩放的同时，还沿 $e_1$ 方向附加了一个\textbf{剪切}（shear）操作 $N$。由于 $\lambda I$ 与幂零矩阵 $N$（满足 $N^2 = 0$）可交换，直接套用二项式定理即可算出它的精确 $k$ 次幂：
+\begin{equation}
+  J_2(\lambda)^k = (\lambda I + N)^k = \lambda^k I + k \lambda^{k-1} N = \begin{pmatrix} \lambda^k & k \lambda^{k-1} \\ 0 & \lambda^k \end{pmatrix}. \label{eq:ch3-jordan-power}
+\end{equation}
+一般地，对任意 $m$ 阶 Jordan 块 $J_m(\lambda) = \lambda I + N$（次对角线全为 $1$，满足 $N^m = 0$），同样有 $J_m(\lambda)^k = \sum_{j=0}^{m-1} \binom{k}{j}\lambda^{k-j} N^j$。
+
+\begin{example}[$|\lambda|<1$ 时的瞬态暴涨实测]
+\label{ex:ch3-jordan-transient}
+取 $\lambda = 0.9 < 1$，考察 $J_2(0.9) = \begin{psmallmatrix}0.9 & 1 \\ 0 & 0.9\end{psmallmatrix}$。虽然谱半径 $\rho(J_2(0.9)) = 0.9 < 1$ 保证了 $k \to \infty$ 时 $J_2(0.9)^k \to 0$，但右上角的剪切项 $k \cdot 0.9^{k-1}$ 包含一个线性增长因子 $k$！在衰减真正占据上风之前，它会先经历剧烈的\textbf{瞬态增长}（transient growth）：由实测数据（\texttt{data/jordan\_transient.csv}），右上角元素 $k\cdot 0.9^{k-1}$ 在 $k=9$ 与 $k=10$ 处达到并列峰值 $9\times 0.9^8 = 10\times 0.9^9 \approx 3.8742$，矩阵 Frobenius 范数 $\|J_2(0.9)^k\|_F$ 在 $k=9$ 处冲高至 $3.9128$（初始值的 $2.77$ 倍），直到 $k=30$ 之后才回落到初始范数以下（图 \ref{fig:ch3-jordan-transient}）。
+\end{example}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.82\linewidth,
+      height=5.6cm,
+      xlabel={迭代步数 $k$},
+      ylabel={范数 / 元素幅值},
+      xmin=0, xmax=60,
+      ymin=0, ymax=4.7,
+      grid=major,
+      grid style={dashed, gray!25},
+      legend pos=north east,
+      legend style={font=\footnotesize, fill=white, draw=codeborder, rounded corners=1pt},
+      tick label style={font=\footnotesize},
+      label style={font=\small\sffamily}
+    ]
+      \addplot[color=teal, very thick] table[x=k, y=fro_norm, col sep=comma] {data/jordan_transient.csv};
+      \addlegendentry{$\|J_2(0.9)^k\|_F$（总范数）}
+      \addplot[color=ochre, thick, dashed] table[x=k, y=upper_right, col sep=comma] {data/jordan_transient.csv};
+      \addlegendentry{剪切项 $k\cdot 0.9^{k-1}$}
+      \addplot[color=navy, thick, dotted] table[x=k, y=diag, col sep=comma] {data/jordan_transient.csv};
+      \addlegendentry{对角衰减项 $0.9^k$}
+
+      % Peak marker
+      \addplot[only marks, mark=*, mark size=2.2pt, color=ochre] coordinates {(9, 3.912755) (10, 3.874205)};
+      \node[anchor=west, font=\footnotesize\sffamily, color=ochre, align=left, fill=white, fill opacity=0.85, text opacity=1, inner sep=1.5pt] at (axis cs:14, 4.05)
+        {瞬态峰值：$\|J_2^9\|_F \approx 3.913$\\右上角 $k=9,10$ 达 $3.874$};
+      \draw[-{Stealth[length=2mm]}, color=ochre, thin] (axis cs:13.7, 4.05) -- (axis cs:9.6, 3.92);
+    \end{axis}
+  \end{tikzpicture}
+  \caption{不可对角化矩阵 $J_2(0.9)$ 幂次的瞬态增长曲线（由 \texttt{code/vol1\_experiments.py} 实测生成）。尽管 $|\lambda|=0.9<1$ 保证了最终收敛到 $0$，非正交的剪切结构仍使范数在前期翻倍暴涨；在深度循环网络中，这种非正规（non-normal）瞬态放大正是梯度不稳定的重要根源。}
+  \label{fig:ch3-jordan-transient}
+\end{figure}
+
+\begin{failBox}{为什么现代数值计算与 AI 几乎从不求一般 Jordan 标准形？}
+Jordan 标准形在纯代数上是优美的存在性定理，但在浮点数世界里却是\textbf{极度病态}的。考虑微扰后的 $2\times 2$ Jordan 块：
+\[
+  J_2(0) = \begin{pmatrix} 0 & 1 \\ 0 & 0 \end{pmatrix}
+  \quad\xrightarrow{\;\text{左下角加 } \varepsilon = 10^{-16}\;}\quad
+  A_\varepsilon = \begin{pmatrix} 0 & 1 \\ \varepsilon & 0 \end{pmatrix}.
+\]
+原矩阵不可对角化，特征值为二重根 $0$；仅加上一个机器精度级别的舍入误差 $\varepsilon = 10^{-16}$，特征方程立刻变成 $\lambda^2 - \varepsilon = 0$，特征值跳变为 $\pm\sqrt{\varepsilon} = \pm 10^{-8}$（误差被放大了整整 $10^8$ 倍！），矩阵也瞬间变成了可对角化矩阵。也就是说，\textbf{Jordan 标准形对扰动是不连续的}。因此，现代人工智能和数值线性代数不会去计算脆弱的一般 Jordan 分解，而是坚定转向两把\textbf{数值极其稳定、基于正交变换的武器}：本章的\textbf{实对称阵谱定理}与第 4 章的\textbf{奇异值分解（SVD）}。
+\end{failBox}
+
+% =========================================================================
+\section{实对称矩阵谱定理的完整严格证明}
+\label{sec:ch3-spectral}
+
+实对称矩阵（$S^T = S$）是线性代数中最“完美”的矩阵家族：它们\textbf{永远不会出现复特征值，永远不会出现 Jordan 块（必可对角化），而且特征向量永远可以选得两两正交}。在进入一般 $n$ 维证明之前，我们先亲手解剖一个 $2\times 2$ 实例，建立清晰的几何画面。
+
+\begin{example}[$2\times 2$ 实对称阵手算解剖与外积和]
+\label{ex:ch3-sym2x2}
+考察实对称矩阵
+\[
+  S = \begin{pmatrix} 5 & 3 \\ 3 & 5 \end{pmatrix}.
+\]
+\begin{enumerate}
+  \item \textbf{求特征值}：特征多项式 $\det(\lambda I - S) = (\lambda - 5)^2 - 9 = (\lambda - 8)(\lambda - 2) = 0$，得两个实特征值 $\lambda_1 = 8,\; \lambda_2 = 2$。
+  \item \textbf{求单位特征向量}：
+    \begin{itemize}
+      \item 对 $\lambda_1 = 8$，解 $(S - 8I)v = \begin{psmallmatrix}-3 & 3 \\ 3 & -3\end{psmallmatrix}v = 0$，单位化得 $q_1 = \frac{1}{\sqrt{2}}\begin{pmatrix}1\\1\end{pmatrix}$。
+      \item 对 $\lambda_2 = 2$，解 $(S - 2I)v = \begin{psmallmatrix}3 & 3 \\ 3 & 3\end{psmallmatrix}v = 0$，单位化得 $q_2 = \frac{1}{\sqrt{2}}\begin{pmatrix}-1\\1\end{pmatrix}$。
+    \end{itemize}
+  \item \textbf{验证正交性与秩 1 外积和}：立刻验证 $q_1^T q_2 = \frac{1}{2}(-1+1) = 0$！拼成正交矩阵 $Q = [q_1, q_2]$，它满足 $Q^{-1} = Q^T$（无需矩阵求逆）。套用第 1 章矩阵乘法的第 4 视角（列乘行外积和），有
+  \[
+    S = Q \Lambda Q^T
+      = 8\, q_1 q_1^T + 2\, q_2 q_2^T
+      = 8 \begin{pmatrix} 1/2 & 1/2 \\ 1/2 & 1/2 \end{pmatrix}
+      + 2 \begin{pmatrix} 1/2 & -1/2 \\ -1/2 & 1/2 \end{pmatrix}
+      = \begin{pmatrix} 5 & 3 \\ 3 & 5 \end{pmatrix}.
+  \]
+\end{enumerate}
+\textbf{几何直觉}：对任意向量 $x\in\R^2$，计算 $Sx = Q(\Lambda(Q^T x))$ 分三步完成——先正交旋转到主轴坐标系 ($Q^T x$)，再沿互相垂直的 $q_1, q_2$ 轴分别纯粹拉伸 $8$ 倍和 $2$ 倍 ($\Lambda$)，最后旋转回原坐标系 ($Q$)，\textbf{完全没有剪切}！
+\end{example}
+
+现在，借助第 2 章已经证明的正交补定理 $\R^n = U \oplus U^\perp$ 与 Gram--Schmidt 正交化，我们用三条极其干净的引理加上归纳法，\textbf{零跳步地}证明一般 $n$ 维实对称矩阵的谱定理。
+
+\begin{lemma}[实对称阵的特征值全为实数，且存在实特征向量]
+\label{lem:ch3-real-eig}
+设 $S \in \R^{n\times n}$ 满足 $S^T = S$。若存在复标量 $\lambda \in \C$ 与非零复向量 $v \in \C^n$ 使得 $Sv = \lambda v$，则必有 $\lambda \in \R$，且存在非零实向量 $x \in \R^n$ 满足 $Sx = \lambda x$。
+\end{lemma}
+
+\begin{proof}
+记 $v^* := \bar{v}^T$ 为 $v$ 的共轭转置。在 $Sv = \lambda v$ 两边左乘 $v^*$ 得
+\[
+  v^* S v = \lambda (v^* v) = \lambda \sum_{j=1}^n |v_j|^2.
+\]
+由于 $v^* S v$ 是一个 $1\times 1$ 标量，取其复共轭等价于取共轭转置。利用 $S$ 为实对称矩阵（故 $S^* = \bar{S}^T = S^T = S$），有
+\[
+  \overline{v^* S v} = (v^* S v)^* = v^* S^* (v^*)^* = v^* S v.
+\]
+一个复数等于自身的共轭，说明 $v^* S v \in \R$。又 $v \neq 0$ 保证了 $\sum_{j=1}^n |v_j|^2 > 0$，故 $\lambda = (v^*Sv)/\sum_j |v_j|^2 \in \R$。一旦 $\lambda \in \R$，矩阵 $S - \lambda I$ 便是奇异的\textbf{实矩阵}，齐次线性方程组 $(S - \lambda I)x = 0$ 必有非零实解 $x \in \R^n$（也可直接取 $v$ 的实部或虚部中的非零者）。
+\end{proof}
+
+\begin{lemma}[互异特征值对应的特征向量正交]
+\label{lem:ch3-ortho-eig}
+设 $S \in \R^{n\times n}$ 为实对称矩阵，$Sv_1 = \lambda_1 v_1$，$Sv_2 = \lambda_2 v_2$，且 $\lambda_1 \neq \lambda_2$，则 $v_1^T v_2 = 0$。
+\end{lemma}
+
+\begin{proof}
+利用对称性 $S^T = S$，从左右两个方向计算标量 $v_1^T S v_2$：
+\[
+  \lambda_1 (v_1^T v_2) = (\lambda_1 v_1)^T v_2 = (Sv_1)^T v_2 = v_1^T S^T v_2 = v_1^T S v_2 = v_1^T (\lambda_2 v_2) = \lambda_2 (v_1^T v_2).
+\]
+移项得 $(\lambda_1 - \lambda_2)(v_1^T v_2) = 0$。因 $\lambda_1 \neq \lambda_2$，故 $v_1^T v_2 = 0$。
+\end{proof}
+
+\begin{lemma}[不变子空间的正交补仍是不变子空间]
+\label{lem:ch3-perp-inv}
+设 $S \in \R^{n\times n}$ 为实对称矩阵，$U \subseteq \R^n$ 是 $S$-不变子空间（即 $\forall u \in U,\; Su \in U$）。则其正交补 $U^\perp$ 也是 $S$-不变子空间（即 $\forall y \in U^\perp,\; Sy \in U^\perp$）。
+\end{lemma}
+
+\begin{proof}
+任取 $y \in U^\perp$ 与 $u \in U$。由 $S^T = S$ 与 $Su \in U$，有
+\[
+  \inner{Sy}{u} = (Sy)^T u = y^T S^T u = y^T (Su) = \inner{y}{Su} = 0.
+\]
+由于这对一切 $u \in U$ 均成立，按正交补定义即得 $Sy \in U^\perp$。
+\end{proof}
+
+引理 \ref{lem:ch3-perp-inv} 正是第 2 章正交补理论的绝妙回报：它让我们可以在不假设特征值互异（允许任意重根！）的情况下，一步剥离出一个一维特征子空间，并对余下的 $(n-1)$ 维正交补空间实施归纳。
+
+\begin{thmBox}
+\begin{theorem}[实对称矩阵谱定理, Real Symmetric Spectral Theorem]
+\label{thm:ch3-spectral}
+对任意 $n$ 阶实对称矩阵 $S \in \R^{n\times n}$（$S^T = S$），存在正交矩阵 $Q = [q_1,\dots,q_n] \in \R^{n\times n}$（满足 $Q^T Q = Q Q^T = I_n$）以及实对角矩阵 $\Lambda = \diag(\lambda_1,\dots,\lambda_n)$，使得
+\begin{equation}
+  S = Q \Lambda Q^T = \sum_{i=1}^n \lambda_i q_i q_i^T. \label{eq:ch3-spectral}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对矩阵阶数 $n$ 施数学归纳法。
+
+\textbf{基础步（$n=1$）}：$S = [s_{11}]$，取 $Q = [1]$、$\Lambda = [s_{11}]$，显然成立。
+
+\textbf{归纳步}：假设对任意 $(n-1)$ 阶实对称矩阵定理成立，现考虑 $n$ 阶实对称阵 $S$。
+\begin{enumerate}
+  \item 由代数基本定理，特征方程 $\det(\lambda I - S) = 0$ 在 $\C$ 上至少有一个根 $\lambda_1$；再由引理 \ref{lem:ch3-real-eig}，$\lambda_1 \in \R$ 且存在单位实特征向量 $q_1 \in \R^n$（$\|q_1\|_2 = 1$）满足 $Sq_1 = \lambda_1 q_1$。
+  \item 记一维子空间 $U := \spanop\{q_1\}$，显然 $SU \subseteq U$。由第 2 章的正交补分解定理，$\R^n = U \oplus U^\perp$ 且 $\dim(U^\perp) = n-1$。利用 Gram--Schmidt 正交化在 $U^\perp$ 中取一组标准正交基，按列拼成矩阵 $Q_2 \in \R^{n\times(n-1)}$（满足 $Q_2^T Q_2 = I_{n-1}$ 且 $q_1^T Q_2 = 0^T$）。于是 $W := [q_1,\; Q_2] \in \R^{n\times n}$ 是正交矩阵。
+  \item 计算正交相似变换 $W^T S W$：
+  \[
+    W^T S W
+    = \begin{pmatrix} q_1^T \\ Q_2^T \end{pmatrix} S \begin{pmatrix} q_1 & Q_2 \end{pmatrix}
+    = \begin{pmatrix} q_1^T S q_1 & q_1^T S Q_2 \\ Q_2^T S q_1 & Q_2^T S Q_2 \end{pmatrix}.
+  \]
+  其中 $q_1^T S q_1 = \lambda_1 q_1^T q_1 = \lambda_1$，$Q_2^T S q_1 = \lambda_1 Q_2^T q_1 = 0$；而由引理 \ref{lem:ch3-perp-inv}（或直接取转置 $q_1^T S Q_2 = (Q_2^T S q_1)^T = 0^T$），右上块同样为零向量！记 $S_2 := Q_2^T S Q_2 \in \R^{(n-1)\times(n-1)}$，则
+  \[
+    W^T S W = \begin{pmatrix} \lambda_1 & 0^T \\ 0 & S_2 \end{pmatrix}.
+  \]
+  \item 验证对称性：$S_2^T = (Q_2^T S Q_2)^T = Q_2^T S^T Q_2 = Q_2^T S Q_2 = S_2$，故 $S_2$ 是 $(n-1)$ 阶实对称矩阵。由归纳假设，存在 $(n-1)$ 阶正交矩阵 $\widetilde{Q}_2$ 与实对角阵 $\Lambda_2 = \diag(\lambda_2,\dots,\lambda_n)$ 使得 $\widetilde{Q}_2^T S_2 \widetilde{Q}_2 = \Lambda_2$。
+  \item 令分块正交阵 $Q := W \begin{psmallmatrix} 1 & 0^T \\ 0 & \widetilde{Q}_2 \end{psmallmatrix} = [q_1,\; Q_2 \widetilde{Q}_2]$。显然 $Q^T Q = I_n$，且
+  \[
+    Q^T S Q
+    = \begin{pmatrix} 1 & 0^T \\ 0 & \widetilde{Q}_2^T \end{pmatrix}
+      \begin{pmatrix} \lambda_1 & 0^T \\ 0 & S_2 \end{pmatrix}
+      \begin{pmatrix} 1 & 0^T \\ 0 & \widetilde{Q}_2 \end{pmatrix}
+    = \begin{pmatrix} \lambda_1 & 0^T \\ 0 & \Lambda_2 \end{pmatrix} = \Lambda.
+  \]
+  左乘 $Q$、右乘 $Q^T$ 即得 $S = Q\Lambda Q^T = \sum_{i=1}^n \lambda_i q_i q_i^T$。
+\end{enumerate}
+\end{proof}
+
+有了谱定理，下面这条在 PCA、优化与图算法中频繁亮相的 \textbf{Rayleigh 商界}只需 4 行便水到渠成。
+
+\begin{thmBox}
+\begin{corollary}[Rayleigh 商的上下界与极值点]
+\label{cor:ch3-rayleigh}
+设实对称矩阵 $S \in \R^{n\times n}$ 的特征值按降序排列为 $\lambda_{\max} = \lambda_1 \ge \lambda_2 \ge \dots \ge \lambda_n = \lambda_{\min}$，对应单位正交特征向量为 $q_1, \dots, q_n$。则对任意非零向量 $x \in \R^n$，\textbf{Rayleigh 商} $R_S(x) := \dfrac{x^T S x}{x^T x}$ 恒满足
+\begin{equation}
+  \lambda_{\min} \;\le\; \frac{x^T S x}{x^T x} \;\le\; \lambda_{\max}, \label{eq:ch3-rayleigh}
+\end{equation}
+且最大值在 $x = q_1$ 处取到，最小值在 $x = q_n$ 处取到。
+\end{corollary}
+\end{thmBox}
+
+\begin{proof}
+由谱定理 $S = Q\Lambda Q^T$，令正交坐标变换 $y := Q^T x \in \R^n$。因 $Q$ 正交，有 $y^T y = x^T Q Q^T x = x^T x > 0$ 且 $x^T S x = y^T \Lambda y = \sum_{i=1}^n \lambda_i y_i^2$。因此
+\[
+  \lambda_{\min} = \frac{\sum_{i=1}^n \lambda_{\min} y_i^2}{\sum_{i=1}^n y_i^2}
+  \;\le\; \frac{\sum_{i=1}^n \lambda_i y_i^2}{\sum_{i=1}^n y_i^2}
+  = \frac{x^T S x}{x^T x}
+  \;\le\; \frac{\sum_{i=1}^n \lambda_{\max} y_i^2}{\sum_{i=1}^n y_i^2} = \lambda_{\max}.
+\]
+代入 $x = q_1$ 得 $q_1^T S q_1 / q_1^T q_1 = \lambda_1 = \lambda_{\max}$，代入 $x = q_n$ 得 $\lambda_{\min}$。
+\end{proof}
+
+\begin{insightBox}{谱定理在全书下游的四大核心落点}
+\begin{itemize}
+  \item \textbf{本卷第 4 章（SVD 与 PCA）}：对一般长方形矩阵 $A$，对称阵 $A^T A$ 的谱分解直接构造出 SVD；而样本协方差阵 $\Sigma_{\mathrm{cov}}$ 的 Rayleigh 商最大值恰好给出第一主成分方向！
+  \item \textbf{本卷第 6 章（梯度下降收敛率）}：二次目标 $f(w) = \frac{1}{2}w^T Q w$ 的梯度下降误差满足 $e^{(t)} = (I - \eta Q)^t e^{(0)}$，正交变换 $Q = U\Lambda U^T$ 将其解耦为 $n$ 条独立标量迭代，直接导出步长红线 $0 < \eta < 2/\lambda_{\max}$。
+  \item \textbf{第 2 卷（多元高斯分布）}：协方差阵 $\Sigma = Q\Lambda Q^T$ 决定了高斯概率等高椭球的主轴方向与半轴长。
+  \item \textbf{第 4 卷（凸优化）}：目标函数 Hessian 的最大特征值 $\lambda_{\max}$ 对应 $L$-光滑常数，最小特征值 $\lambda_{\min}$ 对应 $\mu$-强凸常数。
+\end{itemize}
+\end{insightBox}
+
+% =========================================================================
+\section{二次型、半正定矩阵（PSD）的三大 AI 化身与条件数 $\kappa$}
+\label{sec:ch3-psd-cond}
+
+\subsection{二次型对称化与半正定判据（零循环推论）}
+
+在机器学习的损失函数与泰勒展开中，我们随处可见形如 $q(x) = x^T A x$ 的\textbf{二次型}（quadratic form）。在讨论它的正负性之前，必须牢记第一条铁律：\textbf{必须先把矩阵对称化}。
+
+由于 $x^T A x$ 是一个标量，它等于自身的转置 $(x^T A x)^T = x^T A^T x$，从而对任意方阵 $A \in \R^{n\times n}$ 恒有
+\[
+  x^T A x = x^T \!\left(\frac{A + A^T}{2}\right) x.
+\]
+记 $S := \frac{1}{2}(A + A^T)$，它是唯一的对称阵，决定着二次型在所有方向上的取值。直接看非对称阵 $A$ 的特征值来判断 $x^T A x$ 的正负，会导致致命误判！
+
+\begin{failBox}{非对称矩阵的“全正特征值”陷阱}
+考虑非对称上三角矩阵 $A = \begin{pmatrix} 1 & 4 \\ 0 & 1 \end{pmatrix}$。它的特征值显然是 $\lambda_1 = \lambda_2 = 1 > 0$，全部严格为正。但取向量 $x = (1, -1)^T$ 代入二次型：
+\[
+  x^T A x = \begin{pmatrix} 1 & -1 \end{pmatrix} \begin{pmatrix} 1 & 4 \\ 0 & 1 \end{pmatrix} \begin{pmatrix} 1 \\ -1 \end{pmatrix} = 1 - 4 + 1 = -2 < 0!
+\]
+原因一目了然：对称化后的真实核心矩阵是 $S = \frac{1}{2}(A + A^T) = \begin{pmatrix} 1 & 2 \\ 2 & 1 \end{pmatrix}$，它的特征值是 $3$ 和 $-1$（存在负特征值，实际是马鞍面而非碗状）！因此，\textbf{定义正定性与半正定性时，前提永远是实对称矩阵}。
+\end{failBox}
+
+\begin{defBox}
+\begin{definition}[正定、半正定与不定矩阵]
+\label{def:ch3-psd}
+设 $Q \in \R^{n\times n}$ 为\textbf{实对称矩阵}（$Q^T = Q$）：
+\begin{itemize}
+  \item 若对任意非零向量 $x \in \R^n$ 均有 $x^T Q x > 0$，则称 $Q$ 为\textbf{正定矩阵}（Positive Definite, PD），记作 $Q \succ 0$；
+  \item 若对任意向量 $x \in \R^n$ 均有 $x^T Q x \ge 0$，则称 $Q$ 为\textbf{半正定矩阵}（Positive Semi-Definite, PSD），记作 $Q \succeq 0$；
+  \item 若存在 $x, y \in \R^n$ 使得 $x^T Q x > 0$ 且 $y^T Q y < 0$，则称 $Q$ 为\textbf{不定矩阵}（Indefinite）。
+\end{itemize}
+\end{definition}
+\end{defBox}
+
+现在，因为我们在第 \ref{sec:ch3-spectral} 节已经严格证完谱定理与 Rayleigh 商界，正定与半正定的特征值充要条件成为一个\textbf{3 行即毕、绝无逻辑循环}的推论！
+
+\begin{thmBox}
+\begin{theorem}[正定与半正定矩阵的特征值充要判据]
+\label{thm:ch3-psd-eig}
+设 $Q \in \R^{n\times n}$ 为实对称矩阵，其特征值为 $\lambda_1, \dots, \lambda_n \in \R$。则：
+\begin{enumerate}
+  \item $Q \succ 0 \iff \forall i \in \{1,\dots,n\},\; \lambda_i > 0$（等价于 $\lambda_{\min}(Q) > 0$）；
+  \item $Q \succeq 0 \iff \forall i \in \{1,\dots,n\},\; \lambda_i \ge 0$（等价于 $\lambda_{\min}(Q) \ge 0$）。
+\end{enumerate}
+特别地，正定矩阵必可逆（因 $\det(Q) = \prod_i \lambda_i > 0$），且其逆矩阵 $Q^{-1} = U\Lambda^{-1}U^T$ 仍为正定矩阵。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由推论 \ref{cor:ch3-rayleigh}，二次型在单位球面 $\|x\|_2 = 1$ 上的最小值恰好等于 $\lambda_{\min}(Q)$。因此：
+\begin{itemize}
+  \item 若 $\lambda_{\min}(Q) > 0$，则对一切 $x \neq 0$ 有 $x^T Q x \ge \lambda_{\min}(Q)\|x\|_2^2 > 0$，故 $Q \succ 0$；反之若 $Q \succ 0$，取最小特征值对应的单位特征向量 $u_n$ 即得 $\lambda_{\min}(Q) = u_n^T Q u_n > 0$。
+  \item 将严格不等号 $>$ 替换为 $\ge$，完全同理得 $Q \succeq 0 \iff \lambda_{\min}(Q) \ge 0$。
+\end{itemize}
+\end{proof}
+
+从几何上看，二维二次型 $f(x_1, x_2) = x^T Q x$ 的等高线清晰地揭示了三种曲面的本质差异（图 \ref{fig:ch3-quad-contours}）：正定阵对应封闭同心椭圆构成的\textbf{严格凸碗}（有唯一全局极小点）；半正定退化阵对应平行直线构成的\textbf{平底山谷}（沿零特征方向存在无穷多个极小点）；不定阵对应双曲线构成的\textbf{马鞍面}（沿一轴上升、沿另一轴下降，原点既非极大也非极小）。
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.97\linewidth}{!}{%
+  \begin{tikzpicture}[>=Stealth]
+    % Panel (a): Positive Definite Bowl x1^2 + 4 x2^2
+    \begin{scope}[shift={(0,0)}]
+      \draw[->, slate, thin] (-2.2,0) -- (2.2,0) node[right, font=\footnotesize] {$x_1$};
+      \draw[->, slate, thin] (0,-1.8) -- (0,1.8) node[above, font=\footnotesize] {$x_2$};
+      \foreach \r/\op in {0.55/0.35, 1.05/0.55, 1.55/0.75, 1.95/0.95} {
+        \draw[teal, thick, opacity=\op] (0,0) ellipse ({\r} and {\r/2});
+      }
+      \fill[ochre] (0,0) circle (2.2pt);
+      \node[below right, font=\scriptsize\sffamily, color=ochre, fill=white, fill opacity=0.88, text opacity=1, inner sep=1pt] at (0.08,-0.06) {唯一极小点};
+      \node[below, font=\small\sffamily\bfseries, color=tealDark] at (0,-2.05) {(a) 正定碗：$x_1^2 + 4x_2^2$};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.5) {$\lambda_1=1>0,\;\lambda_2=4>0$};
+    \end{scope}
+
+    % Panel (b): Positive Semi-Definite Valley x1^2
+    \begin{scope}[shift={(5.8,0)}]
+      \draw[->, slate, thin] (-2.2,0) -- (2.2,0) node[right, font=\footnotesize] {$x_1$};
+      \draw[->, slate, thin] (0,-1.8) -- (0,1.8) node[above, font=\footnotesize] {$x_2$};
+      \foreach \x/\op in {0.45/0.4, 0.9/0.6, 1.35/0.8, 1.8/0.95} {
+        \draw[navy, thick, opacity=\op] (\x,-1.5) -- (\x,1.5);
+        \draw[navy, thick, opacity=\op] (-\x,-1.5) -- (-\x,1.5);
+      }
+      \draw[ochre, very thick] (0,-1.55) -- (0,1.55);
+      \node[right, font=\scriptsize\sffamily, color=ochre, fill=white, inner sep=1pt] at (0.12, 1.15) {平底谷线 $f=0$};
+      \node[below, font=\small\sffamily\bfseries, color=navy] at (0,-2.05) {(b) 半正定山谷：$x_1^2$};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.5) {$\lambda_1=1>0,\;\lambda_2=0$};
+    \end{scope}
+
+    % Panel (c): Indefinite Saddle x1^2 - x2^2
+    \begin{scope}[shift={(11.6,0)}]
+      \draw[->, slate, thin] (-2.2,0) -- (2.2,0) node[right, font=\footnotesize] {$x_1$};
+      \draw[->, slate, thin] (0,-1.8) -- (0,1.8) node[above, font=\footnotesize] {$x_2$};
+      % Asymptotes
+      \draw[slate, dashed, thin] (-1.5,-1.5) -- (1.5,1.5);
+      \draw[slate, dashed, thin] (-1.5,1.5) -- (1.5,-1.5);
+      % Hyperbolas x1^2 - x2^2 = c > 0 (teal, ascent)
+      \foreach \c in {0.4, 1.0} {
+        \draw[teal, thick, domain=-1.15:1.15, samples=40] plot ({sqrt(\c + \x*\x)}, {\x});
+        \draw[teal, thick, domain=-1.15:1.15, samples=40] plot ({-sqrt(\c + \x*\x)}, {\x});
+      }
+      % Hyperbolas x2^2 - x1^2 = c > 0 (ochre, descent)
+      \foreach \c in {0.4, 1.0} {
+        \draw[ochre, thick, domain=-1.15:1.15, samples=40] plot ({\x}, {sqrt(\c + \x*\x)});
+        \draw[ochre, thick, domain=-1.15:1.15, samples=40] plot ({\x}, {-sqrt(\c + \x*\x)});
+      }
+      \fill[ink] (0,0) circle (2.2pt);
+      \node[font=\scriptsize\sffamily, color=teal] at (1.72, 0.32) {$f>0$};
+      \node[font=\scriptsize\sffamily, color=ochre] at (0.48, 1.52) {$f<0$};
+      \node[below, font=\small\sffamily\bfseries, color=ochre] at (0,-2.05) {(c) 不定马鞍：$x_1^2 - x_2^2$};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.5) {$\lambda_1=1>0,\;\lambda_2=-1<0$};
+    \end{scope}
+  \end{tikzpicture}}
+  \caption{二维二次型等高线的三种典型几何形态。正定性保证唯一全局极小点，半正定性允许沿零特征子空间的平底谷，而不定性产生高维优化中常见的马鞍面。}
+  \label{fig:ch3-quad-contours}
+\end{figure}
+
+\subsection{半正定矩阵（PSD）在人工智能中的三大化身}
+
+为什么人工智能论文和教科书里动不动就出现“$M \succeq 0$”？因为 AI 中最核心的三类矩阵天然都具有 $B^T B$ 的平方结构，而\textbf{任意实矩阵的格拉姆型乘积 $B^T B$ 必半正定}：对一切 $v$，$v^T (B^T B) v = \|Bv\|_2^2 \ge 0$！表 \ref{tab:ch3-psd-three} 汇总了这三大化身：
+
+\begin{table}[htbp]
+  \centering
+  \caption{半正定矩阵（PSD）在人工智能中的三大核心化身与下游坐标}
+  \label{tab:ch3-psd-three}
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{26mm}p{35mm}p{35mm}X@{}}
+    \toprule
+    \textbf{AI 化身} & \textbf{构造表达式} & \textbf{半正定性验证} & \textbf{几何/统计意义与下游卷次} \\
+    \midrule
+    \textbf{1. 样本协方差阵} & $\Sigma = \dfrac{1}{n}\widetilde{X}^T\widetilde{X} \in \R^{d\times d}$ & $v^T \Sigma v = \dfrac{1}{n}\|\widetilde{X}v\|_2^2 \ge 0$ & 投影到方向 $v$ 上的样本方差非负；高维小样本（$n<d$）时必退化（$\Sigma \succeq 0$ 但非正定）。\textbf{（第 4 章 PCA、第 2 卷统计）} \\[3pt]
+    \textbf{2. 核 / Gram 矩阵} & $K_{ij} = \inner{\phi(x_i)}{\phi(x_j)}$，即 $K = \Phi^T \Phi \in \R^{n\times n}$ & $c^T K c = \norm{\sum_{i=1}^n c_i \phi(x_i)}_2^2 \ge 0$ & 刻画样本在高维特征空间的相似度几何；合法核函数必须对任意样本集生成 PSD 矩阵（Mercer 定理）。\textbf{（第 4 卷 SVM 与核方法）} \\[3pt]
+    \textbf{3. Hessian 矩阵} & $H(w) = \nabla^2 f(w) \in \R^{d\times d}$ & $\Delta w^T H \Delta w \ge 0$（曲率非负） & 局部二次近似向上弯曲；$H(w) \succeq 0$ 处处成立 $\iff$ 目标函数为凸函数，无伪局部极小值。\textbf{（第 5--6 章、第 4 卷凸优化）} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+顺便一提，定理 \ref{thm:ch3-psd-eig} 还彻底解释了我们在第 2 章遗留的一个问题：\textbf{为什么岭回归只要在 $X^T X$ 对角线上加上 $\lambda I$（$\lambda > 0$），原本可能奇异的矩阵就一定可逆？}因为 $X^T X \succeq 0$ 的全部特征值 $\mu_i \ge 0$，加上 $\lambda I$ 后，对每个特征向量 $u_i$ 都有 $(X^T X + \lambda I)u_i = (\mu_i + \lambda)u_i$，于是新矩阵的全部特征值都平移到 $\mu_i + \lambda \ge \lambda > 0$，瞬间变成\textbf{严格正定矩阵}，必然可逆！
+
+\subsection{条件数 $\kappa(Q)$：椭球扁平度与病态峡谷}
+
+对于正定矩阵 $Q = U\Lambda U^T \succ 0$（特征值 $\lambda_{\max} = \lambda_1 \ge \dots \ge \lambda_n = \lambda_{\min} > 0$），在特征坐标 $y = U^T x$ 下，等高面 $x^T Q x = c$（$c > 0$）化为标准椭球方程：
+\[
+  \sum_{i=1}^n \lambda_i y_i^2 = c \;\Longleftrightarrow\; \sum_{i=1}^n \frac{y_i^2}{\bigl(\sqrt{c/\lambda_i}\bigr)^2} = 1.
+\]
+沿着特征向量 $u_i$ 方向的半轴长正是 $\sqrt{c/\lambda_i}$！因此，椭球\textbf{最长半轴与最短半轴之比}为
+\[
+  \frac{\text{最长半轴}}{\text{最短半轴}} = \frac{\sqrt{c/\lambda_{\min}}}{\sqrt{c/\lambda_{\max}}} = \sqrt{\frac{\lambda_{\max}}{\lambda_{\min}}} = \sqrt{\cond(Q)},
+\]
+其中核心指标
+\begin{equation}
+  \cond(Q) := \frac{\lambda_{\max}(Q)}{\lambda_{\min}(Q)} \ge 1 \label{eq:ch3-cond}
+\end{equation}
+称为正定矩阵 $Q$ 的\textbf{（谱）条件数}（condition number）。
+\begin{itemize}
+  \item 当 $\cond(Q) = 1$ 时（$Q = \lambda I$），等高面是完美正球面，在任何一点处负梯度方向都直指碗底最优解，梯度下降一步即可到位；
+  \item 当 $\cond(Q) \gg 1$ 时（例如 $\cond(Q) = 10^6$，长短轴比高达 $1000:1$），等高面被压成极其狭长的\textbf{病态峡谷}：负梯度几乎垂直于谷底走向，我们在第 6 章将看到，梯度下降会被迫在峡谷两侧剧烈锯齿震荡、步履维艰；同时求解线性方程组 $Qx = b$ 时，右端噪声 $\Delta b$ 的相对误差最高会被放大 $\cond(Q)$ 倍（$\|\Delta x\|_2/\|x\|_2 \le \cond(Q)\|\Delta b\|_2/\|b\|_2$）。
+\end{itemize}
+
+\begin{extBox}{Sylvester 顺序主子式判据与 Cholesky 分解}
+在手算低阶矩阵或编写高性能数值库时，无需算出全部特征值也能判定正定性：
+\begin{enumerate}
+  \item \textbf{Sylvester 判据}：实对称阵 $Q \succ 0$ 当且仅当其全部 $n$ 个\textbf{顺序主子式}（左上角 $k\times k$ 子块行列式 $\Delta_k$，$k=1,\dots,n$）都严格大于 $0$。例如对 $2\times 2$ 实对称阵 $\begin{psmallmatrix}a&b\\b&c\end{psmallmatrix}$，只需检查 $a > 0$ 且 $ac - b^2 > 0$。但务必小心：\textbf{判定半正定（$Q \succeq 0$）时，“顺序主子式 $\ge 0$”并不充分！}例如 $Q = \diag(0, -1)$ 满足 $\Delta_1 = 0, \Delta_2 = 0$，却显然不是半正定阵（须检验\textbf{所有}主子式均 $\ge 0$）。
+  \item \textbf{Cholesky 分解}：实对称阵 $Q \succ 0$ 当且仅当存在唯一的对角元全正的下三角矩阵 $L$，使得 $Q = L L^T$。它的计算量仅为 $O(n^3/3)$（LU 分解的一半），因此 \texttt{np.linalg.cholesky(Q)} 是工程中验证严格正定性、求解正定线性方程组以及在第 2 卷采样多元高斯向量（$x = \mu + L z,\; z\sim\mathcal{N}(0,I)$）的首选工具。
+\end{enumerate}
+\end{extBox}
+
+% =========================================================================
+\section{轻量专题：AI 中高频出现的两类特殊矩阵}
+\label{sec:ch3-special-matrices}
+
+在步入第 4 章的 SVD 之前，我们用一节轻快而扎实的应用专题，把本章的谱理论立刻对接到人工智能中两类出镜率极高的结构化矩阵：\textbf{行随机矩阵}与\textbf{图拉普拉斯矩阵}。
+
+\subsection{行随机矩阵：马尔可夫链与 Transformer 注意力权重}
+
+\begin{defBox}
+\begin{definition}[行随机矩阵, Row-Stochastic Matrix]
+\label{def:ch3-stochastic}
+若方阵 $P \in \R^{n\times n}$ 满足元素全非负（$P_{ij} \ge 0$）且每一行元素之和均为 $1$（即 $\sum_{j=1}^n P_{ij} = 1$，等价于矩阵方程 $P\mathbf{1} = \mathbf{1}$，其中 $\mathbf{1} = (1,\dots,1)^T$），则称 $P$ 为\textbf{行随机矩阵}（或马尔可夫转移矩阵）。
+\end{definition}
+\end{defBox}
+
+行随机矩阵的每行都是一组概率分布。它的谱结构有一个极其简洁优美的普遍规律：
+
+\begin{thmBox}
+\begin{proposition}[行随机矩阵的谱半径恒为 $1$]
+\label{prop:ch3-stoch-spec}
+对任意 $n\times n$ 行随机矩阵 $P$：
+\begin{enumerate}
+  \item $\lambda = 1$ 必是 $P$ 的特征值（对应右特征向量 $\mathbf{1}$）；
+  \item $P$ 的任意复特征值 $\lambda \in \C$ 均满足 $|\lambda| \le 1$，故谱半径 $\rho(P) = 1$。
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+第 1 条直接由定义 $P\mathbf{1} = 1\cdot\mathbf{1}$ 得出。对第 2 条，设 $Pv = \lambda v$（$v \in \C^n \setminus \{0\}$）。在 $v$ 的 $n$ 个分量中选取绝对值最大的一个下标 $m$，使得 $|v_m| = \|v\|_\infty > 0$。考察方程 $Pv = \lambda v$ 的第 $m$ 行并取绝对值，利用三角不等式与 $P_{mj} \ge 0$：
+\[
+  |\lambda|\,|v_m| = \abs{(Pv)_m} = \abs{\sum_{j=1}^n P_{mj} v_j}
+  \;\le\; \sum_{j=1}^n P_{mj} |v_j|
+  \;\le\; \left(\sum_{j=1}^n P_{mj}\right)|v_m| = 1\cdot |v_m|.
+\]
+两边消去正数 $|v_m|$，立刻得到 $|\lambda| \le 1$。
+\end{proof}
+
+在有限状态马尔可夫链中，若第 $k$ 步的状态概率分布记为\textbf{行向量} $\pi^{(k)} \in \R^{1\times n}$，则下一步的分布按 $\pi^{(k+1)} = \pi^{(k)} P$ 演化，即 $\pi^{(k)} = \pi^{(0)} P^k$。若存在概率分布 $\pi^*$ 满足 $\pi^* P = \pi^*$（即 $\pi^{*T}$ 是 $P^T$ 对应特征值 $\lambda = 1$ 的特征向量），则称 $\pi^*$ 为\textbf{平稳分布}（stationary distribution）。当除 $\lambda_1 = 1$ 外的其余特征值满足 $|\lambda_2| \ge \dots \ge |\lambda_n|$ 且 $|\lambda_2| < 1$ 时，任意初始分布都将按 $|\lambda_2|^k$ 的指数速率收敛到唯一的平稳分布 $\pi^*$！
+
+\begin{example}[$3\times 3$ 马尔可夫链收敛实测]
+\label{ex:ch3-markov-exp}
+考察 \texttt{code/vol1\_experiments.py} 中的 $3\times 3$ 行随机矩阵：
+\[
+  P = \begin{pmatrix} 0.7 & 0.2 & 0.1 \\ 0.1 & 0.6 & 0.3 \\ 0.2 & 0.3 & 0.5 \end{pmatrix},
+  \qquad \pi^{(0)} = (1,\; 0,\; 0).
+\]
+解线性方程组 $(P^T - I)\pi^{*T} = 0$ 并令各分量之和为 $1$，可得精确平稳分布
+\[
+  \pi^* = \left(\frac{11}{34},\; \frac{13}{34},\; \frac{10}{34}\right) \approx (0.3235,\; 0.3824,\; 0.2941).
+\]
+该矩阵的三个特征值为 $\lambda_1 = 1$、$\lambda_2 = 0.4 + \frac{\sqrt{2}}{10} \approx 0.5414$ 与 $\lambda_3 = 0.4 - \frac{\sqrt{2}}{10} \approx 0.2586$。表 \ref{tab:ch3-markov} 展示了实测迭代收敛过程：经过 20 步后 $L_1$ 误差已降至 $6.68 \times 10^{-6}$，与次大特征值衰减律 $|\lambda_2|^{20} \approx 4.6 \times 10^{-6}$ 高度吻合！
+\end{example}
+
+\begin{table}[htbp]
+  \centering
+  \caption{$3\times 3$ 行随机矩阵从 $\pi^{(0)}=(1,0,0)$ 出发收敛到平稳分布 $\pi^*$ 的实测记录}
+  \label{tab:ch3-markov}
+  \small
+  \begin{tabular}{@{}ccc@{}}
+    \toprule
+    \textbf{迭代步数 $k$} & \textbf{当前分布 $\pi^{(k)} = \pi^{(0)} P^k$} & \textbf{$L_1$ 误差 $\|\pi^{(k)} - \pi^*\|_1$} \\
+    \midrule
+    $0$  & $(1.0000,\; 0.0000,\; 0.0000)$ & $1.35\times 10^{0}$ \\
+    $1$  & $(0.7000,\; 0.2000,\; 0.1000)$ & $7.53\times 10^{-1}$ \\
+    $5$  & $(0.3566,\; 0.3685,\; 0.2748)$ & $6.62\times 10^{-2}$ \\
+    $10$ & $(0.3251,\; 0.3817,\; 0.2932)$ & $3.08\times 10^{-3}$ \\
+    $20$ & $(0.3235,\; 0.3824,\; 0.2941)$ & $6.68\times 10^{-6}$ \\
+    \midrule
+    平稳分布 $\pi^*$ & $(0.3235,\; 0.3824,\; 0.2941)$ & $0$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{insightBox}{Transformer 里的每一个 Softmax 注意力矩阵都是行随机矩阵！}
+除了第 3 卷的隐马尔可夫模型（HMM）与马尔可夫决策过程（MDP），行随机矩阵在当代大模型里更是无处不在：在第 5 卷将要学习的 Transformer 自注意力机制中，注意力权重矩阵
+\[
+  A = \operatorname{softmax}\!\left(\frac{Q K^T}{\sqrt{d_k}}\right) \in \R^{T\times T}
+\]
+经过逐行 Softmax 归一化后，元素全正且每行之和严格等于 $1$——\textbf{每一个注意力矩阵都是一个行随机矩阵}！由命题 \ref{prop:ch3-stoch-spec}，它的谱半径恒为 $1$，意味着纯注意力加权 $AV$ 只是对 Value 向量的凸组合（不会把词元范数放大爆炸）；反过来，如果把几十层纯注意力矩阵连乘而不加残差连接，所有词元表示就会像马尔可夫链收敛到平稳分布一样趋向同一条秩 1 向量——这正是深度学习中著名的\textbf{深层注意力秩坍塌（rank collapse / oversmoothing）}现象的线性代数根源！
+\end{insightBox}
+
+\subsection{图拉普拉斯矩阵：图信号平滑度与谱聚类直觉}
+
+许多现实数据并非规整表格，而是由节点和边构成的\textbf{图}（社交网络、分子结构、知识图谱、像素邻域）。给定 $n$ 节点无向带权图 $G = (V, E, W)$，其\textbf{邻接矩阵} $W \in \R^{n\times n}$ 满足对称非负（$w_{ij} = w_{ji} \ge 0,\; w_{ii} = 0$），\textbf{度矩阵}为对角阵 $D = \diag(d_1,\dots,d_n)$（其中 $d_i = \sum_{j=1}^n w_{ij}$）。定义\textbf{（非归一化）图拉普拉斯矩阵}（Graph Laplacian）为
+\[
+  L := D - W.
+\]
+
+\begin{thmBox}
+\begin{proposition}[图拉普拉斯矩阵的半正定性与平滑度二次型]
+\label{prop:ch3-laplacian}
+对任意无向非负加权图的拉普拉斯矩阵 $L = D - W$：
+\begin{enumerate}
+  \item $L$ 是实对称矩阵，且 $L\mathbf{1} = 0$（即 $\lambda_1 = 0$ 恒为其特征值）；
+  \item 对任意定义在节点上的信号向量 $x = (x_1,\dots,x_n)^T \in \R^n$，恒有
+  \begin{equation}
+    x^T L x = \frac{1}{2}\sum_{i=1}^n \sum_{j=1}^n w_{ij}(x_i - x_j)^2 = \sum_{\{i,j\}\in E} w_{ij}(x_i - x_j)^2 \;\ge\; 0, \label{eq:ch3-lap-quad}
+  \end{equation}
+  因此 $L \succeq 0$ 是半正定矩阵；
+  \item 特征值 $0$ 的重数恰好等于图 $G$ 的\textbf{连通分量个数}。
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+对称性显然；第 $i$ 行元素之和为 $(L\mathbf{1})_i = d_i - \sum_j w_{ij} = 0$，故 $L\mathbf{1}=0$。展开式 \eqref{eq:ch3-lap-quad} 右侧并利用对称性 $w_{ij} = w_{ji}$：
+\begin{align*}
+  \frac{1}{2}\sum_{i=1}^n \sum_{j=1}^n w_{ij}(x_i - x_j)^2
+  &= \frac{1}{2}\sum_{i,j} w_{ij} x_i^2 - \sum_{i,j} w_{ij} x_i x_j + \frac{1}{2}\sum_{i,j} w_{ij} x_j^2 \\
+  &= \sum_{i=1}^n d_i x_i^2 - \sum_{i,j} w_{ij} x_i x_j
+   = x^T D x - x^T W x = x^T L x.
+\end{align*}
+因 $w_{ij} \ge 0$，故 $x^T L x \ge 0$，即 $L \succeq 0$。进一步，由于 $L \succeq 0$，由谱定理 $Lx = 0 \iff x^T L x = 0 \iff$ 对每条正权边 $\{i,j\}\in E$ 均有 $x_i = x_j$，亦即 $x$ 在每个连通分量内部必须取常数，从而 $\dim\nul(L)$ 等于连通分量个数。
+\end{proof}
+
+式 \eqref{eq:ch3-lap-quad} 的物理直觉无比清晰：$x^T L x$ 度量了节点信号 $x$ 在图上的\textbf{总变差（粗糙度）}——相连且边权大的节点若取值接近，则 $x^T L x$ 很小（信号平滑）；若相邻节点正负剧烈震荡，则 $x^T L x$ 很大！
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.96\linewidth}{!}{%
+  \begin{tikzpicture}[
+    v/.style={circle, draw=tealDark, thick, fill=tealLight, minimum size=8.5mm, font=\sffamily\bfseries\small, text=ink},
+    strong/.style={line width=1.6pt, teal},
+    weak/.style={line width=1.1pt, ochre, dashed}
+  ]
+    % Left: 4-node graph
+    \node[v] (n1) at (0, 0) {1};
+    \node[v] (n2) at (2.1, 0) {2};
+    \node[v] (n3) at (5.1, 0) {3};
+    \node[v] (n4) at (7.2, 0) {4};
+
+    \draw[strong] (n1) -- node[above, font=\footnotesize\sffamily, color=tealDark] {$w=1.0$} (n2);
+    \draw[weak]   (n2) -- node[above, font=\footnotesize\sffamily, color=ochre] {$w=0.2$} node[below, font=\scriptsize\sffamily, color=ochre] {（弱桥）} (n3);
+    \draw[strong] (n3) -- node[above, font=\footnotesize\sffamily, color=tealDark] {$w=1.0$} (n4);
+
+    % Cluster brackets below
+    \draw[decorate, decoration={brace, amplitude=5pt, mirror}, teal] (-0.4,-0.75) -- (2.5,-0.75)
+      node[midway, below=5pt, font=\footnotesize\sffamily, color=tealDark] {紧耦合簇 A（$q_2 > 0$）};
+    \draw[decorate, decoration={brace, amplitude=5pt, mirror}, navy] (4.7,-0.75) -- (7.6,-0.75)
+      node[midway, below=5pt, font=\footnotesize\sffamily, color=navy] {紧耦合簇 B（$q_2 < 0$）};
+
+    % Right: compact matrix & smoothness comparison box
+    \node[anchor=west, align=left, font=\footnotesize, draw=codeborder, fill=codebg, rounded corners=1.5mm, inner sep=6pt] at (8.4, -0.2) {%
+      $L = D - W = \begin{pmatrix}
+        1 & -1 & 0 & 0 \\
+        -1 & 1.2 & -0.2 & 0 \\
+        0 & -0.2 & 1.2 & -1 \\
+        0 & 0 & -1 & 1
+      \end{pmatrix}$\\[6pt]
+      \textbf{平滑信号} $x_{\mathrm{s}}=(1,1,-1,-1)^T$：\;$x_{\mathrm{s}}^T L x_{\mathrm{s}} = \mathbf{0.8}$\\
+      \textbf{震荡信号} $x_{\mathrm{o}}=(1,-1,1,-1)^T$：\;$x_{\mathrm{o}}^T L x_{\mathrm{o}} = \mathbf{8.8}$\\
+      \textbf{Fiedler 向量}（$\lambda_2 \approx 0.180$）：$q_2 \approx (0.55, 0.45, -0.45, -0.55)^T$
+    };
+  \end{tikzpicture}}
+  \caption{4 节点双簇弱桥图的拉普拉斯矩阵与信号平滑度对比。第二小特征值 $\lambda_2$ 对应的特征向量（Fiedler 向量）在保证与 $\mathbf{1}$ 正交的前提下让 $x^T L x$ 最小，因此天然切开弱桥、把两个紧耦合社群按正负号分开——这正是第 4 卷\textbf{谱聚类}与图神经网络（GNN）平滑正则化的核心思想。}
+  \label{fig:ch3-graph-lap}
+\end{figure}
+
+\subsection{NumPy 代码实战：谱分解、马尔可夫迭代与图拉普拉斯}
+
+在工程中处理实对称矩阵时，务必牢记一条 NumPy 黄金法则：\textbf{永远优先调用 \texttt{np.linalg.eigh}（专为 Hermitian/对称阵设计的算法），而不是通用的 \texttt{np.linalg.eig}}。\texttt{eigh} 不仅速度快约 2--3 倍，而且保证返回的特征值严格为升序实数、特征向量严格机器精度正交。
+
+\begin{lstlisting}[caption={实对称谱分解（\texttt{eigh}）、行随机阵平稳分布与图拉普拉斯平滑度验证},label={lst:ch3-verify}]
+import numpy as np
+
+# 1. Real symmetric spectral decomposition via eigh (guaranteed real + orthogonal)
+S = np.array([[5.0, 3.0], [3.0, 5.0]])
+eigvals, Q = np.linalg.eigh(S)  # ascending: [2.0, 8.0]
+S_recon = Q @ np.diag(eigvals) @ Q.T
+assert np.allclose(S, S_recon) and np.allclose(Q.T @ Q, np.eye(2))
+kappa_S = eigvals[-1] / eigvals[0]
+print(f"eigs={eigvals}, cond={kappa_S:.2f}")  # [2. 8.], cond=4.00
+
+# 2. Row-stochastic Markov power iteration
+P = np.array([[0.7, 0.2, 0.1], [0.1, 0.6, 0.3], [0.2, 0.3, 0.5]])
+assert np.allclose(P.sum(axis=1), 1.0)
+pi_20 = np.array([1.0, 0.0, 0.0]) @ np.linalg.matrix_power(P, 20)
+pi_star = np.array([11.0, 13.0, 10.0]) / 34.0
+print(f"pi_20={np.round(pi_20, 4)}, L1_err={np.linalg.norm(pi_20 - pi_star, 1):.2e}")
+
+# 3. 4-node Graph Laplacian quadratic smoothness & Fiedler vector
+W = np.array([
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.2, 0.0],
+    [0.0, 0.2, 0.0, 1.0],
+    [0.0, 0.0, 1.0, 0.0],
+])
+L = np.diag(W.sum(axis=1)) - W
+l_vals, l_vecs = np.linalg.eigh(L)
+x_smooth = np.array([1.0, 1.0, -1.0, -1.0])
+quad_mat = float(x_smooth @ L @ x_smooth)
+quad_sum = 0.5 * float(np.sum(W * (x_smooth[:, None] - x_smooth[None, :]) ** 2))
+assert np.isclose(quad_mat, quad_sum)
+print(f"L eigs={np.round(l_vals, 4)}, Fiedler q2={np.round(l_vecs[:, 1], 3)}")
+\end{lstlisting}
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch3-exercises}
+
+\exTier{A. 概念辨析与反例查错}{合上书独立作答，精准定位定义边界}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（对称化与正定判据反例）} 某同学声称：“若实方阵 $A$ 的所有特征值都严格大于 $0$，则二次型 $x^T A x$ 对一切非零向量 $x$ 必严格大于 $0$。”请构造一个 $2\times 2$ 反例推翻该说法，并通过对称化矩阵 $S = \frac{1}{2}(A + A^T)$ 解释其错误根源；进一步举出一个 $2\times 2$ 实对称阵反例，说明“所有顺序主子式 $\ge 0$”并不足以保证矩阵半正定。
+
+  \item \textbf{（特征分解、瞬态增长与行随机阵辨析）} 判断以下四个命题正误；对错误命题给出最小反例，对正确命题简述理由：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 若两个实方阵 $A, B$ 均可对角化，则 $A + B$ 必可对角化；
+    \item 实对称矩阵属于不同特征值的特征向量必相互正交；
+    \item 若实方阵 $A$ 的全部特征值均满足 $|\lambda_i| < 1$，则序列 $\|A^k\|_F$（$k=1,2,\dots$）必单调递减；
+    \item 两个 $n\times n$ 行随机矩阵的乘积 $P_1 P_2$ 仍是行随机矩阵。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手打通特征向量、椭球与拉普拉斯计算}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（2D 实对称谱分解与等高椭圆）} 给定实对称矩阵 $S = \begin{pmatrix} 3 & -1 \\ -1 & 3 \end{pmatrix}$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 手算 $S$ 的全部特征值与单位正交特征向量，写出正交分解 $S = Q\Lambda Q^T$ 及秩 1 外积和形式；
+    \item 求条件数 $\cond(S)$，指出椭圆等高线 $x^T S x = 8$ 的两条主轴方向及对应的半轴长度；
+    \item 不直接乘矩阵，利用谱分解口算 $S^{10}$ 的最大特征值并写出 $S^{-1}$。
+  \end{enumerate}
+
+  \item \textbf{（3 节点图拉普拉斯与随机游走平稳分布）} 考虑 3 节点无向链图 $1 - 2 - 3$（边 $(1,2)$ 与 $(2,3)$ 权重均为 $1$）：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 写出邻接矩阵 $W$、度矩阵 $D$ 与图拉普拉斯矩阵 $L = D - W$；
+    \item 手算 $L$ 的全部特征值与单位正交特征向量，验证 $L \succeq 0$ 且特征值 $0$ 仅为一重根；
+    \item 构造随机游走转移矩阵 $P = D^{-1}W$，验证 $P$ 为行随机矩阵，并求出平稳分布 $\pi^*$（满足 $\pi^* P = \pi^*,\; \sum_i \pi_i^* = 1$）。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{AI 理论与后续卷次反复用到的核心工具}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（PSD 凸锥性质、岭回归正定化与矩阵平方根）} 设实对称矩阵 $A, B \in \R^{n\times n}$ 满足 $A \succeq 0,\; B \succeq 0$，常数 $\alpha, \beta \ge 0$。证明：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item $\alpha A + \beta B \succeq 0$（即半正定矩阵集合构成一个凸锥）；
+    \item 对任意设计矩阵 $X \in \R^{m\times n}$ 与 $\lambda > 0$，岭回归矩阵 $H = X^T X + \lambda I_n$ 严格正定，并用 $X^T X$ 的最大/最小特征值 $\mu_{\max}, \mu_{\min}$ 给出条件数 $\cond(H)$ 的精确表达式（说明增大 $\lambda$ 如何改善条件数）；
+    \item 对任意 $A \succeq 0$，存在半正定对称矩阵 $A^{1/2} \succeq 0$ 满足 $(A^{1/2})^2 = A$（并简证该半正定平方根唯一）。
+  \end{enumerate}
+  \exHint{第 (3) 问可直接令 $A^{1/2} = Q \Lambda^{1/2} Q^T$；证唯一性时，设 $B \succeq 0$ 亦满足 $B^2 = A$，先观察 $B$ 与 $A$ 的特征向量关系：对任意 $B$ 的特征对 $Bv = \mu v$（$\mu \ge 0$），有 $Av = B^2 v = \mu^2 v$，故 $v$ 必落入 $A$ 对应 $\mu^2$ 的特征子空间中。}
+
+  \item \textbf{（Rayleigh 商的约束极小值与 Fiedler 向量）} 设实对称矩阵 $S \in \R^{n\times n}$ 的特征值按升序排列为 $\lambda_1 \le \lambda_2 \le \dots \le \lambda_n$，对应单位正交特征向量为 $q_1, \dots, q_n$。证明：
+  \[
+    \lambda_2 = \min_{\substack{x \neq 0 \\ x \perp q_1}} \frac{x^T S x}{x^T x}.
+  \]
+  并据此说明：对于连通无向图的拉普拉斯矩阵 $L$（其 $q_1 = \frac{1}{\sqrt{n}}\mathbf{1}$），在约束 $\sum_{i=1}^n x_i = 0$（消除常数平移）且 $\|x\|_2 = 1$ 下，使平滑度能量 $\sum_{\{i,j\}\in E} w_{ij}(x_i - x_j)^2$ 最小的非平凡信号恰为 Fiedler 向量 $q_2$。
+  \exHint{在标准正交基 $\{q_1, \dots, q_n\}$ 下展开 $x = \sum_{i=1}^n y_i q_i$，正交约束 $x \perp q_1$ 恰好等价于第一个坐标 $y_1 = 0$。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用 NumPy 亲手跑出数值现象并通过断言检验}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（高阶 Jordan 块瞬态增长与 \texttt{eigh} vs \texttt{eig} 对比实验）} 编写 Python 脚本完成以下两项实验：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 构造 $m$ 阶 Jordan 块 $J_m(0.9)$（$m \in \{2, 3, 4\}$），计算 $k = 0, 1, \dots, 120$ 时的 $\|J_m(0.9)^k\|_F$，输出各阶对应的峰值和达峰步数；
+    \item 随机生成 $200\times 200$ 实对称阵 $S = \frac{1}{2}(A + A^T)$，分别调用 \texttt{np.linalg.eig} 与 \texttt{np.linalg.eigh}，对比二者运行耗时、特征值虚部的最大绝对值，以及特征向量正交误差 $\|Q^T Q - I\|_F$。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,当 $m=2$ 时峰值须与例 \ref{ex:ch3-jordan-transient} 一致（$k=9$ 时 $\|J_2(0.9)^9\|_F \approx 3.9128$），$m=4$ 时峰值须超过 $100$；\texttt{eigh} 所得特征值虚部严格为 $0$，且正交误差 $\|Q^T Q - I\|_F < 10^{-12}$。}
+
+  \item \textbf{（双社群图的拉普拉斯谱聚类实验）} 构造一个 20 节点无向图：将节点 $0\text{--}9$ 与 $10\text{--}19$ 分为两个社群，社群内部以全连接（或每对以概率 $0.8$ 连边）赋予边权 $1.0$，两社群之间仅连 3 条权重为 $0.2$ 的弱桥边。编写代码构造 $L = D - W$ 并调用 \texttt{np.linalg.eigh(L)}：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 验证最小特征值 $|\lambda_1| < 10^{-12}$ 且 $\lambda_2 > 0$（图连通）；
+    \item 提取 Fiedler 向量 $q_2$，用 $\operatorname{sign}(q_2)$ 给 20 个节点分类；
+    \item 用随机置换打乱 20 个节点的原始编号后重新运行，计算社群恢复准确率。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,断言二次型恒等式 $\abs{q_2^T L q_2 - \frac{1}{2}\sum_{i,j} w_{ij}(q_{2,i}-q_{2,j})^2} < 10^{-12}$ 通过；无论节点如何随机打乱，按 $q_2$ 符号（允许整体反号）划分两社群的准确率均应达到 $100\%$。}
+\end{enumerate}

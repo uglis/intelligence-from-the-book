@@ -1,0 +1,533 @@
+\chapter[卷积、残差网络与循环序列建模]{空间与序列归纳偏置：卷积网络、残差连接与循环网络}
+\label{ch:cnn-resnet-rnn}
+
+\chapEpigraph{对称，无论你将这个词的意义定义得多么宽泛或狭隘，都是人类数千年来试图借以理解并创造秩序、美与完美的观念。}{Hermann Weyl（赫尔曼·外尔，《对称》，1952）}
+
+\begin{chapIntro}{本章导读：把世界的对称性与高速公路写进架构}
+多层感知机（MLP）虽然在理论上具备万能逼近能力，却对数据的几何结构“一无所知”：如果把一张 $224 \times 224 \times 3$ 像素的彩色图像拉直成 $150{,}528$ 维向量送入宽度为 $1024$ 的全连接隐藏层，仅仅第一层就需要 $150{,}528 \times 1024 \approx 1.54 \times 10^8$ 个参数——而且只要把图像中的猫向右平移一个像素，所有权重都得重新学习一遍！
+
+将关于现实世界结构的先验假设（\textbf{归纳偏置，Inductive Bias}）直接铸入网络拓扑，催生了现代深度学习的三座里程碑，也是本章的核心主线：
+\begin{enumerate}
+  \item \textbf{空间局部性与平移等变（CNN）}：严格推导二维卷积的输出尺寸、感受野递推与参数量，证明卷积的\textbf{平移等变定理}，揭示底层硬件如何用 \texttt{im2col} 把卷积化归为稠密矩阵乘法（GEMM），并分析深度可分离卷积的加速比。
+  \item \textbf{深度残差高速公路（ResNet）}：剖析深层直筒网络的退化难题，严格证明\textbf{残差梯度高速公路定理}（含 Pre-Activation 洁净路径分析），并用 24 层实测数据（\texttt{data/resnet\_grad.csv}）亲眼见证 ResNet 将底层梯度从 \texttt{1.78e-10} 拉升至 \texttt{1.01e-01} 的九个数量级跨越！
+  \item \textbf{时间递推与门控高速公路（RNN / LSTM / GRU）}：完整推导随时间反向传播（BPTT）的连乘雅可比与奇异值消失/爆炸条件，揭示 LSTM 加法细胞状态如何构成“时间维度上的残差高速公路”，并指出 $O(T)$ 串行依赖瓶颈——为第 4 章 Transformer 自注意力的横空出世埋下决定性伏笔。
+\end{enumerate}
+\end{chapIntro}
+
+\section{二维卷积的数学、对称性与矩阵本质}
+\label{sec:cnn-math}
+
+自然图像天然满足两条强有力的结构对称性：\textbf{局部性（Locality）}（相邻像素构成边缘、纹理等局部模式）与\textbf{平移对称性（Translation Symmetry）}（同一只猫出现在左上角或右下角，识别它所需的局部边缘检测器完全相同）。卷积神经网络（CNN；LeCun et al., 1989; Krizhevsky et al., 2012）将这两条先验编码为两大硬约束：\textbf{局部感受野}与\textbf{空间权重共享}。
+
+\subsection{二维卷积定义、输出尺寸与感受野递推}
+
+\begin{defBox}
+\begin{definition}[多通道二维卷积层]
+设输入特征图张量为 $X \in \R^{C_{\text{in}} \times H \times W}$，卷积核张量为 $K \in \R^{C_{\text{out}} \times C_{\text{in}} \times k_H \times k_W}$，偏置为 $b \in \R^{C_{\text{out}}}$，零填充（padding）为 $P$，步幅（stride）为 $S$。深度学习中习称的二维卷积（严格数学意义上为互相关，因核参数可学习，翻转与否等价）定义为：
+\begin{equation}
+  Y[o, i, j] = b[o] + \sum_{c=0}^{C_{\text{in}}-1} \sum_{u=0}^{k_H-1} \sum_{v=0}^{k_W-1}
+  K[o, c, u, v]\, \tilde{X}\!\left[c,\, i S + u,\, j S + v\right],
+  \label{eq:conv2d}
+\end{equation}
+其中 $\tilde{X}$ 为四周补零 $P$ 圈后的输入张量。若引入空洞率（dilation）$d \ge 1$，则等效核尺寸变为 $k_{\text{eff}} = k + (k - 1)(d - 1)$。
+\end{definition}
+\end{defBox}
+
+直接清点滑动窗口的合法起止坐标，立得三个最常用的工程核心公式：
+\begin{itemize}
+  \item \textbf{输出空间尺寸}（以方形核 $k_H = k_W = k$ 为例）：
+  \begin{equation}
+    H_{\text{out}} = \left\lfloor \frac{H + 2P - k_{\text{eff}}}{S} \right\rfloor + 1, \qquad
+    W_{\text{out}} = \left\lfloor \frac{W + 2P - k_{\text{eff}}}{S} \right\rfloor + 1.
+    \label{eq:conv-out-size}
+  \end{equation}
+  当 $S = 1,\; d = 1$ 且 $k$ 为奇数时，取 $P = (k - 1)/2$ 可精确保持 $H_{\text{out}} = H$（即 \texttt{same} 填充，如 $3\times 3$ 卷积配 $P=1$）。
+  \item \textbf{参数量与乘加计算量（FLOPs）}：
+  \[
+    \text{Params} = C_{\text{out}} C_{\text{in}} k_H k_W + C_{\text{out}}, \qquad
+    \text{FLOPs} \approx 2\, H_{\text{out}} W_{\text{out}} C_{\text{out}} C_{\text{in}} k_H k_W.
+  \]
+  回看开篇的 $224 \times 224 \times 3$ 图像：一个 $C_{\text{out}} = 64$、核尺寸 $3\times 3$ 的卷积层仅需 $64 \times 3 \times 9 + 64 = 1{,}792$ 个参数，比全连接层暴降整整\textbf{五个数量级}，且参数量完全与图像分辨率 $(H, W)$ 无关！
+  \item \textbf{感受野（Receptive Field）增长递推}：第 $l$ 层输出的一个像素能“看见”原始输入图像中多大的区域？记第 $l$ 层的核尺寸与步幅为 $k_l, s_l$，输入层初始感受野 $r_0 = 1$，累计下采样步幅（jump）为 $J_l = \prod_{i=1}^{l} s_i$（$J_0 = 1$），则有精确递推：
+  \begin{equation}
+    r_l = r_{l-1} + (k_l - 1)\prod_{i=1}^{l-1} s_i = r_{l-1} + (k_l - 1) J_{l-1}.
+    \label{eq:receptive-field}
+  \end{equation}
+\end{itemize}
+
+式~\eqref{eq:receptive-field} 立刻揭示了 VGGNet（Simonyan \& Zisserman, 2015）的设计精髓：连续堆叠\textbf{三层}步幅 $S=1$ 的 $3\times 3$ 卷积，感受野依次增长为 $1 \to 3 \to 5 \to 7$，与单层 $7\times 7$ 卷积完全相同；但若通道数恒为 $C$，三层 $3\times 3$ 的参数量仅为 $3 \times (9 C^2) = 27 C^2$，而单层 $7\times 7$ 需要 $49 C^2$（节省 $45\%$ 参数），同时三层之间还夹入了\textbf{三次非线性 ReLU 激活}，表达力大幅增强！
+
+\subsection{平移等变性定理与池化的局部不变性}
+
+为什么卷积比全连接层在视觉任务上具备天然的样本效率？核心在于群论意义下的\textbf{平移等变性（Translation Equivariance）}：把输入图像平移向量 $\delta$ 后再做卷积，与先做卷积再把输出特征图平移 $\delta$ 完全等价。
+
+\begin{thmBox}
+\begin{theorem}[卷积的平移等变性]
+\label{thm:conv-equivariance}
+在无边界截断的无限二维网格 $\mathbb{Z}^2$ 上，定义平移算子 $(T_\delta f)(x) := f(x - \delta)$（$\delta \in \mathbb{Z}^2$）与离散卷积 $(f * g)(x) := \sum_{u \in \mathbb{Z}^2} f(x - u)\, g(u)$（或互相关 $\sum_u f(x + u) g(u)$）。则卷积算子与任意平移算子可交换：
+\begin{equation}
+  (T_\delta f) * g = T_\delta (f * g).
+  \label{eq:equivariance}
+\end{equation}
+\end{theorem}
+\begin{proof}
+对任意坐标 $x \in \mathbb{Z}^2$ 直接按定义展开左端：
+\begin{align*}
+  \big((T_\delta f) * g\big)(x)
+  &= \sum_{u \in \mathbb{Z}^2} (T_\delta f)(x - u)\, g(u)
+   = \sum_{u \in \mathbb{Z}^2} f\!\left((x - \delta) - u\right) g(u) \\
+  &= (f * g)(x - \delta)
+   = \big(T_\delta (f * g)\big)(x).
+\end{align*}
+（对于互相关定义 $(f \star g)(x) = \sum_u f(x+u) g(u)$，同样有 $\sum_u f(x-\delta+u)g(u) = T_\delta(f \star g)(x)$，结论完全成立。）
+\end{proof}
+\end{thmBox}
+
+务必精准区分\textbf{等变性（Equivariance）}与\textbf{不变性（Invariance）}：
+\begin{itemize}
+  \item \textbf{卷积提供平移等变性}：目标检测与语义分割需要知道物体\emph{在哪里}，猫向右移 10 像素，对应的特征激活峰值也同步向右移 10 像素。
+  \item \textbf{池化（Pooling）与全局平均池化（GAP）提供近似平移不变性}：对分类任务，猫在左侧还是右侧类别标签都是“猫”。局部最大池化（MaxPool）在窗口内抹平微小抖动，而网络末端的全局平均池化 $\bar{y}_c = \frac{1}{HW}\sum_{h,w} Y_{c,h,w}$ 对空间位置求和，从而实现了整体平移不变性。（注意：带步幅 $S > 1$ 的下采样仅保留 $S$ 倍整数网格的离散等变性，且零填充会在图像边缘微弱破坏完美等变性。）
+\end{itemize}
+
+\subsection{从嵌套循环到硬件加速：\texttt{im2col} 的 GEMM 等价与深度可分离卷积}
+
+如果按照定义式~\eqref{eq:conv2d} 写出六层嵌套 \texttt{for} 循环，在 GPU 上运行速度会慢上千倍。现代深度学习底层库（cuDNN、oneDNN）实现高性能卷积的经典核心之一，是 \textbf{\texttt{im2col}（Image-to-Column）变换}——它把二维滑动窗口卷积严丝合缝地变成一次大型稠密矩阵乘法（GEMM），从而吃满 GPU 的张量核心（Tensor Cores，详见第 6 卷第 5 章）！
+
+具体构造极其优雅：
+\begin{enumerate}
+  \item \textbf{展开输入特征图}：对输出特征图的每一个空间位置 $(i, j)$（共有 $L = H_{\text{out}} W_{\text{out}}$ 个位置），取出对应输入感受野里的 $C_{\text{in}} \times k_H \times k_W$ 局部块，拉直成一列（长度为 $K = C_{\text{in}} k_H k_W$）。把所有 $L$ 列并排拼成矩阵 $X_{\text{col}} \in \R^{(C_{\text{in}} k_H k_W) \times (H_{\text{out}} W_{\text{out}})}$。
+  \item \textbf{拉平卷积核}：将四维卷积核张量 $K \in \R^{C_{\text{out}} \times C_{\text{in}} \times k_H \times k_W}$ 直接重塑（零拷贝 \texttt{reshape}）为二维权重矩阵 $W_{\text{row}} \in \R^{C_{\text{out}} \times (C_{\text{in}} k_H k_W)}$。
+  \item \textbf{一次 GEMM 完结}：矩阵乘积
+  \[
+    Y_{\text{mat}} = W_{\text{row}} X_{\text{col}} + b \mathbf{1}_L^\top \in \R^{C_{\text{out}} \times (H_{\text{out}} W_{\text{out}})}
+  \]
+  的每一项恰好就是式~\eqref{eq:conv2d}！最后将 $Y_{\text{mat}}$ 重塑回 $(C_{\text{out}}, H_{\text{out}}, W_{\text{out}})$ 即可。而且它的反向传播 VJP 直接复用第~\ref{ch:mlp-autodiff} 章命题~\ref{prop:linear-vjp}：$\bar{W}_{\text{row}} = \bar{Y}_{\text{mat}} X_{\text{col}}^\top$，以及 $\bar{X} = \operatorname{col2im}(W_{\text{row}}^\top \bar{Y}_{\text{mat}})$（其中 \texttt{col2im} 将重叠像素处的梯度累加，再次印证多分支梯度累加原则！）。
+\end{enumerate}
+
+\textbf{深度可分离卷积（Depthwise Separable Convolution；MobileNet）}进一步将标准卷积因式分解为两步：先做\textbf{逐通道深度卷积（Depthwise Conv）}（每个通道独立使用一个 $k \times k$ 核，不混合通道，耗时 $H_{\text{out}} W_{\text{out}} C_{\text{in}} k^2$），再做\textbf{逐点 $1\times 1$ 卷积（Pointwise Conv）}（纯粹在每个像素上做通道线性混合，耗时 $H_{\text{out}} W_{\text{out}} C_{\text{in}} C_{\text{out}}$）。两者总计算量与标准卷积之比为：
+\begin{equation}
+  \frac{H_{\text{out}} W_{\text{out}} C_{\text{in}} k^2 + H_{\text{out}} W_{\text{out}} C_{\text{in}} C_{\text{out}}}{H_{\text{out}} W_{\text{out}} C_{\text{in}} C_{\text{out}} k^2}
+  = \frac{1}{C_{\text{out}}} + \frac{1}{k^2}.
+  \label{eq:dw-sep-ratio}
+\end{equation}
+当 $k = 3,\; C_{\text{out}} = 256$ 时，计算量与参数量骤降至原来的 $\frac{1}{256} + \frac{1}{9} \approx 11.5\%$——足足提速近 \textbf{9 倍}！
+
+\section{ResNet 与残差梯度高速公路定理}
+\label{sec:resnet}
+
+手握 Kaiming 初始化、BatchNorm 与 $3\times 3$ 卷积之后，2015 年的研究者满怀期待地把 VGG 式的直筒网络从 20 层堆到了 56 层，却遭遇了一个令人困惑的奇异现象——\textbf{退化问题（Degradation Problem）}：56 层直筒网络不仅\emph{测试误差}更高，连\textbf{训练误差都显著高于 20 层网络}！
+
+这绝不是过拟合（过拟合应当表现为训练误差更低），而是一个纯粹的\textbf{优化难题}：理论上，只要把多出来的 36 层设为恒等映射 $h(x) = x$，56 层网络的训练误差至少应当不差于 20 层网络；但实践证明，让一堆非线性层去逼近“什么都不做的恒等映射”竟然出奇地困难！
+
+He 等人（2016）提出的\textbf{残差网络（Residual Network, ResNet）}用一行看似平淡无奇的加法改写了整个深度学习史：与其让堆叠层直接拟合目标映射 $\mathcal{H}(x)$，不如让它拟合\textbf{残差（Residual）} $\mathcal{F}(x) = \mathcal{H}(x) - x$，再通过一条无参数的\textbf{恒等跳跃连接（Identity Shortcut）}把输入直接加到输出上：
+\[
+  x_{l+1} = x_l + \mathcal{F}(x_l; W_l).
+\]
+当最优映射接近恒等映射时，网络只需把残差支路权重 $W_l$ 推向 $0$ 即可轻松实现恒等——而这仅仅是故事的表面。它更惊人的魔力藏在反向传播里。
+
+\begin{thmBox}
+\begin{theorem}[残差网络的梯度高速公路定理（He et al., 2016）]
+\label{thm:resnet-highway}
+考虑由 $L$ 个洁净预激活（Pre-Activation）残差块串联而成的深层网络，其递推满足 $x_{i+1} = x_i + \mathcal{F}(x_i; W_i)$（$i = 0, \dots, L-1$）。对任意浅层 $l$ 与任意更深层 $L > l$：
+\begin{enumerate}
+  \item \textbf{前向展开为残差和}：
+  \begin{equation}
+    x_L = x_l + \sum_{i=l}^{L-1} \mathcal{F}(x_i; W_i).
+    \label{eq:resnet-fwd}
+  \end{equation}
+  \item \textbf{反向梯度分解为恒等直达项与残差调制项}：对任意标量损失 $\mathcal{L}$，
+  \begin{equation}
+    \frac{\partial \mathcal{L}}{\partial x_l}
+    = \frac{\partial \mathcal{L}}{\partial x_L}\left(I + \frac{\partial}{\partial x_l}\sum_{i=l}^{L-1} \mathcal{F}(x_i; W_i)\right),
+    \label{eq:resnet-bwd}
+  \end{equation}
+  （这里采用行向量梯度约定 $\frac{\partial \mathcal{L}}{\partial x} \in \R^{1 \times D}$；若采用列向量梯度 $\nabla_x \mathcal{L} \in \R^D$，则等价写作 $\nabla_{x_l}\mathcal{L} = \left(I + \frac{\partial}{\partial x_l}\sum_{i=l}^{L-1}\mathcal{F}(x_i; W_i)\right)^\top \nabla_{x_L}\mathcal{L}$）。
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+对 $x_{i+1} - x_i = \mathcal{F}(x_i; W_i)$ 从 $i = l$ 到 $L-1$ 望远镜求和（telescoping sum），所有中间项两两抵消，立得式~\eqref{eq:resnet-fwd}。
+
+对式~\eqref{eq:resnet-fwd} 两端关于 $x_l$ 应用多元链式法则：
+\[
+  \frac{\partial \mathcal{L}}{\partial x_l}
+  = \frac{\partial \mathcal{L}}{\partial x_L} \cdot \frac{\partial x_L}{\partial x_l}
+  = \frac{\partial \mathcal{L}}{\partial x_L} \left(\frac{\partial x_l}{\partial x_l} + \frac{\partial}{\partial x_l}\sum_{i=l}^{L-1}\mathcal{F}(x_i; W_i)\right)
+  = \frac{\partial \mathcal{L}}{\partial x_L} \left(I + \frac{\partial}{\partial x_l}\sum_{i=l}^{L-1}\mathcal{F}(x_i; W_i)\right).
+\]
+进一步，若逐层连乘局部雅可比 $\frac{\partial x_L}{\partial x_l} = \prod_{i=l}^{L-1} \left(I + J_{\mathcal{F}_i}\right)$ 并按二项式展开，它正是从第 $L$ 层到第 $l$ 层全部 $2^{L-l}$ 条不同长度路径（从直接跳过的长度 $0$ 恒等路径，到经过 $1, 2, \dots, L-l$ 个残差支路的组合路径）的雅可比之和！
+\end{proof}
+\end{thmBox}
+
+仔细凝视式~\eqref{eq:resnet-bwd}，它包含两重深刻启示：
+\begin{enumerate}
+  \item \textbf{梯度绝不会系统性消失}：在普通直筒网络中，梯度被连乘矩阵 $\prod J_i$ 反复挤压；而在 ResNet 中，顶层梯度 $\frac{\partial \mathcal{L}}{\partial x_L}$ 通过恒等项 $I$ \textbf{畅通无阻地直接空降到任意浅层 $l$}，完全绕开了所有中间权重矩阵！即便残差支路的雅可比项非常小，只要它不恰好对整个小批量恒等于 $-I$（这在随机权重与数据变化下几乎不可能发生），浅层梯度就始终保持饱满的 $O(1)$ 量级——这就是“残差梯度高速公路”的真正含义。
+  \item \textbf{为什么 Pre-Activation ResNet 与 Pre-LN Transformer 更优越？}最初的 ResNet v1 在加法之后又套了一层 ReLU：$x_{l+1} = \ReLU(x_l + \mathcal{F}(x_l))$，这条 ReLU 像收费站一样挡在了主干道上，破坏了完美的望远镜求和式~\eqref{eq:resnet-fwd}；He 等人在 ResNet v2（Identity Mappings）中把 BN 和 ReLU 挪进残差支路内部（\texttt{BN -> ReLU -> Conv -> BN -> ReLU -> Conv}），让主干道变成纯粹的加法 $x_{l+1} = x_l + \mathcal{F}(x_l)$，使 1000 层网络也能丝滑收敛！你会在第 4 章立刻发现，当今所有大语言模型（GPT-3、LLaMA、DeepSeek）所采用的 \textbf{Pre-Norm 残差流} $x \leftarrow x + \operatorname{Attn}(\operatorname{Norm}(x))$，正是 ResNet v2 洁净高速公路的直系传人！
+\end{enumerate}
+
+在工程细节上，ResNet-50/101/152 为了在高通道数下控制计算量，采用了\textbf{瓶颈块（Bottleneck Block）}：$1\times 1$ 降维（如 $256 \to 64$）$\to 3\times 3$ 空间卷积（$64 \to 64$）$\to 1\times 1$ 升维（$64 \to 256$）；当跨阶段下采样导致空间尺寸或通道数变化时，在跳跃连接上放置一个 $1\times 1$ 线性投影 $W_s$ 对齐维度：$x_{l+1} = W_s x_l + \mathcal{F}(x_l)$。
+
+\section{实测验证：24 层直筒网络 vs ResNet 梯度实测}
+\label{sec:exp-resnet}
+
+为了定量验证定理~\ref{thm:resnet-highway}，我们运行 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp3\_resnet\_grad\_highway}：构建一个 $L = 24$ 层、宽 $D = 64$、批量 $B = 32$ 的深度网络，每层权重独立采样自 $W_l \sim \mathcal{N}(0, (0.65/\sqrt{D})^2)$（故意模拟略低于临界点的收缩权重，常见于训练中后期或饱和非线性），对比：
+\begin{itemize}
+  \item \textbf{Plain 直筒网络}：$h_l = \tanh(h_{l-1} W_l)$；
+  \item \textbf{ResNet 残差网络}：$h_l = h_{l-1} + 0.35\,\tanh(h_{l-1} W_l)$。
+\end{itemize}
+在顶层施加均方损失 $\mathcal{L} = \frac{1}{BD}\norm{h_{24}}_F^2$ 并执行一次反向传播，读取每一层激活梯度 $\norm{\nabla_{h_l} \mathcal{L}}_F$。实测文件 \texttt{data/resnet\_grad.csv} 给出了触目惊心的对比（绘制于图~\ref{fig:resnet-grad}）：
+\begin{itemize}
+  \item {\rightskip=0pt plus 1em\relax \textbf{24 层 Plain 直筒网络}：由于前向激活已先经历 24 层收缩，第 24 层顶层梯度仅为 \textbf{\texttt{9.10e-07}}（\texttt{9.1049e-07}）；沿着反向路径回传 23 层后，梯度按指数律狂泻，到达第 1 层时仅剩 \textbf{\texttt{1.78e-10}}（\texttt{1.7770e-10}）——底层权重几乎完全冻结！\par}
+  \item \textbf{24 层 ResNet 残差网络}：第 24 层顶层梯度为 \textbf{\texttt{5.91e-02}}（\texttt{5.9071e-02}），沿着恒等高速公路回传至第 1 层时不仅没有衰减，还稳健维持在 \textbf{\texttt{1.01e-01}}（\texttt{1.0068e-01}）——第 1 层梯度幅值比直筒网络足足高出\textbf{近九个数量级（$5.7 \times 10^8$ 倍）}！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{semilogyaxis}[
+    width=0.86\linewidth, height=6.5cm,
+    xlabel={网络层号 $l$（梯度由第 24 层反向传向第 1 层）},
+    ylabel={激活梯度范数 $\norm{\partial \mathcal{L}/\partial h_l}_F$（对数刻度）},
+    xmin=0.5, xmax=24.5, ymin=5e-11, ymax=5e-1,
+    xtick={1,4,8,12,16,20,24},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.70)}, anchor=east, font=\scriptsize, fill=white, draw=tealLine, legend cell align=left}
+  ]
+    \addplot[teal, very thick, mark=*, mark size=1.7pt]
+      table[x=layer, y=resnet_grad, col sep=comma]{data/resnet_grad.csv};
+    \addlegendentry{ResNet（24 层）：$5.91\times 10^{-2}$ 至 $1.01\times 10^{-1}$}
+
+    \addplot[ochre, very thick, mark=square*, mark size=1.6pt]
+      table[x=layer, y=plain_grad, col sep=comma]{data/resnet_grad.csv};
+    \addlegendentry{Plain（24 层）：$9.10\times 10^{-7}$ 至 $1.78\times 10^{-10}$}
+
+    % Annotate 9 orders of magnitude gap at layer 1
+    \draw[{Stealth[length=2mm]}-{Stealth[length=2mm]}, navy, thick]
+      (axis cs:2.0, 2.5e-10) -- (axis cs:2.0, 6.5e-2)
+      node[midway, right=2pt, font=\scriptsize\sffamily\bfseries, color=navy, fill=white, inner sep=1.5pt, align=left] {相差约 $5.7\times 10^8$ 倍\\（近 9 个数量级）};
+  \end{semilogyaxis}
+\end{tikzpicture}
+\caption{24 层 Plain 直筒网络与 ResNet 反向激活梯度范数实测对比（读取自 \texttt{data/resnet\_grad.csv}）。直筒网络在半对数坐标中呈指数级滑坡，而 ResNet 依托恒等跳跃连接将梯度完整送抵第 1 层。}
+\label{fig:resnet-grad}
+\end{figure}
+
+\section{循环神经网络：BPTT、梯度病理与 LSTM 时间高速公路}
+\label{sec:rnn-lstm}
+
+自然语言、音频波形与时间序列具有与图像截然不同的归纳偏置：\textbf{序列长度 $T$ 可变}，且信息按时间步 $t = 1, \dots, T$ 因果演化。循环神经网络（RNN）的思路是在\textbf{时间维度上共享同一组权重}，维护一个动态隐藏状态 $h_t \in \R^d$ 来摘要迄今为止的全部历史。
+
+\subsection{Elman RNN 与随时间反向传播（BPTT）的精确推导}
+
+标准单层 Elman RNN 的前向递推为（初始状态 $h_0 = \mathbf{0}$）：
+\begin{equation}
+  a_t = W_{xh} x_t + W_{hh} h_{t-1} + b_h, \qquad
+  h_t = \tanh(a_t), \qquad
+  \hat{y}_t = W_{hy} h_t + b_y,
+  \label{eq:elman-rnn}
+\end{equation}
+其中总损失为各时间步损失之和 $\mathcal{L} = \sum_{t=1}^{T} \mathcal{L}_t(\hat{y}_t, y_t)$。由于同一矩阵 $W_{hh}$ 在每一个时间步 $k = 1, \dots, T$ 都被复用，沿时间展开后的计算图就是一个深度为 $T$、权重共享的 DAG！
+
+应用第~\ref{ch:mlp-autodiff} 章的多分支梯度累加公式~\eqref{eq:vjp}，第 $t$ 步的损失 $\mathcal{L}_t$ 对循环权重 $W_{hh}$ 的贡献，必须累加它在每一个更早时间步 $k \le t$ 上的直接作用：
+\begin{equation}
+  \frac{\partial \mathcal{L}}{\partial W_{hh}}
+  = \sum_{t=1}^{T} \sum_{k=1}^{t}
+    \frac{\partial \mathcal{L}_t}{\partial h_t}
+    \left(\prod_{j=k+1}^{t} \frac{\partial h_j}{\partial h_{j-1}}\right)
+    \frac{\partial^+ h_k}{\partial W_{hh}},
+  \label{eq:bptt}
+\end{equation}
+其中 $\frac{\partial^+ h_k}{\partial W_{hh}}$ 表示固定 $h_{k-1}$ 时 $h_k$ 对第 $k$ 步所用 $W_{hh}$ 的“直接局部偏导”。
+
+现在盯紧式~\eqref{eq:bptt} 中间的核心连乘因子——跨时间步 $(t - k)$ 的状态传输雅可比：
+\begin{equation}
+  \frac{\partial h_j}{\partial h_{j-1}} = \diag\!\left(1 - h_j^2\right) W_{hh},
+  \qquad\Longrightarrow\qquad
+  \frac{\partial h_T}{\partial h_t} = \prod_{j=t+1}^{T} \diag\!\left(1 - h_j^2\right) W_{hh},
+  \label{eq:bptt-jacobian}
+\end{equation}
+（注意此处 $h_j = \tanh(W_{hh} h_{j-1} + \dots)$ 为列向量，故雅可比矩阵第 $(p,q)$ 项为 $\frac{\partial (h_j)_p}{\partial (h_{j-1})_q} = (1 - (h_j)_p^2)(W_{hh})_{pq}$，即 $\diag(1 - h_j^2) W_{hh}$；在左乘行向量或对列向量伴随量回传时，对应转置 $W_{hh}^\top \diag(1 - h_j^2)$。）
+
+\begin{thmBox}
+\begin{proposition}[BPTT 长期依赖的奇异值判定条件（Pascanu et al., 2013）]
+\label{prop:bptt-spectral}
+设 $\gamma = \sup_a \abs{\tanh'(a)} = 1$，记 $W_{hh}$ 的最大奇异值为 $\sigma_{\max}(W_{hh}) = \norm{W_{hh}}_2$。则跨越 $\Delta t = T - t$ 个时间步的梯度传播范数满足上界：
+\begin{equation}
+  \norm{\frac{\partial h_T}{\partial h_t}}_2
+  \le \prod_{j=t+1}^{T} \norm{\diag(1 - h_j^2)}_2 \norm{W_{hh}}_2
+  \le \left(\gamma\,\sigma_{\max}(W_{hh})\right)^{T - t}.
+  \label{eq:bptt-bound}
+\end{equation}
+由此：
+\begin{itemize}
+  \item 若 $\sigma_{\max}(W_{hh}) < 1$（再叠加 $\tanh'$ 在非零处严格小于 $1$），长期梯度必然以指数速度\textbf{消失}，网络只能学到最近几步的局部关联，彻底遗忘远距离上下文；
+  \item 反之，若 $\sigma_{\max}(W_{hh}) > 1$（且特征方向未被 $\tanh'$ 压制），梯度沿时间呈指数\textbf{爆炸}，引发剧烈数值震荡。
+\end{itemize}
+\end{proposition}
+\end{thmBox}
+
+面对梯度的两极病态，工程上有截然不同的对策：
+\begin{itemize}
+  \item \textbf{对抗梯度爆炸：全局梯度范数裁剪（Gradient Norm Clipping）}。给定阈值 $\tau > 0$（如 $\tau = 1.0$），计算全体参数梯度拼成的总欧氏范数 $\norm{g}_2$，若超标则沿原方向等比缩短：
+  \[
+    g \leftarrow \frac{\tau}{\max(\tau, \norm{g}_2)}\, g.
+  \]
+  注意：梯度裁剪保持梯度\textbf{方向不变}而仅限制步长上限，是解决梯度爆炸（以及大模型训练中偶发损失尖刺）的特效药；但对已经跌成 $10^{-10}$ 的梯度消失却无能为力！
+  \item \textbf{对抗梯度消失：重构时间拓扑——LSTM 与 GRU 门控高速公路}！
+\end{itemize}
+
+\subsection{LSTM 与 GRU：时间维度上的残差高速公路}
+
+早在 ResNet 诞生近二十年前，Hochreiter 与 Schmidhuber（1997）就在\textbf{长短期记忆网络（LSTM）}中独立发现了完全同构的数学思想！LSTM 开辟了一条独立于隐藏状态 $h_t$ 的\textbf{细胞状态主干道（Cell State）} $c_t \in \R^d$，并设置三个受 Sigmoid 控制的软门控（值域 $(0,1)$）：\textbf{遗忘门 $f_t$}、\textbf{输入门 $i_t$} 与\textbf{输出门 $o_t$}：
+\begin{align}
+  f_t &= \sigma\!\left(W_f [h_{t-1}, x_t] + b_f\right), &
+  i_t &= \sigma\!\left(W_i [h_{t-1}, x_t] + b_i\right), \label{eq:lstm-gates1} \\
+  \tilde{c}_t &= \tanh\!\left(W_c [h_{t-1}, x_t] + b_c\right), &
+  o_t &= \sigma\!\left(W_o [h_{t-1}, x_t] + b_o\right), \label{eq:lstm-gates2} \\
+  c_t &= f_t \had c_{t-1} + i_t \had \tilde{c}_t, &
+  h_t &= o_t \had \tanh(c_t). \label{eq:lstm-cell}
+\end{align}
+
+请盯住式~\eqref{eq:lstm-cell} 中细胞状态的\textbf{加法更新} $c_t = f_t \had c_{t-1} + i_t \had \tilde{c}_t$！计算它相邻时间步的直接导数（忽略经由 $h_{t-1}$ 绕回门控的次级路径）：
+\[
+  \frac{\partial c_t}{\partial c_{t-1}} = \diag(f_t) + \text{（门控间接项）}.
+\]
+将它与 ResNet 的 $x_{l+1} = x_l + \mathcal{F}(x_l)$ 并排放在一起（见图~\ref{fig:arch-compare}）！你瞬间就会豁然开朗：\textbf{LSTM 的细胞状态 $c_t$ 正是时间轴上的加性门控残差高速公路}！
+\begin{itemize}
+  \item 当网络需要长距离记住某个早期主语或关键事实时，只需学到遗忘门 $f_t \approx \mathbf{1}$（因此实践中常将遗忘门偏置 $b_f$ 初始化为 $+1.0$ 甚至 $+2.0$，让初始阶段默认保留记忆！），细胞状态梯度就能以接近 $1$ 的因子沿时间无损回传数十上百步；
+  \item 当语义切换到新段落时，网络将 $f_t \approx \mathbf{0}$ 清空旧记忆，同时打开输入门 $i_t$ 写入新内容。
+\end{itemize}
+
+Cho 等人（2014）提出的\textbf{门控循环单元（GRU）}把细胞状态与隐藏状态合二为一，用仅两个门（更新门 $z_t$ 与重置门 $r_t$）实现几乎同等的长期记忆效果，参数量减少 $25\%$：
+\[
+  z_t = \sigma(W_z[h_{t-1}, x_t]), \quad
+  r_t = \sigma(W_r[h_{t-1}, x_t]), \quad
+  \tilde{h}_t = \tanh(W_h[r_t \had h_{t-1}, x_t]), \quad
+  h_t = (1 - z_t) \had h_{t-1} + z_t \had \tilde{h}_t.
+\]
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=1.4mm, draw=teal, thick, fill=tealLight,
+              minimum width=23mm, minimum height=7.5mm, align=center, font=\sffamily\scriptsize, text=ink},
+  op/.style={circle, draw=navy, thick, fill=navyLight, inner sep=1.6pt, font=\scriptsize\bfseries, text=navy},
+  gate/.style={rectangle, rounded corners=1.2mm, draw=ochre, thick, fill=ochreLight,
+               minimum width=11mm, minimum height=6mm, align=center, font=\scriptsize\bfseries, text=ochre},
+  arr/.style={-{Stealth[length=2mm]}, thick, slate},
+  hwy/.style={-{Stealth[length=2.3mm]}, very thick, tealDark}
+]
+  % ===== (a) Plain Block =====
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\sffamily\bfseries\small, color=slate] at (1.3, 4.9) {(a) Plain 直筒块};
+    \node[font=\scriptsize, color=ink] (px0) at (1.3, 0.2) {$x_l$};
+    \node[box] (p1) at (1.3, 1.4) {Conv / Linear + BN};
+    \node[box, fill=ochreLight, draw=ochre] (p2) at (1.3, 2.55) {ReLU / $\tanh$};
+    \node[box] (p3) at (1.3, 3.7) {Conv / Linear + BN};
+    \node[font=\scriptsize, color=ink] (px1) at (1.3, 4.45) {$x_{l+1}$};
+    \draw[arr] (px0) -- (p1);
+    \draw[arr] (p1) -- (p2);
+    \draw[arr] (p2) -- (p3);
+    \draw[arr] (p3) -- (px1);
+    \node[font=\scriptsize, color=ochre, align=center] at (1.3, -0.55) {梯度连乘 $\prod J_i$\\深层指数衰减};
+  \end{scope}
+
+  % ===== (b) Pre-Activation ResNet Block =====
+  \begin{scope}[shift={(4.4,0)}]
+    \node[font=\sffamily\bfseries\small, color=tealDark] at (1.7, 4.9) {(b) Pre-Act ResNet 块};
+    \node[font=\scriptsize, color=ink] (rx0) at (0.3, 0.2) {$x_l$};
+    \node[box, minimum width=22mm] (r1) at (2.3, 1.3) {BN $\to$ ReLU};
+    \node[box, minimum width=22mm] (r2) at (2.3, 2.3) {Conv ($W_1$)};
+    \node[box, minimum width=22mm] (r3) at (2.3, 3.3) {BN $\to$ ReLU $\to$ Conv};
+    \node[op] (radd) at (0.3, 3.95) {$+$};
+    \node[font=\scriptsize, color=ink] (rx1) at (0.3, 4.55) {$x_{l+1}$};
+
+    % Clean identity highway on the left
+    \draw[hwy] (rx0) -- (radd);
+    \draw[hwy] (radd) -- (rx1);
+    \node[rotate=90, font=\tiny\sffamily\bfseries, color=tealDark] at (-0.08, 2.15) {恒等梯度高速公路 ($I$)};
+
+    % Residual branch
+    \draw[arr] (0.3, 0.65) -| (r1.south);
+    \draw[arr] (r1) -- (r2);
+    \draw[arr] (r2) -- (r3);
+    \draw[arr] (r3.north) |- (radd.east);
+    \node[font=\scriptsize, color=tealDark, align=center] at (1.5, -0.55) {空间深度主干道\\$\frac{\partial x_L}{\partial x_l} = I + \frac{\partial}{\partial x_l}\sum \mathcal{F}_i$};
+  \end{scope}
+
+  % ===== (c) LSTM Cell State Highway =====
+  \begin{scope}[shift={(9.3,0)}]
+    \node[font=\sffamily\bfseries\small, color=navy] at (3.6, 4.9) {(c) LSTM 细胞状态时间高速公路};
+    % Top cell state highway
+    \node[font=\scriptsize\bfseries, color=tealDark] (ct0) at (0.1, 3.85) {$c_{t-1}$};
+    \node[op] (cmul) at (1.7, 3.85) {$\had$};
+    \node[op] (cadd) at (4.1, 3.85) {$+$};
+    \node[font=\scriptsize\bfseries, color=tealDark] (ct1) at (6.8, 3.85) {$c_t$};
+
+    \draw[hwy] (ct0) -- (cmul);
+    \draw[hwy] (cmul) -- (cadd);
+    \draw[hwy] (cadd) -- (ct1);
+    \node[font=\tiny\sffamily\bfseries, color=tealDark] at (3.4, 4.25) {时间加性高速公路（$f_t \approx 1$ 时梯度直通）};
+
+    % Gates below (generous spacing, zero touching)
+    \node[gate] (gf) at (1.7, 1.8) {$f_t$ ($\sigma$)};
+    \node[gate] (gi) at (3.2, 1.8) {$i_t$ ($\sigma$)};
+    \node[gate, draw=teal, fill=tealLight, text=tealDark] (gc) at (4.8, 1.8) {$\tilde{c}_t$ ($\tanh$)};
+    \node[gate] (go) at (6.4, 1.8) {$o_t$ ($\sigma$)};
+
+    \node[op] (imul) at (4.1, 2.8) {$\had$};
+    \node[op] (omul) at (6.4, 2.8) {$\had$};
+    \node[font=\scriptsize, color=ink] (ht0) at (0.1, 0.75) {$h_{t-1}, x_t$};
+    \node[font=\scriptsize\bfseries, color=navy] (ht1) at (7.3, 2.8) {$h_t$};
+
+    \draw[arr] (ht0.east) -- (6.4, 0.75);
+    \draw[arr] (1.7, 0.75) -- (gf.south);
+    \draw[arr] (3.2, 0.75) -- (gi.south);
+    \draw[arr] (4.8, 0.75) -- (gc.south);
+    \draw[arr] (6.4, 0.75) -- (go.south);
+
+    \draw[arr] (gf.north) -- (cmul.south);
+    \draw[arr] (gi.north) |- (imul.west);
+    \draw[arr] (gc.north) |- (imul.east);
+    \draw[arr] (imul.north) -- (cadd.south);
+    \draw[arr] (go.north) -- (omul.south);
+    \draw[arr] (5.55, 3.85) |- node[pos=0.28, right, font=\tiny, color=slate] {$\tanh$} (omul.west);
+    \draw[arr] (omul.east) -- (ht1.west);
+
+    \node[font=\scriptsize, color=navy, align=center] at (3.6, -0.55) {时间深度主干道：$c_t = f_t \had c_{t-1} + i_t \had \tilde{c}_t$\\仍受限于 $O(T)$ 串行计算依赖};
+  \end{scope}
+\end{tikzpicture}}
+\caption{深度学习中两条伟大“加性高速公路”的结构同构对比：(a) Plain 直筒块梯度连乘衰减；(b) Pre-Activation ResNet 在\textbf{层深度维度}打开恒等高速公路；(c) LSTM 通过细胞状态 $c_t$ 在\textbf{时间维度}打开门控加性高速公路。}
+\label{fig:arch-compare}
+\end{figure}
+
+\subsection{循环网络的两个根本瓶颈：为何历史走向了 Transformer？}
+
+尽管 LSTM 与 GRU 在 2014--2017 年统治了机器翻译与语音识别，它们却存在两道难以逾越的物理天花板：
+\begin{enumerate}
+  \item \textbf{无法沿序列并行训练（$O(T)$ 串行墙）}：在式~\eqref{eq:lstm-cell} 中，计算第 $t$ 步的 $(h_t, c_t)$ 必须严格等待第 $t-1$ 步完成。面对长度 $T = 4096$ 的文本段落，拥有数万个并行核心的现代 GPU 只能被迫一步步串行推进，算力利用率极低，根本无法扩展到万亿 token 的预训练规模。
+  \item \textbf{固定维度信息瓶颈与 $O(T)$ 交互路径}：无论前面已经读入了一百个词还是一万个词，RNN/LSTM 必须把全部历史塞进同一个固定维度向量 $(h_t, c_t) \in \R^{2d}$ 中；相距 $T$ 步的两个词之间交互必须历经 $T$ 次非线性递推，信息损耗不可避免。
+\end{enumerate}
+
+能否彻底抛弃时间递推，让序列中\textbf{任意两个位置以 $O(1)$ 路径长度直接对话}，并且在训练时将全部 $T$ 个位置打包成一个大型矩阵乘法一次性并行算完？这个灵魂发问，将在下一章（第 4 章）直接引爆改变当代人工智能格局的\textbf{自注意力机制与 Transformer 架构}！
+
+下面给出一段简洁可运行的 PyTorch 实战片段，展示 \texttt{im2col} 与 \texttt{F.conv2d} 的精确数值等价性，以及 Pre-Activation 残差块的标准写法：
+
+\begin{lstlisting}[caption={\texttt{im2col}（\texttt{F.unfold}）与 \texttt{F.conv2d} 数值等价验证及 Pre-Act 残差块}]
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# 1. 验证 im2col + GEMM 与标准 2D 卷积严格等价
+x = torch.randn(2, 3, 16, 16)
+w = torch.randn(8, 3, 3, 3)                  # (C_out, C_in, kH, kW)
+y_conv = F.conv2d(x, w, stride=2, padding=1) # 输出 (2, 8, 8, 8)
+
+x_col = F.unfold(x, kernel_size=3, padding=1, stride=2)  # (2, 27, 64)
+w_row = w.view(8, -1)                                    # (8, 27)
+y_gemm = (w_row @ x_col).view(2, 8, 8, 8)
+assert torch.allclose(y_conv, y_gemm, atol=1e-5)
+
+# 2. Pre-Activation 残差块：保持恒等主干道完全洁净
+class PreActResBlock(nn.Module):
+    def __init__(self, ch: int):
+        super().__init__()
+        self.branch = nn.Sequential(
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True),
+            nn.Conv2d(ch, ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True),
+            nn.Conv2d(ch, ch, kernel_size=3, padding=1, bias=False),
+        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.branch(x)            # 纯加法高速主干道！
+\end{lstlisting}
+
+\begin{failBox}{CNN、ResNet 与 RNN 工程排错三例}
+\begin{enumerate}
+  \item \textbf{卷积尺寸向下取整与残差分支错位}：使用式~\eqref{eq:conv-out-size} 做 $S=2$ 下采样时，若输入分辨率为奇数（如 $7 \times 7$），带 $P=1$ 的 $3\times 3$ 卷积输出 $\lfloor(7+2-3)/2\rfloor + 1 = 4$，而 $2\times 2$ 池化或不同填充可能得到 $3$，导致残差相加时报维度不匹配。且在 \texttt{Conv2d} 后紧接 \texttt{BatchNorm2d} 时，卷积层务必设 \texttt{bias=False}（否则偏置会被 BN 减去均值完全抵消，纯属冗余参数）。
+  \item \textbf{Post-Norm 深度退化陷阱}：把归一化与激活放在残差加法\emph{之后}（如早期的 Post-Act ResNet 或 Post-LN Transformer），在层数加深后往往极难收敛或必须依赖极精细的 Warmup；尽量使用 Pre-Act / Pre-Norm 保持主干道为纯加法流。
+  \item \textbf{截断 BPTT 忘记 \texttt{h.detach()} 引发显存泄漏}：在长文本流式训练 RNN/LSTM 时，常按每 $K = 64$ 步执行一次截断反向传播（Truncated BPTT）。如果不把传递给下一段的隐藏状态显式切断计算图（\texttt{h = h.detach()}），PyTorch 会把从第 1 步到第 $10000$ 步的所有历史计算图永久挂在内存中，很快撑爆显存（OOM）！
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{视觉与序列的当代演进：ViT vs ConvNeXt 与选择性状态空间模型（Mamba）}
+本章介绍的卷积与循环并未被 Transformer 简单淘汰，反而在过去几年中完成了惊艳的现代复兴与大融合：
+\begin{itemize}
+  \item \textbf{Vision Transformer（ViT）与 ConvNeXt 的双雄争霸}：ViT（Dosovitskiy et al., 2020）把图像切成 $16\times 16$ 图像块（patch）当成 token 喂给纯 Transformer，在海量数据下突破了 CNN 局部感受野的天花板。但 Liu 等人（2022）随即推出 \textbf{ConvNeXt}：保留纯 CNN 结构，仅借用 Transformer 的现代配方（大 $7\times 7$ 深度可分离卷积、LayerNorm 取代 BatchNorm、GELU、倒置瓶颈与 AdamW + 强数据增强），就在 ImageNet 上与 Swin Transformer 战成平手甚至反超！这揭示了一个发人深省的事实：过去许多归功于“注意力本身”的性能跃升，有相当一部分来自更优的训练动力学与宏观模块设计。
+  \item \textbf{状态空间模型（S4 / Mamba；Gu \& Dao, 2023）}：针对 Transformer 的 $O(T^2)$ 注意力复杂度，Mamba 回归了类似 RNN 的线性递归状态方程 $h_t = \bar{A}_t h_{t-1} + \bar{B}_t x_t$，但实现了两项突破：一是通过\textbf{线性对角递推}，利用 GPU 上的\textbf{并行前缀扫描（Parallel Associative Scan）}在 $O(\log T)$ 并行深度内一次性算完全部时间步，彻底打破了非线性 RNN 的串行魔咒；二是让状态转移矩阵 $(\bar{A}_t, \bar{B}_t)$ 随当前输入 $x_t$ 动态变化（称为\textbf{选择性机制}，在数学上与 LSTM 遗忘门高度呼应），从而在推理时保持 $O(1)$ 恒定显存与 $O(T)$ 线性长上下文吞吐！
+\end{itemize}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+从第 1 章的泛化万用积木 MLP，到第 2 章的稳定训练动力学，再到本章的结构归纳偏置，我们完成了现代深度架构演进的前半程全景图：
+\begin{itemize}
+  \item \textbf{CNN} 把二维局部性与平移等变性写进共享卷积核，并用 \texttt{im2col} 与深度可分离结构榨干硬件算力；
+  \item \textbf{ResNet} 用一条洁净的恒等加法主干道在深度轴上打通了梯度高速公路，将 24 层底层梯度提升了近九个数量级；
+  \item \textbf{RNN/LSTM} 将同样的加性高速公路搬上了时间轴，但仍受困于 $O(T)$ 串行计算墙与固定容量隐状态瓶颈。
+\end{itemize}
+下一章，我们将彻底卸下串行循环的枷锁，亲手推导出缩放点积注意力、多头机制、RoPE 旋转位置编码与 KV Cache，并从零编写一个可在笔记本电脑上学会反转序列的\textbf{迷你 GPT}！
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{熟练掌握卷积尺寸、感受野、参数量与门控直觉}
+
+\begin{enumerate}
+  \item[\textbf{5.3.1}] \textbf{多层卷积的特征图尺寸、参数量与感受野手算}：某视觉主干网络接收 $224 \times 224 \times 3$ 图像，依次经过三层卷积：
+  \begin{itemize}
+    \item Conv1：$C_{\text{out}} = 64,\; k = 7,\; S = 2,\; P = 3$；
+    \item MaxPool：$k = 3,\; S = 2,\; P = 1$；
+    \item Conv2：$C_{\text{out}} = 128,\; k = 3,\; S = 1,\; P = 1$（带空洞率 $d = 2$）。
+  \end{itemize}
+  逐层计算输出特征图尺寸 $(C, H, W)$、每层可训练参数量（设 \texttt{bias=False}）以及 Conv2 输出像素在原图上的精确感受野大小。
+  \exHint{对 Conv2 先算等效核尺寸 $k_{\text{eff}} = 3 + 2(2-1) = 5$，再代入式~\eqref{eq:conv-out-size} 与式~\eqref{eq:receptive-field}（池化层同样贡献感受野增长）。}
+
+  \item[\textbf{5.3.2}] \textbf{ResNet 瓶颈块 vs 基础块的参数效率对比}：在通道数为 $C = 256$ 时，比较以下两个残差块的参数量与单像素乘加量：
+  \begin{enumerate}
+    \item 基础块（BasicBlock）：两层 $3\times 3$ 卷积（$256 \to 256 \to 256$）；
+    \item 瓶颈块（Bottleneck）：$1\times 1$ 降维（$256 \to 64$）$\to 3\times 3$ 卷积（$64 \to 64$）$\to 1\times 1$ 升维（$64 \to 256$）。
+  \end{enumerate}
+  \exHint{基础块约 $2 \times 9 \times 256^2 \approx 1.18\text{M}$ 参数；瓶颈块仅 $69{,}632$ 参数——节省了超过 $94\%$！}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{严格推导卷积反向传播、残差路径展开与循环梯度}
+
+\begin{enumerate}
+  \item[\textbf{5.3.3}] \textbf{一维卷积的反向传播与转置卷积}：考虑步幅 $S=1$、无填充的一维互相关输出 $y_i = \sum_{u=0}^{k-1} w_u x_{i+u}$。给定上游梯度 $\bar{y}$，严格推导出 $\bar{w}_u$ 与 $\bar{x}_m$ 的显式表达式，并证明：对输入的反向传播 $\bar{x}$ 恰好等价于将上游梯度 $\bar{y}$ 两端补零 $k-1$ 格后，与\textbf{空间翻转（flip）后的卷积核}做互相关！
+  \exHint{对 $\mathcal{L}(y)$ 求全微分 $d\mathcal{L} = \sum_i \bar{y}_i \sum_u w_u dx_{i+u}$，令 $m = i + u$ 交换求和次序即可一眼看出翻转核 $w_{m-i}$。}
+
+  \item[\textbf{5.3.4}] \textbf{带缩放残差分支的方差增长与 DeepNorm / $\frac{1}{\sqrt{L}}$ 缩放}：考虑 $L$ 个独立初始化的洁净残差块 $x_{l+1} = x_l + \alpha\,\mathcal{F}_l(x_l)$，假设每层输入与残差输出不相关且 $\Var(\mathcal{F}_l(x_l)) = \Var(x_l)$。
+  \begin{enumerate}
+    \item 证明第 $L$ 层激活方差满足 $\Var(x_L) = (1 + \alpha^2)^L \Var(x_0)$；
+    \item 当 $\alpha = 1$ 时，$L=100$ 层的方差将膨胀为 $2^{100}$！证明取残差分支缩放因子 $\alpha = \frac{1}{\sqrt{L}}$（这正是 GPT-2 初始化对残差输出投影层除以 $\sqrt{2 N_{\text{layers}}}$ 的来源！）可使顶层方差稳定收敛于 $e \cdot \Var(x_0)$（与深度 $L$ 无关）。
+  \end{enumerate}
+  \exHint{利用经典极限 $\lim_{L \to \infty} (1 + 1/L)^L = e$。}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{手写核心模块并复现深度与时间梯度实测}
+
+\begin{enumerate}
+  \item[\textbf{5.3.5}] \textbf{比较 Post-Act 与 Pre-Act ResNet 的 50 层梯度传播}：将实验脚本 \texttt{vol5\_experiments.py} 中的残差梯度实验 \texttt{exp3\_resnet\_grad\_highway} 扩展至 $L = 50$ 层，加入第三条曲线——Post-Activation 残差块 $h_l = \ReLU(h_{l-1} + 0.35\,\ReLU(h_{l-1} W_l))$（Kaiming 初始化）。比较 Plain、Post-Act ResNet 与 Pre-Act ResNet 从第 50 层到第 1 层的梯度范数衰减比率，验证洁净恒等主干道的优势。
+  \exHint{注意 Post-Act 中的外层 $\ReLU$ 每层约阻断一半通道的负值，在 50 层累积后同样会造成明显衰减。}
+
+  \item[\textbf{5.3.6}] \textbf{手工实现单步 LSTM 单元并测试长距离记忆复制任务}：不调用 \texttt{nn.LSTM}，仅用 \texttt{nn.Linear}（将四个门合并为单次矩阵乘以提速！）严格按照式~\eqref{eq:lstm-gates1}--\eqref{eq:lstm-cell} 实现 \texttt{MyLSTMCell}，并与 \texttt{nn.LSTMCell} 逐元素精度互验（误差 $< 10^{-6}$）。随后在“首词记忆任务”（输入长度为 $T = 40$ 的随机序列，要求在最后一步输出第 1 步的符号）上对比 Elman RNN 与 \texttt{MyLSTMCell}（分别测试遗忘门偏置 $b_f = 0$ 与 $b_f = +2.0$）的收敛速度。
+  \exHint{将 $[h_{t-1}, x_t]$ 拼接后一次性投影到 $4d$ 维，再用 \texttt{.chunk(4, dim=-1)} 切分为 $(f, i, \tilde{c}, o)$。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{深入群等变网络与并行线性递归}
+
+\begin{enumerate}
+  \item[\textbf{5.3.7}] \textbf{超越平移：旋转等变卷积（Group Equivariant CNN）}：标准 2D 卷积只对平移群 $(\mathbb{Z}^2, +)$ 等变，但对医学病理切片或卫星遥感图而言，图像旋转 $90^\circ, 180^\circ, 270^\circ$ 后的语义完全等价。查阅 Cohen 与 Welling（2016）的 $p4$ 群卷积思想：如何通过把单个 $3\times 3$ 卷积核旋转 $4$ 个角度共享参数，将特征图提升到群函数 $F(g)$（$g \in p4$）上，从而严格保证旋转等变性而不增加参数量？
+  \exHint{将标准卷积定义中的平移群求和替换为有限群 $G$ 上的群卷积 $(f *_G \psi)(g) = \sum_{h \in G} f(h)\,\psi(g^{-1} h)$。}
+
+  \item[\textbf{5.3.8}] \textbf{线性递归的并行前缀扫描（Parallel Scan）原理}：为什么 Mamba/LRU 等现代线性状态空间模型可以突破 RNN 的 $O(T)$ 串行墙？给定标量线性递推 $h_t = a_t h_{t-1} + b_t$（$t = 1, \dots, T$），定义二元运算符 $\bullet$ 作用于数对 $(a, b)$：
+  \[
+    (a_2, b_2) \bullet (a_1, b_1) := \left(a_2 a_1,\; a_2 b_1 + b_2\right).
+  \]
+  证明运算符 $\bullet$ 满足\textbf{结合律}，并解释为何结合律允许 GPU 用树状归约在仅 $O(\log_2 T)$ 个并行步内算出全部 $h_1, \dots, h_T$，而带 $\tanh$ 的非线性 Elman RNN 却无法应用此技巧！
+  \exHint{把 $h_t = a_t h_{t-1} + b_t$ 写成 $2\times 2$ 仿射矩阵乘积 $\binom{h_t}{1} = \begin{pmatrix} a_t & b_t \\ 0 & 1 \end{pmatrix}\binom{h_{t-1}}{1}$，矩阵乘法天然满足结合律！}
+\end{enumerate}

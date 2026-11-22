@@ -1,0 +1,693 @@
+\chapter[支持向量机与核技巧]{支持向量机（SVM）与核技巧}\label{ch:svm}
+\chapEpigraph{在实数域中，两个真理之间的最短路径往往要穿过复数域。}{Jacques Hadamard（雅克·阿达马）}
+
+\begin{chapIntro}{本章导读}
+第 2 章我们系统建立了拉格朗日对偶与 KKT 互补松弛理论，第 3 章又剖析了正则化与泛化误差的深层联系。现在，这两条主线将在\textbf{支持向量机（Support Vector Machine, SVM）}中迎来最辉煌的合流。
+
+SVM 的思想优雅得近乎艺术：它不满足于“把两类样本分开”，而是追问“在无穷多条分离超平面中，哪一条留出了最宽的安全缓冲带”；借助拉格朗日对偶，它把原始几何问题转化为仅依赖\textbf{样本内积}的凸二次规划，并通过 KKT 互补松弛自动筛选出极少数决定全局边界的\textbf{支持向量}；当数据在原空间线性不可分时，它顺理成章地祭出\textbf{核技巧（Kernel Trick）}——正如阿达马所言，借道高维甚至无穷维特征空间，一条在原空间盘根错节的非线性边界瞬间化为坦途。
+\end{chapIntro}
+
+% ============================================================
+\section{最大间隔分类器与规范化凸二次规划}\label{sec:svm-margin}
+% ============================================================
+
+\subsection{为什么“分开”还不够？大间隔的几何与泛化直觉}
+
+给定线性可分的二分类训练集 $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^{N}$，其中 $x_i \in \R^d$，标签约定为 $y_i \in \{-1, +1\}$。寻找一个仿射超平面
+\[
+  \mathcal{H} = \{x \in \R^d \mid w^\top x + b = 0\}, \qquad w \in \R^d \setminus \{0\},\ b \in \R,
+\]
+使得所有正样本位于一侧（$w^\top x_i + b > 0$）、所有负样本位于另一侧（$w^\top x_i + b < 0$），这等价于要求
+\[
+  y_i (w^\top x_i + b) > 0, \qquad \forall\, i = 1, \dots, N.
+\]
+一旦数据线性可分，满足上述条件的超平面便有\textbf{无穷多条}。然而从第 3 章的泛化视角来看，这些超平面绝非生而平等：
+\begin{itemize}
+  \item 如果某条超平面紧紧擦着某几个训练样本的边儿划过，哪怕测试样本只受到极微小的测量噪声扰动，就可能越过边界被误判；
+  \item 反之，若超平面稳居两类样本点云的正中央，为两侧都留出尽可能宽的\textbf{安全隔离带（Margin）}，它就能容忍更大范围的局部扰动，展现出更强的鲁棒性与更紧的泛化界。
+\end{itemize}
+
+\subsection{点到超平面的精确欧氏距离推导}
+
+要精确刻画“隔离带宽度”，必须先严格算出空间中任意一点 $x \in \R^d$ 到超平面 $\mathcal{H}: w^\top z + b = 0$ 的欧氏距离。
+
+\begin{thmBox}
+\begin{proposition}[点到超平面的有符号与无符号距离]\label{prop:svm-dist}
+设超平面 $\mathcal{H} = \{z \in \R^d \mid w^\top z + b = 0\}$，其中 $w \neq 0$。则任意点 $x \in \R^d$ 到 $\mathcal{H}$ 的最短欧氏距离为
+\begin{equation}\label{eq:point-plane-dist}
+  d(x, \mathcal{H}) = \frac{\abs{w^\top x + b}}{\norm{w}_2}.
+\end{equation}
+若 $(x_i, y_i)$ 被该超平面正确分类，其\textbf{几何间隔（Geometric Margin）}为
+\[
+  \gamma_i := \frac{y_i(w^\top x_i + b)}{\norm{w}_2} > 0.
+\]
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+首先确认 $w$ 是超平面 $\mathcal{H}$ 的法向量：对任意两点 $z_1, z_2 \in \mathcal{H}$，有 $w^\top z_1 + b = 0$ 且 $w^\top z_2 + b = 0$，两式相减得 $w^\top (z_1 - z_2) = 0$，故 $w$ 与 $\mathcal{H}$ 内一切切向量正交。
+
+设 $x_\perp \in \mathcal{H}$ 为点 $x$ 在超平面 $\mathcal{H}$ 上的正交投影，则向量 $x - x_\perp$ 平行于单位法向量 $\hat{w} := w / \norm{w}_2$，即存在唯一标量 $r \in \R$（有符号距离）使得
+\[
+  x = x_\perp + r \frac{w}{\norm{w}_2}.
+\]
+两边左乘 $w^\top$ 并加上 $b$，利用 $w^\top x_\perp + b = 0$ 与 $w^\top w = \norm{w}_2^2$：
+\[
+  w^\top x + b = (w^\top x_\perp + b) + r \frac{w^\top w}{\norm{w}_2} = r \norm{w}_2 \implies r = \frac{w^\top x + b}{\norm{w}_2}.
+\]
+因此点到超平面的最短欧氏距离即为 $\norm{x - x_\perp}_2 = \abs{r} = \abs{w^\top x + b}/\norm{w}_2$。当样本被正确分类时，$y_i$ 与 $w^\top x_i + b$ 同号，故 $y_i(w^\top x_i + b) = \abs{w^\top x_i + b}$，几何间隔即等于该点到超平面的真实欧氏距离。
+\end{proof}
+
+\subsection{尺度不变性与规范化：从非凸分式到严格凸二次规划}
+
+整个训练集上的\textbf{最小几何间隔}（简称超平面的间隔）定义为距离超平面最近的那个样本点的距离：
+\[
+  \gamma(w, b) := \min_{i=1,\dots,N} \frac{y_i(w^\top x_i + b)}{\norm{w}_2}.
+\]
+我们的目标自然是最大化 $\gamma(w, b)$：
+\[
+  \max_{w, b} \;\gamma \qquad \text{s.t.}\quad \frac{y_i(w^\top x_i + b)}{\norm{w}_2} \ge \gamma,\quad i=1,\dots,N.
+\]
+这一原始形式的分母里含 $\norm{w}_2$，约束并非凸集。但请留意一个关键的\textbf{尺度不变性（Scale Invariance）}：对任意正数 $c > 0$，将 $(w, b)$ 缩放为 $(cw, cb)$ 完全不改变超平面本身（$c(w^\top x + b) = 0 \iff w^\top x + b = 0$），也不改变任何样本的几何间隔 $\gamma_i$；但它会把\textbf{函数间隔（Functional Margin）} $\hat{\gamma}_i := y_i(w^\top x_i + b)$ 同步缩放 $c$ 倍！
+
+既然 $(w, b)$ 多出一个无关的全局缩放自由度，我们可以主动\textbf{钉死这把尺子}：令离超平面最近的样本满足函数间隔恰好等于 $1$，即
+\[
+  \hat{\gamma} := \min_{i=1,\dots,N} y_i(w^\top x_i + b) = 1.
+\]
+在这种\textbf{规范化（Canonical Hyperplane）}约定下，最小几何间隔简化为 $\gamma = \hat{\gamma}/\norm{w}_2 = 1/\norm{w}_2$，两类规范边界超平面 $w^\top x + b = +1$ 与 $w^\top x + b = -1$ 之间的安全隔离带总宽度为 $2/\norm{w}_2$（如图~\ref{fig:svm-geometry} 所示）。最大化 $1/\norm{w}_2$ 等价于极小化 $\norm{w}_2$，为了求导干净利落，进一步等价地极小化 $\frac{1}{2}\norm{w}_2^2$。
+
+\begin{defBox}
+\begin{definition}[硬间隔支持向量机原始问题（Hard-Margin SVM Primal）]\label{def:svm-primal}
+对于线性可分训练集 $\{(x_i, y_i)\}_{i=1}^{N}$（$y_i \in \{-1, +1\}$），硬间隔最大间隔分类器定义为如下凸二次规划（Quadratic Program, QP）：
+\begin{equation}\label{eq:svm-primal}
+  \min_{w \in \R^d,\, b \in \R}\; \frac{1}{2}\norm{w}_2^2
+  \qquad \text{s.t.}\quad y_i(w^\top x_i + b) \ge 1, \quad i = 1, \dots, N.
+\end{equation}
+\end{definition}
+\end{defBox}
+
+检查式~\eqref{eq:svm-primal} 的凸性：目标函数 $f(w, b) = \frac{1}{2}\norm{w}_2^2$ 关于 $w$ 是 $1$-强凸的（Hessian 矩阵对 $w$ 块为单位阵 $I_d \succ 0$），全部 $N$ 条不等式约束 $g_i(w, b) := 1 - y_i(w^\top x_i + b) \le 0$ 均为仿射函数。只要数据线性可分（即存在严格分离超平面使可行域非空），该凸 QP 的最优解 $(w^*, b^*)$ 必然存在，且法向量 $w^*$ \textbf{严格唯一}（若存在两个不同最优解 $w_1 \neq w_2$，中点 $(w_1+w_2)/2$ 同样满足所有线性约束且使 $\frac{1}{2}\norm{w}_2^2$ 严格更小，矛盾！）。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.95]
+  % Grid / axes subtle frame
+  \draw[->, >=Stealth, slate!75, thin] (-2.9, -2.0) -- (4.1, -2.0) node[right, font=\footnotesize] {$x_1$};
+  \draw[->, >=Stealth, slate!75, thin] (-2.6, -2.2) -- (-2.6, 2.8) node[above, font=\footnotesize] {$x_2$};
+
+  % Margin slab (rotated coordinate: line x2 = 0.55*x1 + 0.1)
+  % Let w = (-0.55, 1) normalized direction -> slab half-height in x2 is 0.92
+  \fill[tealLight, opacity=0.82] (-2.2, -2.03) -- (3.6, 1.16) -- (3.6, 2.74) -- (-2.2, -0.45) -- cycle;
+
+  % Decision boundary & canonical margin boundaries
+  \draw[tealDark, very thick] (-2.2, -1.24) -- (3.6, 1.95)
+    node[pos=0.95, below right, font=\footnotesize\sffamily\bfseries, text=tealDark, sloped, xshift=-10mm, yshift=-1pt] {$w^\top x + b = 0$};
+  \draw[teal, thick, dashed] (-2.2, -0.45) -- (3.6, 2.74)
+    node[pos=0.44, above, font=\scriptsize, text=teal, sloped] {$w^\top x + b = +1$};
+  \draw[ochre, thick, dashed] (-2.2, -2.03) -- (3.6, 1.16)
+    node[pos=0.76, below, font=\scriptsize, text=ochre, sloped] {$w^\top x + b = -1$};
+
+  % Width arrow perpendicular to w^\top x + b = 0
+  \draw[<->, >=Stealth, gold, very thick] (1.334, -0.087) -- (0.666, 1.127);
+  \node[font=\footnotesize\bfseries, text=gold, fill=tealLight, inner sep=1.2pt, rounded corners=1pt]
+    at (1.60, 0.42) {$\dfrac{2}{\norm{w}_2}$};
+
+  % Normal vector w from center line (placed cleanly on left away from labels & SVs)
+  \draw[->, >=Stealth, navy, very thick] (-1.45, -0.83) -- (-1.91, 0.01)
+    node[above left, font=\footnotesize\bfseries, text=navy] {$w$};
+
+  % Positive samples (y = +1): y - 0.55x >= 0.76
+  % Support vectors exactly on y = 0.55x + 0.76:
+  % (-0.8, 0.32), (1.8, 1.75)
+  \foreach \x/\y in {-0.8/0.32, 1.8/1.75} {
+    \fill[teal] (\x, \y) circle (2.8pt);
+    \draw[tealDark, thick] (\x, \y) circle (5.6pt);
+  }
+  % Non-SV positive points
+  \foreach \x/\y in {-1.8/0.9, -1.2/1.6, -0.2/1.8, 0.4/2.2, 0.9/1.9, -1.7/2.1} {
+    \fill[teal!70] (\x, \y) circle (2.6pt);
+  }
+  \node[font=\scriptsize\sffamily, text=tealDark] at (-1.55, 2.48) {正类 ($y_i = +1$)};
+
+  % Negative samples (y = -1): y - 0.55x <= -0.82
+  % Support vectors on y = 0.55x - 0.82:
+  % (0.2, -0.71), (2.4, 0.50)
+  \foreach \x/\y in {0.2/-0.71, 2.4/0.50} {
+    \fill[ochre] (\x, \y) circle (2.8pt);
+    \draw[ochre, thick] (\x, \y) circle (5.6pt);
+  }
+  % Non-SV negative points
+  \foreach \x/\y in {-0.4/-1.5, 0.8/-1.4, 1.6/-1.1, 2.5/-0.5, 3.1/0.1, 2.1/-1.5, 3.4/-0.9} {
+    \fill[ochre!70] (\x, \y) circle (2.6pt);
+  }
+  \node[font=\scriptsize\sffamily, text=ochre] at (3.11, -1.76) {负类 ($y_i = -1$)};
+
+  % Callout for Support Vectors
+  \node[font=\scriptsize\sffamily, text=ink, align=left, fill=white, draw=tealLine, rounded corners=1.5pt, inner sep=3pt]
+    (svlbl) at (-0.88, -2.78) {圆圈标记为\textbf{支持向量}\\满足 $y_i(w^\top x_i + b) = 1$ 且 $\alpha_i^* > 0$};
+  \draw[->, >=Stealth, slate, thin] (svlbl.north east) to[out=100,in=-70] (0.27, -0.90);
+\end{tikzpicture}
+\caption{硬间隔支持向量机的最大间隔几何结构。规范化超平面 $w^\top x + b = \pm 1$ 之间形成宽度为 $2/\norm{w}_2$ 的无样本安全隔离带，只有恰好压在两条虚线边界上的支持向量对决策边界起支撑作用。}
+\label{fig:svm-geometry}
+\end{figure}
+
+% ============================================================
+\section{拉格朗日对偶、KKT 互补松弛与支持向量}\label{sec:svm-dual}
+% ============================================================
+
+直接求解原始 QP~\eqref{eq:svm-primal} 在低维特征空间本不困难；但真正让 SVM 封神的，是把第 2 章的拉格朗日对偶理论工具作用上去之后发生的两个奇迹：\textbf{支持向量稀疏性}与\textbf{纯内积形式}。
+
+\begin{recallBox}{拉格朗日强对偶与 KKT 条件（第 2 章回顾）}
+对于凸优化问题 $\min_x f_0(x)\ \text{s.t.}\ g_i(x)\le 0$，若全部不等式约束均为仿射函数且可行域非空，则弱化的 Slater 条件自动满足，\textbf{强对偶性成立}（原始最优值与对偶最优值相等），且 $(x^*, \alpha^*)$ 为原始-对偶最优解的充要条件是同时满足：原始可行性 $g_i(x^*)\le 0$、对偶可行性 $\alpha_i^* \ge 0$、稳定性 $\nabla_x \mathcal{L}(x^*, \alpha^*) = 0$ 以及\textbf{互补松弛条件} $\alpha_i^* g_i(x^*) = 0$。
+\end{recallBox}
+
+\subsection{硬间隔 SVM 对偶问题的完整推导}
+
+为每条不等式约束 $1 - y_i(w^\top x_i + b) \le 0$ 引入非负拉格朗日乘子 $\alpha_i \ge 0$，构造拉格朗日函数：
+\begin{equation}\label{eq:svm-lagrangian}
+  \mathcal{L}(w, b, \alpha) = \frac{1}{2}\norm{w}_2^2 + \sum_{i=1}^{N} \alpha_i \big(1 - y_i(w^\top x_i + b)\big).
+\end{equation}
+为了计算对偶函数 $g(\alpha) = \inf_{w, b} \mathcal{L}(w, b, \alpha)$，先对无约束变量 $w$ 与 $b$ 求偏导并令其为零：
+\begin{align}
+  \nabla_w \mathcal{L}(w, b, \alpha) &= w - \sum_{i=1}^{N} \alpha_i y_i x_i = 0 \implies w = \sum_{i=1}^{N} \alpha_i y_i x_i, \label{eq:svm-w-rep}\\
+  \frac{\partial \mathcal{L}(w, b, \alpha)}{\partial b} &= -\sum_{i=1}^{N} \alpha_i y_i = 0 \implies \sum_{i=1}^{N} \alpha_i y_i = 0. \label{eq:svm-b-cond}
+\end{align}
+注意若 $\sum_{i=1}^N \alpha_i y_i \neq 0$，则 $\mathcal{L}$ 关于 $b$ 是斜率非零的线性函数，下确界为 $-\infty$。因此在 $\sum_i \alpha_i y_i = 0$ 成立的前提下，将式~\eqref{eq:svm-w-rep} 代回式~\eqref{eq:svm-lagrangian}：
+\begin{align*}
+  \mathcal{L}(w, b, \alpha)
+  &= \frac{1}{2} w^\top w + \sum_{i=1}^{N} \alpha_i - w^\top \!\left(\sum_{i=1}^{N} \alpha_i y_i x_i\right) - b \underbrace{\sum_{i=1}^{N} \alpha_i y_i}_{=0} \\
+  &= \sum_{i=1}^{N} \alpha_i - \frac{1}{2} w^\top w
+   = \sum_{i=1}^{N} \alpha_i - \frac{1}{2}\sum_{i=1}^{N}\sum_{j=1}^{N} \alpha_i \alpha_j y_i y_j x_i^\top x_j.
+\end{align*}
+由此便得到 SVM 著名的\textbf{拉格朗日对偶问题}。
+
+\begin{thmBox}
+\begin{theorem}[硬间隔 SVM 的拉格朗日对偶与支持向量定理]\label{thm:svm-dual}
+若训练集线性可分，则原始问题~\eqref{eq:svm-primal} 与如下对偶二次规划之间强对偶成立（零对偶间隙）：
+\begin{equation}\label{eq:svm-dual}
+  \max_{\alpha \in \R^N}\; \sum_{i=1}^{N} \alpha_i - \frac{1}{2}\sum_{i=1}^{N}\sum_{j=1}^{N} \alpha_i \alpha_j y_i y_j\, (x_i^\top x_j)
+  \qquad \text{s.t.}\quad \alpha_i \ge 0\ (\forall i),\quad \sum_{i=1}^{N} \alpha_i y_i = 0.
+\end{equation}
+设 $\alpha^*$ 为对偶最优解，记支持向量下标集 $\mathcal{S} := \{i \mid \alpha_i^* > 0\}$。则：
+\begin{enumerate}
+  \item \textbf{权重表示}：$w^* = \sum_{i \in \mathcal{S}} \alpha_i^* y_i x_i$；
+  \item \textbf{互补松弛与边界紧致性}：对一切 $i \in \mathcal{S}$，必有 $y_i((w^*)^\top x_i + b^*) = 1$（恰好落在间隔边界上）；对一切满足 $y_i((w^*)^\top x_i + b^*) > 1$ 的非边界样本，必有 $\alpha_i^* = 0$；
+  \item \textbf{截距恢复}：任取 $s \in \mathcal{S}$，由 $y_s((w^*)^\top x_s + b^*) = 1$ 且 $y_s^2 = 1$ 得
+  \[
+    b^* = y_s - (w^*)^\top x_s = y_s - \sum_{i \in \mathcal{S}} \alpha_i^* y_i\, (x_i^\top x_s);
+  \]
+  \item \textbf{删除不变性}：将所有非支持向量（$i \notin \mathcal{S}$）从训练集中彻底删除后重新训练，最优超平面 $(w^*, b^*)$ \textbf{保持绝对不变}。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由于原始目标函数为凸函数、全部 $N$ 条约束均为仿射函数且线性可分保证可行域非空，第 2 章的仿射 Slater 条件满足，故强对偶成立且原始-对偶最优解 $(w^*, b^*, \alpha^*)$ 满足全套 KKT 条件。
+(1) 直接来自稳定性条件~\eqref{eq:svm-w-rep} 并剔除 $\alpha_i^* = 0$ 的项；
+(2) 直接来自 KKT 互补松弛条件 $\alpha_i^* \big(1 - y_i((w^*)^\top x_i + b^*)\big) = 0$：若 $\alpha_i^* > 0$，括号内因子必为零；反之若 $y_i((w^*)^\top x_i + b^*) > 1$，则括号内非零，迫使 $\alpha_i^* = 0$；
+(3) 将 $y_s((w^*)^\top x_s + b^*) = 1$ 两边同乘 $y_s \in \{-1, +1\}$ 立即得 $b^* = y_s - (w^*)^\top x_s$（工程上常对全部 $s \in \mathcal{S}$ 取平均 $b^* = \frac{1}{|\mathcal{S}|}\sum_{s \in \mathcal{S}}(y_s - \sum_{i\in\mathcal{S}}\alpha_i^* y_i x_i^\top x_s)$ 以抵消浮点误差）；
+(4) 删去所有 $i \notin \mathcal{S}$ 的样本后，其余样本对应的 $(w^*, b^*, \{\alpha_i^*\}_{i\in\mathcal{S}})$ 依然完整满足缩减问题的所有 KKT 条件（原始可行性、对偶可行性、稳定性与互补松弛丝毫不受影响），由凸问题 KKT 的充分性可知它仍是缩减问题的全局最优解！
+\end{proof}
+
+请停下来体会定理~\ref{thm:svm-dual} 第 (4) 条的震撼力：哪怕训练集有 10 万个样本，只要其中 99{,}950 个远离边界，把它们全部扔进垃圾桶，最大间隔超平面纹丝不动！整个分类器的全部记忆都被压缩进了极少数\textbf{支持向量（Support Vectors）}之中。
+
+\subsection{手工完整推演：二维 3 点 SVM 与第 4 点的删除不变性}
+
+\begin{example}[手工解对偶 QP 求 $\alpha^*, w^*, b^*$]\label{ex:svm-hand}
+考虑二维平面上的 3 个训练样本：
+\[
+  x_1 = \begin{bmatrix}0 \\ 0\end{bmatrix},\ y_1 = -1; \qquad
+  x_2 = \begin{bmatrix}2 \\ 0\end{bmatrix},\ y_2 = +1; \qquad
+  x_3 = \begin{bmatrix}0 \\ 2\end{bmatrix},\ y_3 = +1.
+\]
+我们直接通过求解对偶问题~\eqref{eq:svm-dual} 算出最优解，再检验加入第 4 个样本 $x_4 = (3, 2)^\top, y_4 = +1$ 时的表现。
+\end{example}
+
+\paragraph{第 1 步：写出内积矩阵与对偶目标}
+计算样本间的 Gram 内积矩阵 $G_{ij} = x_i^\top x_j$：
+\[
+  G = \begin{bmatrix}
+    0 & 0 & 0 \\
+    0 & 4 & 0 \\
+    0 & 0 & 4
+  \end{bmatrix}.
+\]
+对偶等式约束 $\sum_{i=1}^3 \alpha_i y_i = 0$ 给出 $-\alpha_1 + \alpha_2 + \alpha_3 = 0$，即 $\alpha_1 = \alpha_2 + \alpha_3$。由于 $x_1 = (0,0)^\top$ 与所有样本内积均为零，二次项中只剩下 $(2,2)$ 与 $(3,3)$ 两项：
+\[
+  W(\alpha) = (\alpha_1 + \alpha_2 + \alpha_3) - \frac{1}{2}\big(4\alpha_2^2 + 4\alpha_3^2\big)
+  = 2\alpha_2 + 2\alpha_3 - 2\alpha_2^2 - 2\alpha_3^2.
+\]
+
+\paragraph{第 2 步：求对偶极大值}
+$W$ 关于 $\alpha_2, \alpha_3$ 完全解耦且严格凹，令偏导为零：
+\[
+  \frac{\partial W}{\partial \alpha_2} = 2 - 4\alpha_2 = 0 \implies \alpha_2^* = \frac{1}{2}; \qquad
+  \frac{\partial W}{\partial \alpha_3} = 2 - 4\alpha_3 = 0 \implies \alpha_3^* = \frac{1}{2}.
+\]
+进而 $\alpha_1^* = \alpha_2^* + \alpha_3^* = 1$。检查非负性：$\alpha^* = (1,\; \frac{1}{2},\; \frac{1}{2})^\top > 0$，三个点全部都是支持向量！
+
+\paragraph{第 3 步：还原 $(w^*, b^*)$ 与强对偶核验}
+由式~\eqref{eq:svm-w-rep}：
+\[
+  w^* = \alpha_1^* y_1 x_1 + \alpha_2^* y_2 x_2 + \alpha_3^* y_3 x_3
+      = 1(-1)\begin{bmatrix}0\\0\end{bmatrix} + \frac{1}{2}(+1)\begin{bmatrix}2\\0\end{bmatrix} + \frac{1}{2}(+1)\begin{bmatrix}0\\2\end{bmatrix}
+      = \begin{bmatrix}1 \\ 1\end{bmatrix}.
+\]
+任取支持向量 $x_1 = (0,0)^\top$ 计算截距：$b^* = y_1 - (w^*)^\top x_1 = -1 - 0 = -1$（用 $x_2$ 验算：$b^* = 1 - 2 = -1$；用 $x_3$ 验算：$b^* = 1 - 2 = -1$，三者严丝合缝）。因此最优超平面为
+\[
+  x_1 + x_2 - 1 = 0, \qquad \gamma^* = \frac{1}{\norm{w^*}_2} = \frac{1}{\sqrt{2}}, \qquad \text{隔离带总宽 } \frac{2}{\norm{w^*}_2} = \sqrt{2}.
+\]
+核验强对偶间隙：原始最优值 $\frac{1}{2}\norm{w^*}_2^2 = \frac{1}{2}(1^2 + 1^2) = 1$；对偶最优值 $W(\alpha^*) = 2(\frac{1}{2}) + 2(\frac{1}{2}) - 2(\frac{1}{4}) - 2(\frac{1}{4}) = 1$，二者精确相等！
+
+\paragraph{第 4 步：加入第 4 个非支持向量 $x_4 = (3, 2)^\top, y_4 = +1$}
+检验其在当前超平面下的函数间隔：
+\[
+  y_4 \big((w^*)^\top x_4 + b^*\big) = (+1)(3 + 2 - 1) = 4 > 1.
+\]
+该点严格落在正类规范边界之外。令 $\alpha_4^* = 0$，则 $(w^*, b^*, \alpha_1^*, \alpha_2^*, \alpha_3^*, 0)$ 满足 4 点问题的全部 KKT 条件，故最优超平面依然是 $x_1 + x_2 - 1 = 0$。
+
+% ============================================================
+\section{软间隔 SVM 与合页损失的严格等价性}\label{sec:svm-soft}
+% ============================================================
+
+\subsection{为什么需要软间隔？噪声与离群点的致命破坏}
+
+硬间隔 SVM 的约束 $y_i(w^\top x_i + b) \ge 1$ 过于刚性：在真实数据中，哪怕只有一个正样本因标注错误掉进了负类腹地，硬间隔问题就会直接\textbf{无可行解}；即使勉强线性可分，单个紧贴对手阵营的离群点也会强行扭转超平面，将整个安全隔离带挤压得惨不忍睹（典型的过拟合与高方差）。
+
+解决之道是允许每个样本付出可控的“违约金”：为每个样本 $i$ 引入非负\textbf{松弛变量（Slack Variable）} $\xi_i \ge 0$，允许其函数间隔向内退让 $\xi_i$ 的幅度，同时在目标函数中按惩罚系数 $C > 0$ 收取总违约罚金：
+\begin{equation}\label{eq:svm-soft-primal}
+  \min_{w,\, b,\, \xi}\; \frac{1}{2}\norm{w}_2^2 + C\sum_{i=1}^{N} \xi_i
+  \qquad \text{s.t.}\quad y_i(w^\top x_i + b) \ge 1 - \xi_i,\quad \xi_i \ge 0,\quad i = 1,\dots,N.
+\end{equation}
+这里的 $\xi_i$ 具有清晰的几何分层意义：$\xi_i = 0$ 表示样本位于正确一侧的间隔边界上或边界外；$0 < \xi_i < 1$ 表示样本侵入了隔离带但仍被正确分类；$\xi_i \ge 1$ 则表示样本已越过决策边界（或压在边界上）遭到误分类。
+
+\subsection{盒式约束对偶与三类乘子的完整刻画}
+
+为两类不等式约束分别引入拉格朗日乘子 $\alpha_i \ge 0$ 与 $\mu_i \ge 0$，写出软间隔拉格朗日函数：
+\[
+  \mathcal{L}(w, b, \xi, \alpha, \mu)
+  = \frac{1}{2}\norm{w}_2^2 + C\sum_{i=1}^{N}\xi_i
+  + \sum_{i=1}^{N}\alpha_i\big(1 - \xi_i - y_i(w^\top x_i + b)\big) - \sum_{i=1}^{N}\mu_i \xi_i.
+\]
+对原始变量 $w, b, \xi_i$ 求偏导置零：
+\begin{align*}
+  \nabla_w \mathcal{L} = 0 &\implies w = \sum_{i=1}^{N}\alpha_i y_i x_i, \\
+  \frac{\partial \mathcal{L}}{\partial b} = 0 &\implies \sum_{i=1}^{N}\alpha_i y_i = 0, \\
+  \frac{\partial \mathcal{L}}{\partial \xi_i} = 0 &\implies C - \alpha_i - \mu_i = 0 \implies \mu_i = C - \alpha_i.
+\end{align*}
+请留意第三行导出的神奇消去：由于 $\mu_i \ge 0$ 且 $\alpha_i \ge 0$，关系式 $\mu_i = C - \alpha_i$ 直接把乘子 $\mu_i$ 从对偶问题中彻底消去，化作对 $\alpha_i$ 的\textbf{盒式约束（Box Constraint）} $0 \le \alpha_i \le C$！同时拉格朗日函数中关于 $\xi_i$ 的全部项 $(C - \alpha_i - \mu_i)\xi_i$ 恒等于零。代回后我们惊讶地发现，\textbf{软间隔 SVM 的对偶目标函数与硬间隔一字不差}：
+\begin{equation}\label{eq:svm-soft-dual}
+  \max_{\alpha \in \R^N}\; \sum_{i=1}^{N} \alpha_i - \frac{1}{2}\sum_{i=1}^{N}\sum_{j=1}^{N} \alpha_i \alpha_j y_i y_j\, (x_i^\top x_j)
+  \qquad \text{s.t.}\quad 0 \le \alpha_i \le C\ (\forall i),\quad \sum_{i=1}^{N} \alpha_i y_i = 0.
+\end{equation}
+此时两套互补松弛条件为
+\[
+  \alpha_i^*\big(1 - \xi_i^* - y_i((w^*)^\top x_i + b^*)\big) = 0, \qquad
+  (C - \alpha_i^*)\xi_i^* = 0.
+\]
+由此可以将全部训练样本精确划分为三种互斥状态（这也是 SMO 求解器判定 KKT 违背的核心依据）：
+\begin{enumerate}
+  \item $\alpha_i^* = 0$：由 $(C - 0)\xi_i^* = 0$ 得 $\xi_i^* = 0$，样本位于间隔外侧 $y_i f^*(x_i) \ge 1$，为\textbf{非支持向量}；
+  \item $0 < \alpha_i^* < C$：两项互补松弛同时生效，必有 $\xi_i^* = 0$ 且 $y_i f^*(x_i) = 1$，为\textbf{自由支持向量（Free SV）}，恰好落在规范边界上，\textbf{只有此类样本才能用来求解截距 $b^*$}；
+  \item $\alpha_i^* = C$：必有 $1 - \xi_i^* - y_i f^*(x_i) = 0$，即 $y_i f^*(x_i) = 1 - \xi_i^* \le 1$，为\textbf{受限支持向量（Bounded SV）}，位于隔离带内部或已被误分；其对 $w^*$ 的影响力被封顶在 $C$，从而天然防止单个离群点无限拉偏决策边界！
+\end{enumerate}
+
+\subsection{软间隔 SVM 与 $L_2$ 正则化合页损失的等价性}
+
+\begin{thmBox}
+\begin{theorem}[软间隔 SVM $\iff$ 正则化合页损失经验风险最小化]\label{thm:svm-hinge}
+软间隔 SVM 原始问题~\eqref{eq:svm-soft-primal} 与如下无约束凸优化问题拥有完全相同的最优超平面 $(w^*, b^*)$：
+\begin{equation}\label{eq:svm-hinge}
+  \min_{w \in \R^d,\, b \in \R}\; \frac{1}{2}\norm{w}_2^2 + C \sum_{i=1}^{N} \max\!\big(0,\; 1 - y_i(w^\top x_i + b)\big).
+\end{equation}
+其中 $\ell_{\mathrm{hinge}}(z) := \max(0, 1 - z)$ 称为\textbf{合页损失（Hinge Loss）}，$z_i = y_i(w^\top x_i + b)$ 为样本函数间隔。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对任意固定的一组超平面参数 $(w, b)$，软间隔问题~\eqref{eq:svm-soft-primal} 关于松弛变量 $\xi_1, \dots, \xi_N$ 完全分离；对每个 $i$，约束要求 $\xi_i \ge 1 - y_i(w^\top x_i + b)$ 且 $\xi_i \ge 0$，即 $\xi_i \ge \max(0,\, 1 - y_i(w^\top x_i + b))$。由于目标函数中 $\xi_i$ 的系数 $C > 0$ 严格为正，在任意给定 $(w, b)$ 下使目标最小的 $\xi_i$ 唯一取在下界处：
+\[
+  \xi_i^*(w, b) = \max\!\big(0,\; 1 - y_i(w^\top x_i + b)\big).
+\]
+将 $\xi_i^*(w, b)$ 代回原目标函数，即得无约束问题~\eqref{eq:svm-hinge}。反之，任何式~\eqref{eq:svm-hinge} 的解 $(w^*, b^*)$ 配上 $\xi_i^* := \max(0, 1 - y_i((w^*)^\top x_i + b^*))$ 均满足式~\eqref{eq:svm-soft-primal} 的全部约束且达到同一目标值，故两问题严格等价。
+\end{proof}
+
+定理~\ref{thm:svm-hinge} 将 SVM 彻底纳入了第 3 章的\textbf{正则化经验风险最小化（Regularized ERM）}大统一框架！将式~\eqref{eq:svm-hinge} 两边同除以 $C$，记 $\lambda = \frac{1}{2C}$：
+\[
+  \min_{w, b}\; \sum_{i=1}^{N} \ell_{\mathrm{hinge}}\!\big(y_i(w^\top x_i + b)\big) + \lambda \norm{w}_2^2.
+\]
+于是超参数 $C$ 的偏差-方差含义一目了然：
+\begin{itemize}
+  \item \textbf{$C$ 越大（$\lambda$ 越小）}：对误分类与间隔违规的惩罚越严厉，间隔越窄，模型逼近硬间隔 SVM——\textbf{低偏差、高方差}，容易过拟合噪声；
+  \item \textbf{$C$ 越小（$\lambda$ 越大）}：正则化越强，允许更多样本落入隔离带换取更宽的全局间隔——\textbf{高偏差、低方差}，抗噪更强但过小时会欠拟合。
+\end{itemize}
+
+图~\ref{fig:loss-compare} 将 0-1 损失、合页损失与逻辑回归对数损失画在同一坐标系下，揭示了 SVM 与逻辑回归的根本分水岭。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.84\linewidth,
+  height=5.9cm,
+  xlabel={函数间隔 $z = y(w^\top x + b)$},
+  ylabel={单样本损失 $\ell(z)$},
+  xmin=-2.2, xmax=2.8,
+  ymin=-0.12, ymax=3.45,
+  xtick={-2,-1,0,1,2},
+  ytick={0,1,2,3},
+  label style={font=\footnotesize},
+  tick label style={font=\scriptsize},
+  grid=both,
+  grid style={line width=0.25pt, draw=slate!18},
+  legend pos=north east,
+  legend style={font=\scriptsize, fill=white, fill opacity=0.92, draw=tealLine, rounded corners=1.5pt}
+]
+  % Reference axes z=0 and l=0
+  \draw[slate!55, thin] (axis cs:0, -0.12) -- (axis cs:0, 3.45);
+  \draw[slate!55, thin] (axis cs:-2.2, 0) -- (axis cs:2.8, 0);
+
+  % 0-1 Loss (discontinuous step at z=0)
+  \addplot[ochre, very thick, dashed, domain=-2.2:0, samples=2] {1};
+  \addplot[ochre, very thick, dashed, domain=0:2.8, samples=2, forget plot] {0};
+  \addplot[ochre, only marks, mark=*, mark size=1.8pt, forget plot] coordinates {(0,1)};
+  \addplot[ochre, only marks, mark=o, mark size=1.8pt, fill=white, forget plot] coordinates {(0,0)};
+  \addlegendentry{0-1 损失 $\mathbb{I}(z \le 0)$（非凸、零梯度）}
+
+  % Hinge Loss max(0, 1-z)
+  \addplot[tealDark, very thick, domain=-2.2:1, samples=2] {1 - x};
+  \addplot[tealDark, very thick, domain=1:2.8, samples=2, forget plot] {0};
+  \addlegendentry{合页损失 $\max(0, 1-z)$（$z\ge 1$ 严格为零 $\Rightarrow$ 稀疏）}
+
+  % Logistic Loss ln(1+exp(-z)) / ln(2) so it passes through (0,1)
+  \addplot[navy, thick, smooth, domain=-2.2:2.8, samples=120] {ln(1 + exp(-x))/ln(2)};
+  \addlegendentry{逻辑损失 $\log_2(1 + e^{-z})$（处处光滑、永不为零）}
+
+  % Highlight kink at z=1
+  \draw[dotted, teal, thick] (axis cs:1, 0) -- (axis cs:1, 1.35);
+  \node[font=\scriptsize, text=tealDark, align=left, fill=white, inner sep=1.5pt] at (axis cs:1.88, 0.82) {合页折点 $z=1$：\\超过安全间隔即零梯度};
+  \draw[->, >=Stealth, teal, thin] (axis cs:1.45, 0.55) -- (axis cs:1.05, 0.08);
+\end{axis}
+\end{tikzpicture}
+\caption{二分类三大损失函数关于函数间隔 $z = y(w^\top x + b)$ 的对比。0-1 损失非凸且几乎处处梯度为零；合页损失与逻辑损失均为其凸上界代理。合页损失在 $z \ge 1$ 区间彻底“躺平”为零，赋予 SVM 独有的支持向量稀疏性；逻辑损失处处光滑且尾部指数衰减，适合输出校准概率但所有样本都参与贡献梯度。}
+\label{fig:loss-compare}
+\end{figure}
+
+\begin{failBox}{工程排错：为什么使用 SVM 前几乎必须做特征标准化？}
+观察原始目标 $\frac{1}{2}\norm{w}_2^2 + C\sum_i \xi_i$：如果特征 $x^{(1)}$ 的量纲是“毫米”（数值 $10^3$ 量级），而特征 $x^{(2)}$ 是“米”（数值 $1$ 量级），为了产生相同的判别贡献，$w_1$ 只需 $10^{-3}$ 量级而 $w_2$ 需要 $1$ 量级。于是正则项 $\frac{1}{2}(w_1^2 + w_2^2)$ 会几乎只惩罚 $w_2$ 而放纵 $w_1$！进入下一节的 RBF 核 $\exp(-\gamma\norm{x-z}_2^2)$ 后灾难更剧：大尺度特征会彻底吞没欧氏距离，令其余特征形同虚设。因此，\textbf{在训练线性或核 SVM 前，务必在训练集上计算均值与标准差进行 Z-score 标准化}（并严格用训练集统计量变换测试集，避免数据泄漏）。
+\end{failBox}
+
+% ============================================================
+\section{核技巧、Mercer 正定性与非线性升维实测}\label{sec:svm-kernel}
+% ============================================================
+
+\subsection{核技巧：跳过显式高维映射的内积捷径}
+
+如果数据在原空间 $\R^d$ 中本质上线性不可分——例如内圈全是负类、外圈全是正类的\textbf{同心圆分布}——任何线性超平面都无能为力。一个自然想法是构造非线性特征映射 $\phi: \R^d \to \mathcal{H}$，把原数据抬升到更高维（甚至无穷维）的希尔伯特特征空间 $\mathcal{H}$ 中，再在新空间里做线性 SVM。
+
+但高维映射带来可怕的维数灾难：如果 $d = 100$，仅做 4 次多项式展开就需要 $\binom{100+4}{4} = 4{,}598{,}126$ 维向量，显式计算与存储 $\phi(x)$ 根本不可行！
+
+现在回头凝视对偶问题~\eqref{eq:svm-soft-dual} 与预测公式——一个令人拍案叫绝的奇迹就在眼前：
+\begin{align}
+  \max_{0 \le \alpha \le C}\;& \sum_{i=1}^{N}\alpha_i - \frac{1}{2}\sum_{i=1}^{N}\sum_{j=1}^{N}\alpha_i \alpha_j y_i y_j \inner{\phi(x_i)}{\phi(x_j)}, \qquad \text{s.t.}\quad \sum_{i=1}^{N}\alpha_i y_i = 0, \label{eq:svm-kernel-dual}\\
+  f(x) &= (w^*)^\top \phi(x) + b^* = \sum_{i \in \mathcal{S}} \alpha_i^* y_i \inner{\phi(x_i)}{\phi(x)} + b^*. \label{eq:svm-kernel-pred}
+\end{align}
+\textbf{无论是训练阶段还是预测阶段，$\phi(x)$ 从未单独出现过！它永远只以两两内积 $\inner{\phi(x)}{\phi(z)}$ 的形式成对现身！}
+
+因此，只要存在一个可在原空间直接高效计算的二元函数 $K(x, z) := \inner{\phi(x)}{\phi(z)}$（称为\textbf{核函数，Kernel Function}），我们就可以把所有 $\inner{\phi(x_i)}{\phi(x_j)}$ 替换为 $K(x_i, x_j)$，完全不必显式构造、存储或计算高维向量 $\phi(x)$——这就是享誉整个机器学习史的\textbf{核技巧（Kernel Trick）}。
+
+\subsection{两大经典核函数与无穷维特征映射的严格证明}
+
+\paragraph{1. 二次多项式核（显式验证）}
+取 $x = (x_1, x_2)^\top, z = (z_1, z_2)^\top \in \R^2$ 与常数 $c > 0$，定义二次多项式核 $K_{\mathrm{poly}}(x, z) := (x^\top z + c)^2$。将其直接代数展开：
+\begin{align*}
+  (x_1 z_1 + x_2 z_2 + c)^2
+  &= x_1^2 z_1^2 + 2 x_1 x_2 z_1 z_2 + x_2^2 z_2^2 + 2c x_1 z_1 + 2c x_2 z_2 + c^2 \\
+  &= \inner{\phi(x)}{\phi(z)},
+\end{align*}
+其中显式 6 维特征映射为
+\[
+  \phi(x) = \Big(x_1^2,\; \sqrt{2}\, x_1 x_2,\; x_2^2,\; \sqrt{2c}\, x_1,\; \sqrt{2c}\, x_2,\; c\Big)^\top \in \R^6.
+\]
+推广到一般的 $p$ 次多项式核 $(x^\top z + c)^p$：原空间求值仅需 $O(d)$ 次浮点运算，却等价于在 $O(\binom{d+p}{p})$ 维多项式空间里做精确内积！
+
+\paragraph{2. 高斯径向基核（RBF Kernel）与无穷维特征空间}
+工程中最常用的非线性核当属\textbf{高斯径向基核（RBF / Gaussian Kernel）}：
+\[
+  K_{\mathrm{RBF}}(x, z) := \exp\!\big(-\gamma \norm{x - z}_2^2\big), \qquad \gamma = \frac{1}{2\sigma^2} > 0.
+\]
+它不仅合法，而且隐式对应着一个\textbf{无穷维}特征空间！下面给出零跳步证明。
+
+\begin{thmBox}
+\begin{theorem}[RBF 核的无穷维特征映射展开]\label{thm:rbf-inf}
+对任意 $\gamma > 0$ 与 $x, z \in \R^d$，高斯核 $K_{\mathrm{RBF}}(x, z) = \exp(-\gamma\norm{x - z}_2^2)$ 可表示为平方可和序列空间 $\ell_2$ 中的内积 $\inner{\phi(x)}{\phi(z)}_{\ell_2}$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+先展开指数中的欧氏距离平方 $\norm{x - z}_2^2 = \norm{x}_2^2 + \norm{z}_2^2 - 2 x^\top z$：
+\[
+  \exp\!\big(-\gamma\norm{x - z}_2^2\big)
+  = \exp\!\big(-\gamma\norm{x}_2^2\big) \exp\!\big(-\gamma\norm{z}_2^2\big) \exp\!\big(2\gamma\, x^\top z\big).
+\]
+先看一维情形（$d = 1$）。对 $\exp(2\gamma x z)$ 作全域收敛的泰勒级数展开：
+\[
+  \exp\!\big(-\gamma(x - z)^2\big)
+  = e^{-\gamma x^2} e^{-\gamma z^2} \sum_{k=0}^{\infty} \frac{(2\gamma)^k}{k!} x^k z^k
+  = \sum_{k=0}^{\infty} \underbrace{\left(e^{-\gamma x^2}\sqrt{\frac{(2\gamma)^k}{k!}}\, x^k\right)}_{\phi_k(x)}
+                        \underbrace{\left(e^{-\gamma z^2}\sqrt{\frac{(2\gamma)^k}{k!}}\, z^k\right)}_{\phi_k(z)}.
+\]
+且 $\norm{\phi(x)}_{\ell_2}^2 = \sum_{k=0}^{\infty} \phi_k(x)^2 = e^{-2\gamma x^2} e^{2\gamma x^2} = 1 < \infty$，故 $\phi(x) \in \ell_2$ 严格良定义！
+
+对一般 $d$ 维情形，利用指数函数把和化为积的性质 $\exp(2\gamma \sum_{m=1}^d x_m z_m) = \prod_{m=1}^d \exp(2\gamma x_m z_m)$，对每一维展开泰勒级数并用多重指标 $\alpha = (\alpha_1, \dots, \alpha_d) \in \N^d$ 合并乘积：
+\[
+  K_{\mathrm{RBF}}(x, z)
+  = \sum_{\alpha \in \N^d} \phi_\alpha(x)\,\phi_\alpha(z),
+  \qquad
+  \phi_\alpha(x) := e^{-\gamma \norm{x}_2^2} \prod_{m=1}^{d} \sqrt{\frac{(2\gamma)^{\alpha_m}}{\alpha_m!}}\, x_m^{\alpha_m}.
+\]
+同样易验 $\sum_{\alpha \in \N^d} \phi_\alpha(x)^2 = K_{\mathrm{RBF}}(x, x) = 1 < \infty$。因此 RBF 核等价于把样本映射到了包含\textbf{全部阶次多项式特征}的无穷维单位球面上！
+\end{proof}
+
+\subsection{什么样的二元函数是合法核？Gram 矩阵半正定性与闭包法则}
+
+并非随便写一个对称函数 $K(x, z)$ 都能塞进对偶 QP~\eqref{eq:svm-kernel-dual}。如果核矩阵 $K_{ij} = K(x_i, x_j)$ 不是半正定的，二次项 $-\frac{1}{2}\alpha^\top (Y K Y) \alpha$ 就不再是凹函数，对偶问题会失去凸性甚至趋于 $+\infty$！
+
+\begin{thmBox}
+\begin{theorem}[Mercer 条件 / Gram 矩阵半正定判据]\label{thm:mercer}
+对称函数 $K: \mathcal{X} \times \mathcal{X} \to \R$ 是某个希尔伯特空间中内积 $K(x, z) = \inner{\phi(x)}{\phi(z)}$ 的\textbf{充要条件}（在离散有限点集层面亦称正定核判据）为：对任意有限个样本点 $x_1, \dots, x_N \in \mathcal{X}$，其所诱导的 $N \times N$ \textbf{Gram 矩阵} $K_{ij} := K(x_i, x_j)$ 都是对称半正定矩阵（$K \succeq 0$），即对任意 $c \in \R^N$，
+\begin{equation}\label{eq:gram-psd}
+  c^\top K c = \sum_{i=1}^{N}\sum_{j=1}^{N} c_i c_j K(x_i, x_j) \ge 0.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+必要性一行即证：若 $K(x_i, x_j) = \inner{\phi(x_i)}{\phi(x_j)}$，则
+\[
+  c^\top K c = \sum_{i,j} c_i c_j \inner{\phi(x_i)}{\phi(x_j)} = \norm{\sum_{i=1}^{N} c_i \phi(x_i)}_{\mathcal{H}}^2 \ge 0.
+\]
+充分性由 Moore--Aronszajn 再生核希尔伯特空间（RKHS）构造定理保证（见本节末拓展框）。在实践中，我们很少从头验证 Mercer 积分条件，而是直接利用\textbf{合法核的代数闭包法则}像搭积木一样组合复杂核：
+\begin{itemize}
+  \item \textbf{正数倍与加法}：若 $K_1, K_2$ 为合法核，$a, b \ge 0$，则 $a K_1 + b K_2$ 合法（因 $c^\top(a K_1 + b K_2)c = a c^\top K_1 c + b c^\top K_2 c \ge 0$，特征映射为加权直和 $(\sqrt{a}\phi_1, \sqrt{b}\phi_2)$）；
+  \item \textbf{逐点乘积}：$K_1(x, z) K_2(x, z)$ 合法（对应 Gram 矩阵的 Hadamard 积 $K_1 \had K_2 \succeq 0$，即舒尔乘积定理，特征映射为张量积 $\phi_1(x) \otimes \phi_2(x)$）；
+  \item \textbf{函数外积}：对任意实值函数 $h: \mathcal{X} \to \R$，$h(x) K_1(x, z) h(z)$ 合法（如 RBF 核前后的 $e^{-\gamma\norm{x}_2^2}$ 因子！）；
+  \item \textbf{正系数幂级数}：若 $K$ 合法且 $a_k \ge 0$，则 $\sum_{k=0}^{\infty} a_k K(x, z)^k$（在收敛域内，特例包括 $\exp(K(x, z))$）仍为合法核！
+\end{itemize}
+
+\subsection{同心圆非线性升维几何与实测验证}
+
+图~\ref{fig:circle-lift} 直观呈现了阿达马题记背后的升维魔术：二维平面上线性不可分的同心圆，只需增加第三维径向特征 $x_3 = x_1^2 + x_2^2$ 映射到三维抛物面上，原本纠缠的内外两圈立刻在高度轴上泾渭分明，一张水平平面 $x_3 = r_0^2$ 便一刀两断！
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}
+  % Left panel: 2D concentric circles (non-linearly separable)
+  \begin{scope}[xshift=-4.7cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=codebg!35] (-2.75,-2.35) rectangle (2.75,2.75);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0, 2.38) {原输入空间 $\R^2$：线性不可分};
+    \draw[->, >=Stealth, slate!70, thin] (-2.1, -0.05) -- (2.15, -0.05) node[right, font=\scriptsize] {$x_1$};
+    \draw[->, >=Stealth, slate!70, thin] (0, -1.80) -- (0, 1.85) node[right, font=\scriptsize] {$x_2$};
+    % Dashed nonlinear boundary circle
+    \draw[gold, thick, dashed] (0, -0.05) circle (1.02cm);
+    % Inner circle points (ochre, y = -1)
+    \foreach \ang/\r in {15/0.55, 55/0.68, 95/0.48, 138/0.72, 182/0.60, 225/0.66, 268/0.52, 310/0.70, 350/0.44, 75/0.35, 200/0.32} {
+      \fill[ochre] ({\r*cos(\ang)}, {-0.05+\r*sin(\ang)}) circle (2.2pt);
+    }
+    % Outer ring points (teal, y = +1)
+    \foreach \ang/\r in {10/1.45, 38/1.55, 68/1.38, 102/1.52, 132/1.42, 165/1.56, 198/1.40, 230/1.52, 260/1.46, 292/1.36, 322/1.54, 348/1.42} {
+      \fill[teal] ({\r*cos(\ang)}, {-0.05+\r*sin(\ang)}) circle (2.2pt);
+    }
+    \node[font=\scriptsize, text=slate] at (0, -2.06) {任何直线都无法分开内圈与外圈};
+  \end{scope}
+
+  % Center lifting arrow
+  \draw[->, >=Stealth, gold, very thick] (-1.65, 0.15) -- (1.55, 0.15)
+    node[midway, above=2pt, font=\scriptsize\bfseries, text=navy, align=center] {特征升维 $\phi$\\$(x_1, x_2) \mapsto$\\$(x_1, x_2, x_1^2+x_2^2)$};
+
+  % Right panel: 3D lifted paraboloid + separating horizontal plane
+  \begin{scope}[xshift=4.75cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=tealLight!35] (-2.85,-2.35) rectangle (2.85,2.75);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0, 2.38) {高维特征空间 $\R^3$：线性可分！};
+    % Axes
+    \draw[->, >=Stealth, slate!70, thin] (0, -1.65) -- (0, 1.88) node[right, font=\scriptsize] {$x_3 = x_1^2+x_2^2$};
+    \draw[->, >=Stealth, slate!70, thin] (-2.1, -1.65) -- (2.1, -1.65) node[right, font=\scriptsize] {$x_1$};
+    % Paraboloid silhouette
+    \draw[slate!45, thick] plot[domain=-1.72:1.72, samples=60] (\x, {-1.55 + 0.96*\x*\x});
+    % Separating horizontal hyperplane
+    \fill[gold!25, opacity=0.78] (-2.25, -0.62) -- (1.45, -0.62) -- (2.25, -0.05) -- (-1.45, -0.05) -- cycle;
+    \draw[gold, very thick] (-2.25, -0.62) -- (1.45, -0.62) -- (2.25, -0.05) -- (-1.45, -0.05) -- cycle;
+    \node[font=\scriptsize\bfseries, text=ochre!90!black] at (1.72, -0.84) {分离超平面};
+    % Inner points sitting at bottom of paraboloid (below plane)
+    \foreach \x/\y in {-0.72/-1.05, -0.45/-1.34, -0.15/-1.50, 0.22/-1.48, 0.55/-1.24, 0.78/-0.98, 0.02/-1.36, -0.35/-1.18, 0.38/-1.15} {
+      \fill[ochre] (\x, \y) circle (2.2pt);
+    }
+    % Outer points lifted high above the plane
+    \foreach \x/\y in {-1.58/0.85, -1.35/0.35, -1.12/0.55, -0.85/0.95, -0.42/0.68, 0.15/0.82, 0.65/0.92, 1.08/0.52, 1.38/0.40, 1.56/0.82} {
+      \fill[teal] (\x, \y) circle (2.2pt);
+    }
+    \node[font=\scriptsize, text=tealDark] at (0, -2.06) {水平超平面干净切开两类，投影回 $\R^2$ 即圆环边界};
+  \end{scope}
+\end{tikzpicture}}
+\caption{核升维的几何本质。原平面上线性不可分的同心圆数据经 $\phi(x_1, x_2) = (x_1, x_2, x_1^2+x_2^2)$ 映射到三维抛物面后，被一张水平超平面线性分开；RBF 核则隐式地把数据抬升至无穷维空间自动雕刻任意平滑非线性边界。}
+\label{fig:circle-lift}
+\end{figure}
+
+现在我们检阅配套脚本 \texttt{code/\allowbreak vol4\_experiments.py} 中 \texttt{exp4\_rbf\_svm\_circles} 的实测数据。实验在含径向高斯噪声的二维同心圆数据集上运行（训练集 $N_{\text{tr}} = 160$，测试集 $N_{\text{te}} = 80$；内圆半径 $r \sim \mathcal{N}(1.0, 0.28^2)$，外环半径 $r \sim \mathcal{N}(2.0, 0.30^2)$，两类在 $r \approx 1.5$ 处存在真实的径向重叠），对比线性 SVM 与固定 $C = 5.0$、不同核宽参数 $\gamma$ 的纯 NumPy 对偶 RBF-SVM（由 SMO 坐标上升求解），精确结果见表~\ref{tab:svm-circles}。
+
+\begin{table}[htbp]
+\centering
+\caption{含噪同心圆数据集（$N_{\text{tr}}=160, N_{\text{te}}=80$）上线性 SVM 与对偶 RBF-SVM（$C=5.0$）的实测对比}
+\label{tab:svm-circles}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{模型与核参数} & \textbf{支持向量数 / 总数} & \textbf{支持向量占比} & \textbf{训练准确率} & \textbf{测试准确率} \\
+\midrule
+线性 SVM（原始次梯度） & --- & --- & --- & $46.25\%$ \\
+RBF-SVM（$\gamma = 0.1$） & $57 / 160$ & $35.6\%$ & $93.75\%$ & $\mathbf{96.25\%}$ \\
+RBF-SVM（$\gamma = 0.8$） & $47 / 160$ & $29.4\%$ & $96.25\%$ & $95.00\%$ \\
+RBF-SVM（$\gamma = 12.0$） & $124 / 160$ & $77.5\%$ & $98.75\%$ & $92.50\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表~\ref{tab:svm-circles} 的每一行都是统计学习理论的活教科书：
+\begin{enumerate}
+  \item \textbf{线性模型彻底失效}：在对称同心圆上，任何直线都只能像切西瓜一样同时切穿内外圈，线性 SVM 测试准确率仅 \textbf{46.25\%}（接近随机猜测的 50\%）；
+  \item \textbf{适中核宽大获全胜}：当 $\gamma = 0.1$ 或 $0.8$ 时，RBF 核仅靠约 $30\%\text{--}36\%$ 的边界支持向量便勾勒出圆润的环形决策边界，测试准确率一跃升至 \textbf{96.25\%}（$\gamma=0.1$）与 \textbf{95.00\%}（$\gamma=0.8$）；
+  \item \textbf{过大 $\gamma$ 诱发经典过拟合}：回想 $K_{\mathrm{RBF}}(x, z) = \exp(-\gamma\norm{x-z}_2^2)$ 的物理意义——$\gamma$ 越大，每个样本周围的高斯“小山包”越尖锐、辐射半径越短。当 $\gamma = 12.0$ 时，支持向量暴增至 \textbf{124/160（77.5\%）}——模型几乎为每个训练样本都单独筑起一座孤岛，训练准确率飙升至 $98.75\%$，但测试准确率反降到 $92.50\%$！这就是“支持向量过多即过拟合警报”的直接实证。
+\end{enumerate}
+
+\subsection{可运行的纯 NumPy 对偶 RBF-SVM（SMO 算法）实现}
+
+与普通梯度下降不同，对偶问题~\eqref{eq:svm-soft-dual} 带有等式约束 $\sum_i \alpha_i y_i = 0$，不能只更新单个 $\alpha_i$。Platt 于 1998 年提出的\textbf{序列最小优化（Sequential Minimal Optimization, SMO）}巧妙地\textbf{每次同时选取一对乘子 $(\alpha_i, \alpha_j)$}，在保持 $\alpha_i y_i + \alpha_j y_j = \text{const}$ 的前提下解析求出二元二次函数的闭式最优步长并裁剪到盒式区间 $[L, H]$。下面的纯 NumPy 实现直接复现表~\ref{tab:svm-circles} 的全部结果。
+
+\begin{lstlisting}[caption={纯 NumPy 对偶 RBF-SVM 与简化 SMO 坐标上升求解器（复现表~\ref{tab:svm-circles}）},label={lst:svm-smo}]
+import numpy as np
+
+def rbf_kernel(A, B, gamma=0.8):
+    d2 = np.sum(A**2, axis=1, keepdims=True) + np.sum(B**2, axis=1) - 2.0 * (A @ B.T)
+    return np.exp(-gamma * np.maximum(d2, 0.0))
+
+def fit_rbf_svm_smo(X, y, C=5.0, gamma=0.8, epochs=35, seed=2026):
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    K = rbf_kernel(X, X, gamma=gamma)
+    alpha = np.zeros(n)
+    b = 0.0
+    for _ in range(epochs):
+        for i in range(n):
+            Ei = np.dot(alpha * y, K[:, i]) + b - y[i]
+            # Check KKT violation for alpha_i
+            if (y[i] * Ei < -1e-3 and alpha[i] < C) or (y[i] * Ei > 1e-3 and alpha[i] > 0):
+                j = (i + 1 + int(rng.integers(0, n - 1))) % n
+                Ej = np.dot(alpha * y, K[:, j]) + b - y[j]
+                ai_old, aj_old = alpha[i], alpha[j]
+                if y[i] != y[j]:
+                    L_b, H_b = max(0.0, aj_old - ai_old), min(C, C + aj_old - ai_old)
+                else:
+                    L_b, H_b = max(0.0, ai_old + aj_old - C), min(C, ai_old + aj_old)
+                if L_b == H_b:
+                    continue
+                eta = 2.0 * K[i, j] - K[i, i] - K[j, j]
+                if eta >= 0.0:
+                    continue
+                alpha[j] = np.clip(aj_old - y[j] * (Ei - Ej) / eta, L_b, H_b)
+                if abs(alpha[j] - aj_old) < 1e-5:
+                    continue
+                alpha[i] = ai_old + y[i] * y[j] * (aj_old - alpha[j])
+                b1 = b - Ei - y[i]*(alpha[i]-ai_old)*K[i,i] - y[j]*(alpha[j]-aj_old)*K[i,j]
+                b2 = b - Ej - y[i]*(alpha[i]-ai_old)*K[i,j] - y[j]*(alpha[j]-aj_old)*K[j,j]
+                if 0.0 < alpha[i] < C:   b = b1
+                elif 0.0 < alpha[j] < C: b = b2
+                else:                    b = 0.5 * (b1 + b2)
+    return alpha, b
+
+def predict_rbf_svm(X_new, X_tr, y_tr, alpha, b, gamma=0.8):
+    K_new = rbf_kernel(X_new, X_tr, gamma=gamma)
+    return np.sign(K_new @ (alpha * y_tr) + b)
+\end{lstlisting}
+
+\begin{extBox}{表示定理（Representer Theorem）、RKHS 直觉与 SMO 启发式}
+为什么核 SVM 的最优预测函数必定形如有限线性组合 $f^*(x) = \sum_{i=1}^N c_i K(x_i, x) + b$，即使特征空间 $\mathcal{H}$ 是无穷维的？这背后是泛函分析中极具威力的\textbf{表示定理（Representer Theorem）}：设 $\mathcal{H}_K$ 是由正定核 $K$ 唯一诱导的\textbf{再生核希尔伯特空间（RKHS）}，满足再生性质 $\inner{f}{K(x, \cdot)}_{\mathcal{H}_K} = f(x)$。将任意 $f \in \mathcal{H}_K$ 正交分解为 $f = f_\parallel + f_\perp$，其中 $f_\parallel \in \operatorname{span}\{K(x_1,\cdot), \dots, K(x_N,\cdot)\}$ 而 $f_\perp$ 与该子空间正交。由再生性质，$f_\perp(x_i) = \inner{f_\perp}{K(x_i,\cdot)} = 0$，故 $f_\perp$ 对所有样本的经验损失毫无影响，却严格增大了正则项 $\norm{f}_{\mathcal{H}_K}^2 = \norm{f_\parallel}^2 + \norm{f_\perp}^2$！因此任何单调递增正则化的经验风险极小化解必有 $f_\perp = 0$，即无穷维优化问题自动坍缩到了 $N$ 维有限子空间中。
+
+此外，工业级 SVM 求解器（如 \texttt{LIBSVM}）在 SMO 中并非随机挑选第二个变量 $j$，而是优先挑选使 $|E_i - E_j|$ 最大的“最大步长配对”并缓存核矩阵高频列，将计算耗时再压缩一个数量级；不过当样本量 $N > 10^5$ 时，$O(N^2)$ 核矩阵仍会成为瓶颈，此时可采用随机傅里叶特征（Random Fourier Features）显式近似 RBF 核或改用线性 SVM/树模型。
+\end{extBox}
+
+\begin{insightBox}{核方法在深度学习时代的当代回声}
+核方法从未过时，它以全新的面貌渗透进了现代深度学习：
+\begin{itemize}
+  \item \textbf{Transformer 注意力即“可学习的数据相关核”}：第 5 卷将揭示，自注意力权重 $\operatorname{softmax}(QK^\top / \sqrt{d_k})$ 本质上是以 $\exp(q_i^\top k_j / \sqrt{d_k})$ 为非归一化核函数、动态学习投影矩阵 $W_Q, W_K$ 的核平滑器；
+  \item \textbf{神经切线核（Neural Tangent Kernel, NTK）}：在无限宽极限下，梯度下降训练深度神经网络的动力学精确等价于使用固定核函数 $K_{\mathrm{NTK}}(x, z) = \inner{\nabla_\theta f_{\theta_0}(x)}{\nabla_\theta f_{\theta_0}(z)}$ 做核岭回归！理解了本章的核技巧，便拥有了透视现代神经网络泛化理论的 X 光机。
+\end{itemize}
+\end{insightBox}
+
+% ============================================================
+\section{本章习题}\label{sec:ch4-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{掌握几何间隔、规范超平面与基本核函数判别}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}]
+  \item \textbf{规范超平面与间隔计算}：给定二维二分类超平面 $3x_1 - 4x_2 + 5 = 0$，以及四个已正确分类的样本：$x_1=(1, 1)^\top\ (y_1=+1)$，$x_2=(0, 2)^\top\ (y_2=-1)$，$x_3=(3, 1)^\top\ (y_3=+1)$，$x_4=(-1, 3)^\top\ (y_4=-1)$。（1）分别计算这四个样本的函数间隔与几何间隔；（2）将 $(w, b)$ 等比例缩放使其成为规范超平面（最小函数间隔恰为 $1$），写出缩放后的 $(w_{\mathrm{can}}, b_{\mathrm{can}})$ 及对应的隔离带总宽度。
+  \exHint{先算出 $\hat{\gamma} = \min_i y_i(w^\top x_i + b)$，再将 $(w, b)$ 同除以 $\hat{\gamma}$ 即可，检查几何间隔是否保持不变。}
+
+  \item \textbf{合法核函数的快速甄别}：已知 $K_1(x, z)$ 与 $K_2(x, z)$ 是 $\R^d$ 上的合法正定核函数，逐一判断下列函数是否必为合法核，若成立请简述依据，若不成立请给出显式反例：
+  （1）$K(x, z) = 3 K_1(x, z) + 2 K_2(x, z)$；（2）$K(x, z) = K_1(x, z) - K_2(x, z)$；（3）$K(x, z) = \big(K_1(x, z) + 1\big)^3$；（4）$K(x, z) = \cos(x - z)$（$x, z \in \R$）。
+  \exHint{第 (4) 问可将 $\cos(x - z)$ 用三角和差公式展开为两项乘积之和，一眼看出显式二维特征映射 $\phi(x)$！}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{熟练手解小型对偶 QP 与分析软间隔 KKT 状态}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{一维非线性可分数据的二次核手算}：一维轴上有 3 个样本：$x_1 = -1\ (y_1 = +1)$，$x_2 = 0\ (y_2 = -1)$，$x_3 = 1\ (y_3 = +1)$，显然在原空间 $\R^1$ 线性不可分。使用特征映射 $\phi(x) = (x, x^2)^\top$（对应核函数 $K(x, z) = xz + x^2 z^2$）：（1）写出 $3\times 3$ 核矩阵 $K$；（2）手解硬间隔对偶 QP~\eqref{eq:svm-kernel-dual}，求出精确的 $\alpha_1^*, \alpha_2^*, \alpha_3^*$ 与 $b^*$；（3）写出最终判别函数 $f(x)$ 并求出原一维轴上的两个决策边界点。
+  \exHint{利用对称性 $\alpha_1 = \alpha_3$ 以及等式约束 $\alpha_1 + \alpha_3 = \alpha_2$，整个对偶问题会退化为一元二次函数极值！}
+
+  \item \textbf{软间隔支持向量状态诊断}：在某个 $C = 2.0$ 的软间隔线性 SVM 求解完毕后，得到 $w^* = (1, 0)^\top, b^* = -1$。现有四个训练样本：$A:(3, 1)^\top, y=+1$；$B:(2, -2)^\top, y=+1$；$C:(1.5, 0)^\top, y=+1$；$D:(0.5, 2)^\top, y=+1$。（1）计算各样本的函数间隔与最优松弛变量 $\xi_i^*$；（2）由 KKT 互补松弛条件判断各样本对应的对偶乘子 $\alpha_i^*$ 处于哪一区间（$=0$、$(0, C)$ 还是 $=C$）？哪几个样本可用于求解 $b^*$？
+  \exHint{对照第~\ref{sec:svm-soft} 节的三类乘子刻画，分别检验 $y_i f^*(x_i) > 1$、$=1$ 与 $<1$ 三种情形。}
+\end{enumerate}
+
+\exTier{C 层：理论证明与反例构造}{深化对偶目标几何含义、核性质与正则化联系}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{支持向量乘子之和与最大间隔的精确恒等式}：对于线性可分的硬间隔 SVM，证明最优对偶变量满足如下优雅的几何恒等式：
+  \[
+    \sum_{i=1}^{N} \alpha_i^* = \norm{w^*}_2^2 = \frac{1}{(\gamma^*)^2},
+  \]
+  其中 $\gamma^* = 1/\norm{w^*}_2$ 为最大几何间隔。进而说明为何数据类别越难以分开（间隔 $\gamma^*$ 越小），对偶变量总和必然越大。
+  \exHint{同时利用强对偶等式（原始最优值 $\frac{1}{2}\norm{w^*}_2^2$ 等于对偶最优值 $\sum_i \alpha_i^* - \frac{1}{2}\norm{w^*}_2^2$），一行即可证毕！}
+
+  \item \textbf{多项式核的特征维度与舒尔乘积合法性证明}：（1）证明任意两个对称半正定矩阵 $A, B \succeq 0$ 的逐元素乘积（Hadamard 积）$A \had B$ 依然是半正定矩阵（提示：将 $A$ 作谱分解 $A = \sum_r \lambda_r u_r u_r^\top$，计算 $c^\top (A \had B) c$）；（2）据此证明：若 $K_1, K_2$ 为合法正定核，则 $K_1(x, z) K_2(x, z)$ 必为合法正定核，并推导出 $K(x, z) = (x^\top z + c)^p$（$c \ge 0, p \in \N^+$）对任意维度 $d$ 均合法。
+  \exHint{将 $c^\top ((u_r u_r^\top) \had B) c$ 改写为 $(c \had u_r)^\top B (c \had u_r)$，再利用 $B \succeq 0$ 与 $\lambda_r \ge 0$。}
+\end{enumerate}
+
+\exTier{D 层：编程实现与实验验证}{亲手验证 SMO 求解器、次梯度与核参数敏感性}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, resume]
+  \item \textbf{原始次梯度求解线性软间隔 SVM 与对偶解一致性校验}：基于式~\eqref{eq:svm-hinge} 的合页损失目标函数，写出 $L_2$ 正则化合页损失对 $(w, b)$ 的次梯度公式，用纯 NumPy 实现批量次梯度下降（步长 $\eta_t = \eta_0 / \sqrt{t+1}$）；在一个二维线性可分加少量噪声的数据集上（$N=100$），分别运行你的原始次梯度算法与代码~\ref{lst:svm-smo} 中线性核版 SMO（$K(x, z) = x^\top z$），验证两者得到的 $(w^*, b^*)$ 与目标函数值相对误差小于 $1\%$。
+  \exHint{对合页项 $\max(0, 1 - y_i(w^\top x_i + b))$，当 $y_i(w^\top x_i + b) < 1$ 时关于 $w$ 的次梯度为 $-y_i x_i$，$>1$ 时为 $0$，恰等于 $1$ 时可取 $0$。}
+
+  \item \textbf{RBF-SVM 的 $(C, \gamma)$ 二维网格搜索与支持向量热力图}：复用 \texttt{code/\allowbreak vol4\_experiments.py} 中的含噪同心圆数据生成代码与代码~\ref{lst:svm-smo}，在 $C \in \{0.5, 5.0, 50.0\}$ 与 $\gamma \in \{0.05, 0.2, 0.8, 4.0, 12.0\}$ 的 $3 \times 5$ 网格上系统记录：（1）测试集准确率；（2）支持向量数量占比；（3）训练与测试准确率之差（过拟合间隙）。结合偏差-方差权衡分析为何“高 $C$ + 高 $\gamma$”是最危险的过拟合角落。
+  \exHint{注意固定随机种子并在每次实验前重置 \texttt{alpha} 与 \texttt{b}，可将结果整理为 $3\times 5$ 对照矩阵并与表~\ref{tab:svm-circles} 交叉核验。}
+\end{enumerate}

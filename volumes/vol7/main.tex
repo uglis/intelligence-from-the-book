@@ -1,0 +1,117 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME VII};
+
+  % Bespoke fine-art geometric Seven-Ring Astrolabe / Calibration & Scientific Synthesis motif (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.45, transform shape]
+    % Seven delicate concentric/orbital synthesis rings symbolizing Volumes I-VII
+    \draw[teal, opacity=0.14, line width=0.6pt] (0,0) circle (2.25cm);
+    \draw[navy, opacity=0.18, line width=0.7pt] (0,0) circle (1.75cm);
+    \draw[gold, opacity=0.45, line width=1.0pt] (0,0) circle (1.25cm);
+    \draw[teal, opacity=0.22, line width=0.7pt] (0,0) circle (0.75cm);
+    % Perfect calibration diagonal + empirical confidence band
+    \draw[navy, opacity=0.35, line width=0.8pt, dashed] (-1.8,-1.8) -- (1.8,1.8);
+    \draw[ochre, opacity=0.55, line width=1.2pt] (-1.7,-1.45) .. controls (-0.5,-0.95) and (0.6,0.45) .. (1.7,1.65);
+    % Seven golden orbital nodes for the 7 volumes
+    \foreach \ang in {15, 66, 118, 170, 221, 273, 324} {
+      \fill[gold, opacity=0.70] (\ang:1.75cm) circle (2.4pt);
+      \draw[teal, opacity=0.35, line width=0.5pt] (0,0) -- (\ang:1.75cm);
+    }
+    % Center compass diamond
+    \fill[tealDark, opacity=0.65] (0,0.16) -- (0.16,0) -- (0,-0.16) -- (-0.16,0) -- cycle;
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 7 卷（收官卷） \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{25}{33}\selectfont\sffamily\bfseries\color{ink}AI 科研实践、严谨评测、\\安全伦理与顶会复现}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}从统计显著性、不确定性校准与对抗鲁棒，走向可解释性、公正评测与独立研究闭环}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 Stanford CS324 / MIT 6.S897 $\cdot$ UC Berkeley CS294 Safety $\cdot$ CMU AI Research Capstone $\cdot$ \mbox{顶会审稿与复现标准}}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  borderline west={2.6pt}{0pt}{tealDark},
+  arc=2mm,
+  boxrule=0.5pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}收官卷定位：从“会跑模型”跃升为“能独立证伪与创造的 AI 研究者”}\par\vspace{1.2mm}
+\small
+前六卷为你建起完整的数理、算法、深度学习与系统大厦；本收官卷则立起科学研究的标尺与护栏——教你如何不被随机种子与刷榜幻觉欺骗、如何量化模型“知道自己不知道”的边界，并完成从顶会论文到可复现研究的闭环：
+\begin{itemize}
+  \item \textbf{统计学严谨评测与校准}：掌握 Bootstrap 置信区间、McNemar 配对检验、多重比较陷阱；严格推导恰当评分规则、温度缩放（ECE）与有限样本共形预测（Conformal Prediction）覆盖定理。
+  \item \textbf{安全、鲁棒与可解释伦理}：亲手构造 FGSM/PGD 对抗样本与对抗训练极小极大防线，剖析提示注入与差分隐私；证明积分梯度（IG）完备性公理、Shapley 值与算法公平性不可能定理。
+  \item \textbf{大模型与智能体评测}：推导无偏 \texttt{pass@k} 超几何估计量，识别数据污染、LLM 裁判偏置与 Bradley--Terry 竞技场评分机制。
+  \item \textbf{顶会复现与全七卷总图景}：建立单批过拟合自检、严格消融实验与论文写作规范，并将全七卷知识收束于一套现代智能系统的全栈解剖图。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 7 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心理论、完整证明与实测实验} \\
+\midrule
+序\quad 章 & 收官卷坐标与全七卷终极闭环 & 为什么科研规范决定上限、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 科学实验设计与统计学严谨评测 & 随机种子幻觉、Bootstrap CI、McNemar 检验、多重比较与消融设计 \\
+第 2 章 & 不确定性量化、模型校准与共形预测 & 恰当评分规则证明、ECE、温度缩放保序定理与共形预测分布无关覆盖保证 \\
+第 3 章 & 对抗鲁棒性、红队测试与大模型安全 & FGSM/PGD 攻击、极小极大对抗训练实测、提示注入边界与差分隐私 \\
+第 4 章 & 可解释性、归因公理与算法公平性 & 积分梯度完备性证明、Shapley 值、机械可解释性与公平性不可能定理 \\
+第 5 章 & 大模型与智能体评测体系剖析 & 数据污染审计、无偏 \texttt{pass@k} 推导、LLM 裁判偏置与 Arena Elo \\
+第 6 章 & 顶会精读、从零复现与全七卷总收官 & 三遍精读法、五步复现诊断协议、严格消融实测与七卷全栈解剖总图 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol7\_experiments.py} 与实测数据随本卷提供。上一卷：第 6 卷；本卷为《天书中的智能》七卷本终章。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_rigorous_eval}
+\include{chapters/ch02_calibration_conformal}
+\include{chapters/ch03_adversarial_safety}
+\include{chapters/ch04_interp_fairness}
+\include{chapters/ch05_llm_agent_eval}
+\include{chapters/ch06_repro_capstone}
+
+% ==================== Appendix: Complete Solutions ====================
+\appendix
+\ctexset{chapter={name={附录\ ,}, number=\Alph{chapter}}}
+\renewcommand{\chapWatermarkNum}{\thechapter}
+\include{chapters/app_solutions}
+
+\end{document}

@@ -1,0 +1,119 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME VI};
+
+  % Bespoke fine-art geometric Policy Trust-Region & Roofline Architecture motif (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.63, transform shape]
+    % Subtle coordinate axes & Roofline knee curve (compute ceiling + memory slope)
+    \draw[teal, opacity=0.14, line width=0.55pt] (-2.25,-1.15) -- (2.25,-1.15);
+    \draw[navy, opacity=0.22, line width=0.95pt] (-2.15,-1.15) -- (-0.55,0.85) -- (2.15,0.85);
+    \draw[teal, opacity=0.16, line width=0.6pt, dashed] (-0.55,-1.15) -- (-0.55,0.85);
+    \fill[gold, opacity=0.55] (-0.55,0.85) circle (2.2pt);
+    % Nested KL Trust-Region policy rings
+    \draw[teal, opacity=0.18, line width=0.75pt] (0.55, -0.10) circle (1.42cm);
+    \draw[gold, opacity=0.45, line width=1.0pt] (0.55, -0.10) circle (0.92cm);
+    \draw[teal, opacity=0.14, line width=0.6pt, dashed] (0.55, -0.10) circle (0.46cm);
+    % Smooth policy optimization trajectory ascending into the trust region
+    \draw[ochre, opacity=0.55, line width=1.25pt, -{Stealth[length=2.1mm]}]
+      (-1.55,-0.88) to[out=32, in=-150] (-0.35,-0.48)
+      to[out=28, in=-135] (0.45,-0.12)
+      to[out=42, in=-120] (1.12,0.42);
+    \foreach \x/\y in {-1.55/-0.88, -0.35/-0.48, 0.45/-0.12, 1.12/0.42} {
+      \fill[tealDark, opacity=0.50] (\x,\y) circle (2.0pt);
+    }
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 6 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{25}{33}\selectfont\sffamily\bfseries\color{ink}强化学习、大模型后训练与 AI 系统}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}从时序差分、PPO 与 DPO 对齐，走向 Roofline 硬件、FlashAttention 与分布式推理}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 UC Berkeley CS285 $\cdot$ Stanford CS234 / CS336 $\cdot$ CMU 10-414 / 10-703 $\cdot$ 清华智班与南大《强化学习》}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  borderline west={2.6pt}{0pt}{tealDark},
+  arc=2mm,
+  boxrule=0.5pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位：贯通“交互决策—人类对齐—底层系统”的现代 AI 工程脊梁}\par\vspace{1.2mm}
+\small
+预训练赋予模型世界知识，而真正让智能体学会复杂决策、对齐人类意图并在千万卡集群上高速运转的，是本卷的两大支柱——\textbf{现代强化学习（RL）}与\textbf{AI 计算系统（AI Systems）}：
+\begin{itemize}
+  \item \textbf{深度强化学习主线}：从无模型 MC/TD(0)、SARSA 与 Q-Learning 出发，攻克 DQN 致命三元组、策略梯度定理、基线降方差与 GAE，再到信任域 TRPO、PPO-Clip 与去 Critic 的 GRPO。
+  \item \textbf{大模型后训练与对齐}：严格推导 KL 正则 RLHF 的闭式最优策略，一步消去配分函数导出 DPO 损失；深入剖析奖励黑客（Reward Hacking）与可验证奖励推理（RLVR）。
+  \item \textbf{硬件与算子优化}：直接衔接计算机组成与操作系统，用 Roofline 模型定量区分 Prefill 计算受限与 Decode 访存受限，完整证明 FlashAttention 的在线 Softmax 分块递推。
+  \item \textbf{大规模分布式与推理压缩}：建立 ZeRO/FSDP、张量并行与流水线并行的精确显存与通信账本，结合 LoRA 低秩微调、INT8/INT4 量化与 PagedAttention 实测验证。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 6 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心理论、完整证明与实测实验} \\
+\midrule
+序\quad 章 & 本卷坐标与八校考点覆盖对照 & 从预训练迈向决策与系统、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 无模型强化学习：TD、SARSA 与 Q-Learning & MC vs TD(0)、Robbins--Monro、悬崖行走安全/最优分化与 Double Q \\
+第 2 章 & 深度价值、策略梯度与 Actor-Critic & 致命三元组与 DQN、策略梯度定理、基线零偏降方差证明与 GAE($\lambda$) \\
+第 3 章 & 信任域、PPO 裁剪与 GRPO 演进 & 重要性采样、TRPO KL 约束、PPO-Clip 梯度分情形剖析与 GRPO 群体优势 \\
+第 4 章 & 大模型后训练：SFT、RLHF、DPO 与 RLVR & Bradley--Terry、RLHF 闭式最优解、DPO 精确推导、奖励黑客与推理缩放 \\
+第 5 章 & AI 硬件、Roofline 模型与 FlashAttention & GPU 访存墙、Prefill/Decode 算术强度、显存账本与在线 Softmax 分块实测 \\
+第 6 章 & 分布式训练、LoRA、量化与高效推理 & DDP/ZeRO/TP/PP 通信显存公式、LoRA、INT8/INT4 量化与 PagedAttention \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol6\_experiments.py} 与实测数据随本卷提供。上一卷：第 5 卷；下一卷：第 7 卷《AI 科研实践、严谨评测、安全伦理与顶会复现》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_model_free_rl}
+\include{chapters/ch02_dqn_pg_ac}
+\include{chapters/ch03_trpo_ppo_grpo}
+\include{chapters/ch04_posttrain_rlhf_dpo}
+\include{chapters/ch05_hardware_roofline_flash}
+\include{chapters/ch06_dist_quant_serving}
+
+% ==================== Appendix: Complete Solutions ====================
+\appendix
+\ctexset{chapter={name={附录\ ,}, number=\Alph{chapter}}}
+\renewcommand{\chapWatermarkNum}{\thechapter}
+\include{chapters/app_solutions}
+
+\end{document}

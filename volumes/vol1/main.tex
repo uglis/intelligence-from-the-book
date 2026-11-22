@@ -1,0 +1,129 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME I};
+
+  % Bespoke fine-art geometric SVD / orthogonal projection / vector-constellation composition (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.48, transform shape]
+    % Delicate sheared lattice backdrop (linear transformation motif)
+    \begin{scope}[opacity=0.11]
+      \foreach \k in {-2,-1,0,1,2} {
+        \draw[teal, line width=0.45pt] ({-2.4 + 0.35*\k}, {-1.15 + 0.55*\k}) -- ({2.4 + 0.35*\k}, {-1.15 + 0.55*\k});
+        \draw[navy, line width=0.45pt] ({-1.9 + 0.95*\k}, -1.35) -- ({-0.9 + 0.95*\k}, 1.45);
+      }
+    \end{scope}
+
+    % Concentric rotated SVD singular ellipses
+    \begin{scope}[rotate=24]
+      \fill[teal, opacity=0.05] (0,0) ellipse (2.65cm and 1.18cm);
+      \draw[teal, opacity=0.30, line width=1.05pt] (0,0) ellipse (2.65cm and 1.18cm);
+      \draw[navy, opacity=0.22, line width=0.80pt] (0,0) ellipse (1.90cm and 0.85cm);
+      \draw[teal, opacity=0.18, line width=0.60pt] (0,0) ellipse (1.12cm and 0.50cm);
+      % Orthogonal principal singular axes (sigma_1 u_1, sigma_2 u_2)
+      \draw[gold, opacity=0.55, line width=1.15pt, -{Stealth[length=2.2mm]}] (0,0) -- (2.60, 0);
+      \draw[ochre, opacity=0.48, line width=1.05pt, -{Stealth[length=2.2mm]}] (0,0) -- (0, 1.15);
+      % Subtle orthogonal projection triangle inside the singular frame
+      \draw[navy, opacity=0.32, line width=0.8pt, dashed] (1.65, 0.92) -- (1.65, 0);
+      \draw[navy, opacity=0.30, line width=0.65pt] (1.65, 0.18) -- (1.47, 0.18) -- (1.47, 0);
+      \draw[tealDark, opacity=0.35, line width=0.85pt, -{Stealth[length=2.0mm]}] (0,0) -- (1.65, 0.92);
+      % Vector constellation nodes along the singular shell
+      \foreach \ang in {18, 62, 134, 198, 255, 318} {
+        \draw[tealLine, opacity=0.35, thin] (0,0) -- ({\ang}:2.65cm and 1.18cm);
+        \fill[gold, opacity=0.55] ({\ang}:2.65cm and 1.18cm) circle (1.5pt);
+      }
+      \fill[tealDark, opacity=0.50] (0,0) circle (1.8pt);
+      \fill[ochre, opacity=0.55] (1.65, 0.92) circle (1.6pt);
+    \end{scope}
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 1 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{24}{32}\selectfont\sffamily\bfseries\color{ink}Python/NumPy 编程、\\AI 线性代数与多元微积分}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}将基础微积分与 C 语言功底，顺滑升维为人工智能的计算与几何语言}\par
+\vspace{4.5mm}
+{\small\color{slate}融合北美四大（CMU / MIT / Stanford / UC Berkeley）与清北交南本科 AI 培养方案重构}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  arc=2mm,
+  boxrule=0.6pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位与四大编写红线}\par\vspace{1.2mm}
+\small
+本卷面向\textbf{具备基础微积分与 C 语言编程基础}的学习者（线性代数核心前置直觉已在本卷内自洽补齐），不堆砌枯燥的纯技巧题，也绝不在任何 AI 核心数学上跳步或炫技：
+\begin{itemize}
+  \item \textbf{零先修倒挂与完全自洽}：内置“零障碍线性代数前置精华”（张成、基、线性变换、秩与零空间、行列式体积直觉、特征值几何），先打通 NumPy 向量化与正交投影（第 2 章即做出首个数据拟合模型），再证对称阵谱定理并顺推半正定矩阵，彻底消灭超前引用。
+  \item \textbf{AI 视角重塑线代与微积分}：聚焦传统教材讲得浅但 AI 天天用的核心——矩阵乘法四视角与外积/张量、高维近正交、超定 vs 欠定、PSD 三大 AI 化身、SVD/PCA/伪逆、Jacobian 链式法则与矩阵微分迹技巧。
+  \item \textbf{主干扎实、选读不卡人}：每节先给 2D/3D 几何画面与手算小例，再给严格推导，明确标注“后续在哪一卷、哪个模型里用到”；高阶数值拓展统一归入可跳过的【选读拓展】框。
+  \item \textbf{四层阶梯习题 + 实测闭环}：全卷共 48 道精选习题（概念反例 / 小例手算 / 实用证明 / 可自检编码）附完整精解，所有实验数据与曲线均由本机 Python 实测生成。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 1 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心能力、下游用途与代码实战} \\
+\midrule
+序\quad 章 & 七卷本全景与八校覆盖对照 & 北美四大 + 清北交南课程共识、七卷体系坐标、本卷先修依赖 DAG \\
+第 1 章 & Python/NumPy 与矩阵乘法四视角 & C $\to$ Python 过渡、内存布局、广播防坑、外积秩 1、批处理张量与 \texttt{einsum} \\
+第 2 章 & 范数、高维几何与线性最小二乘 & 前置线代直觉、$\ell_1/\ell_2/\ell_\infty$、高维近正交、四大子空间、正交投影与多项式/岭回归 \\
+第 3 章 & 特征分解、谱定理与半正定矩阵 & 特征值几何与特征多项式、矩阵幂与 Jordan 直觉、实对称阵谱定理、PSD、条件数与特殊阵 \\
+第 4 章 & 奇异值分解、伪逆与 PCA 降维 & SVD 几何、Eckart-Young 短证、欠定最小范数解、PCA 双视角等价与图像压缩 \\
+第 5 章 & AI 多元微积分与矩阵微分 & 梯度与最速下降、Jacobian 链式法则、Hessian、拉格朗日乘子、迹技巧与 Hadamard 求导 \\
+第 6 章 & 二次型梯度下降与有限差分校验 & $0<\eta<2/\lambda_{\max}$、最优步长与病态锯齿、特征标准化实测、SGD 直觉与中心差分校验 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检要点 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol1\_experiments.py} 与实测数据随本卷提供。下一卷：第 2 卷《AI 概率论、数理统计、信息论与首个回归/分类闭环》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_python_numpy_matmul}
+\include{chapters/ch02_norms_proj_ls}
+\include{chapters/ch03_eigen_spectral_psd}
+\include{chapters/ch04_svd_pinv_pca}
+\include{chapters/ch05_multivar_matrix_calc}
+\include{chapters/ch06_gd_dynamics_gradcheck}
+
+% ==================== Back Matter / Appendix ====================
+\appendix
+\def\inappendix{}
+\include{chapters/app_solutions}
+
+\end{document}

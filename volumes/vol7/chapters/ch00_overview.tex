@@ -1,0 +1,71 @@
+\chapter*{序章：收官卷坐标与全七卷终极闭环}
+\addcontentsline{toc}{chapter}{序章：收官卷坐标与全七卷终极闭环}
+\markboth{序章\quad 收官卷坐标与全七卷终极闭环}{}
+
+\chapEpigraph{你不必相信上帝，但你应当相信“天书”的存在。}{Paul Erdős（保罗·埃尔德什，谈论记录最美证明的 \emph{THE BOOK}）}
+
+\begin{chapIntro}{收官卷的使命：给强大的算法装上科学标尺与安全护栏}
+走过前六卷——从线性空间与多元微积分、概率与信息论、经典搜索与 MDP、凸优化与统计学习、深度神经网络与扩散生成，一直到强化学习、大模型对齐与 GPU 系统——你已经掌握了构建现代人工智能系统的全套数理与工程武器。
+
+然而，真正区分“会跑代码的工程师”与“能推动领域前进的独立研究者”的，往往不是会不会再套一个更新的模型，而是四个更本质的追问：
+\begin{enumerate}
+  \item \textbf{怎么证明你的提升是真的，而不是随机种子挑出来的幻觉？}（第 1 章）
+  \item \textbf{模型给出 99\% 置信度时，它真的有 99\% 的把握吗？}（第 2 章）
+  \item \textbf{面对恶意对抗扰动、提示注入与隐私攻击，系统防线在哪里？}（第 3 章）
+  \item \textbf{我们能否解释模型为何这样决策、避免隐蔽的群体不公，并公正地评测当代大模型与顶会复现结果？}（第 4--6 章）
+\end{enumerate}
+\end{chapIntro}
+
+\section*{0.1\quad 第 7 卷核心科研能力与国际前沿课程对照}
+\addcontentsline{toc}{section}{0.1\quad 第 7 卷核心科研能力与国际前沿课程对照}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{35mm}p{35mm}p{15mm}X@{}}
+\toprule
+\textbf{核心科研与评测主题} & \textbf{主要对标课程 / 规范} & \textbf{本卷位置} & \textbf{科研与工程直接用途} \\
+\midrule
+Bootstrap CI、McNemar 检验、多重比较与消融 & NeurIPS/ICML 统计规范 & 第 1 章 & 彻底杜绝单种子刷榜、数据泄漏与伪显著结论 \\
+恰当评分规则、ECE、温度缩放与共形预测 & Stanford CS324 / UCB Stat & 第 2 章 & 可靠置信度输出、OOD 拒答与有限样本覆盖保证 \\
+FGSM/PGD、对抗训练、提示注入与差分隐私 & CMU / UCB CS294 Safety & 第 3 章 & 鲁棒性红队测试、大模型安全边界与隐私预算 \\
+积分梯度、Shapley 值、机械可解释与公平性定理 & MIT 6.S897 / Stanford CS324 & 第 4 章 & 特征归因审计、电路因果追踪与群体公平权衡 \\
+数据污染、无偏 \texttt{pass@k}、LLM 裁判与 Arena & Stanford CS336 / LMSYS & 第 5 章 & 代码/推理大模型评测与智能体基准设计 \\
+三遍精读、五步复现协议、消融表与全七卷总图 & 顶会 Reproducibility 清单 & 第 6 章 & 从零复现顶会论文与独立开题研究闭环 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.2\quad 第 7 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.2\quad 第 7 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white, line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\科学实验设计与\\统计学严谨评测};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\不确定性量化、\\校准与共形预测};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\对抗鲁棒、红队\\与大模型安全};
+
+  \node[ch, below=11mm of c1] (c4) {\textbf{第 4 章}\\可解释性、归因公理\\与算法公平性};
+  \node[ch, below=11mm of c2] (c5) {\textbf{第 5 章}\\大模型与智能体\\评测体系剖析};
+  \node[goal, below=11mm of c3] (c6) {\textbf{\color{ochre}第 6 章（全七卷终章）}\\顶会精读、从零复现\\与七卷全栈总图};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] ([xshift=9mm]c1.south) -- ([xshift=-9mm]c5.north);
+  \draw[arr] ([xshift=-9mm]c2.south) -- ([xshift=9mm]c4.north);
+  \draw[arr] ([xshift=-9mm]c3.south) -- ([xshift=9mm]c5.north);
+  \draw[arr] (c4.south) -- ++(0,-4.8mm) -| (c6.south);
+  \draw[arr] (c5) -- (c6);
+\end{tikzpicture}}
+\end{center}

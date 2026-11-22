@@ -1,0 +1,470 @@
+\chapter[顶会精读、从零复现与全七卷总收官]{顶会论文精读、从零复现闭环\\与全七卷总收官}\label{ch:repro-capstone}
+
+\chapEpigraph{如果我看得比别人更远，那是因为我站在巨人的肩膀上。}{Isaac Newton（艾萨克·牛顿，致罗伯特·胡克信，1675）}
+
+\begin{chapIntro}{本章核心问题与终章使命}
+读完六卷半的数学、算法、架构与评测理论后，许多学习者仍会卡在“读懂教材”与“真正开展独立科研”之间的最后一道门槛：面对 NeurIPS、ICML、ICLR 每年上万篇新论文，怎么快速甄别真洞见与包装噱头？自己动手复现论文代码时，为什么照着公式敲出来的 Loss 就是不降，或者跑出来的准确率总比原文低 $3$ 个点？怎样才能把一项实验做成经得起同行挑剔的严谨消融与诚实论文？
+
+作为整套七卷本《天书中的智能》的终章，本章完成两项压轴任务：
+\begin{enumerate}
+  \item \textbf{独立科研实操闭环}：建立适配现代 AI 论文的 Keshav 三遍精读术、零 Bug 从零复现五步工程协议（含单批过拟合与因果不变性单元测试代码）、多随机种子受控消融实测范例，以及“天书精神”下的诚实写作规范；
+  \item \textbf{全七卷知识总收官}：以一个\textbf{经对齐、具备工具调用能力的多模态推理智能体}为解剖标本，用一张全栈七卷建筑总图与跨卷对照矩阵，将第一卷到第七卷的所有数理与工程支柱严丝合缝地熔铸为一体。
+\end{enumerate}
+\end{chapIntro}
+
+\section{顶会论文的高效精读术：AI 时代改良版 Keshav 三遍法}
+
+计算机系统学者 S. Keshav（2007）提出的经典\textbf{三遍论文阅读法（Three-Pass Approach）}，是抵御论文信息过载最犀利的过滤器。针对当代深度学习与大模型论文动辄 30 页附录、实验表格繁密的特点，我们将其升级为面向 AI 研究者的\textbf{三遍精读协议}（表 \ref{tab:three-pass}）。其核心纪律是：\textbf{绝不从第一页第一行傻傻线性通读到最后一页！}每一遍都有明确的止损开关，90\% 的文献在第一遍后就应当果断止步，把宝贵的深度专注力留给真正配得上第三遍的奠基之作。
+
+\begin{table}[htbp]
+  \centering
+  \caption{面向现代 AI 顶会论文的改良版 Keshav 三遍精读协议}
+  \label{tab:three-pass}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{22mm}p{20mm}p{46mm}X@{}}
+    \toprule
+    \textbf{阅读阶段} & \textbf{时间预算} & \textbf{必看区域} & \textbf{核心产出与止损决策（Go / No-Go）} \\
+    \midrule
+    \textbf{第一遍}\\鸟瞰分诊 & $10\text{--}15$ 分钟 & 标题、摘要、引言末段贡献列表、方法总览图（图 1）、主结果表、\textbf{Limitations 局限段} & 用 5C 检验（类别、上下文、可信度、核心贡献、清晰度）写 3 句话总结；若问题不相关、基线陈旧或仅是微调拼凑，\textbf{立刻止损归档} \\
+    \textbf{第二遍}\\骨架拆解 & $60\text{--}90$ 分钟 & 完整方法章节、核心定理陈述、消融表、失败案例、附录超参表（暂跳过繁琐引理证明） & 逐行标出\textbf{张量形状流}、损失函数每一项的梯度含义；核查基线是否公平、是否报了多种子置信区间；能向同伴清晰复述全文逻辑 \\
+    \textbf{第三遍}\\虚拟重实现 & $3\text{--}6$ 小时 & 逐行手推证明、核对官方开源仓库、寻找正文省略的工程隐含假设 & \textbf{闭卷从零重建算法与关键推导}；挖出决定成败的隐藏细节（如 Pre-LN vs Post-LN、学习率预热、权重衰减豁免、梯度裁剪与数据清洗规则） \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{AI 论文精读的四个“X 光透视问题”}
+
+在第二遍与第三遍之间，养成用四把“X 光手术刀”审视每一篇顶会论文的习惯：
+\begin{enumerate}
+  \item \textbf{最小核心机制是什么？} 删掉论文里所有花哨的命名与辅助模块，如果只保留作者最核心的\textbf{一个}公式改动或\textbf{一个}归纳偏置，它到底改变了梯度流、表达能力、数据分布还是计算访存比（Roofline）？
+  \item \textbf{反事实基线公平吗？} 作者声称比去年基线高出 $+1.8\%$，但新方法是不是悄悄增大了参数量、多训了 $2\times$ Token、换了更强的数据增强，或者把基线停留在未调优的旧超参上？（回连第 1 章实验控制规范！）
+  \item \textbf{隐藏超参数藏在哪里？} 深度学习的魔鬼全在细节里——例如 AdamW 是否对 LayerNorm 增益和偏置豁免了权重衰减？Dropout 在注意力权重还是残差输出？混合精度下 Softmax 与归一化是否升回 \texttt{float32}？这些往往不在正文而在附录或代码里。
+  \item \textbf{它在什么条件下必然失效？} 如果一篇论文声称自己的方法在所有规模、所有模态上都无代价吊打一切对手，却写不出清晰的失效边界，那么它几乎一定藏着尚未暴露的评测盲区。
+\end{enumerate}
+
+\section{零 Bug 从零复现的五步工程协议}
+
+深度学习代码最狡猾的地方在于：\textbf{它具有极强的“静默容错性（Silent Failure）”！}写错了一个广播维度、把 \texttt{LogSoftmax} 错喂给了内部自带 Softmax 的 \texttt{nn.CrossEntropyLoss}、忘记 \texttt{optimizer.zero\_grad()}、或者写反了因果注意力掩码——程序不会抛出任何 Python 异常，Loss 甚至还会煞有介事地缓慢下降，只是最终准确率永远卡在莫名其妙的平庸位置，让你白白浪费一整周 GPU 算力去瞎调学习率！
+
+为了将静默 Bug 扼杀在摇篮中，我们总结了经过无数工业与顶会项目千锤百炼的\textbf{五步零 Bug 复现协议}：
+
+\begin{enumerate}
+  \item \textbf{第一步：单批极速过拟合测试（Overfit a Single Mini-Batch）}。\textbf{铁律：在把完整数据集丢进 GPU 跑通宵之前，先只取 $1$ 个极小批次（如 $B = 8$ 或 $16$ 条样本），关掉 Dropout 与数据增强，用恒定学习率连续迭代 $100\text{--}300$ 步！}一个有足够容量的神经网络必须能在 $30$ 秒内把单个小批次的训练损失压到几乎为 $0$（如 $< 10^{-3}$），准确率飙到 $100\%$。如果连 $8$ 条样本都背不下来，绝对不要去调大模型或加数据——99\% 是前向形状、损失符号、标签错位、梯度断开或优化器绑定写出了低级 Bug！这一步仅需半分钟，却能捕获超过 $80\%$ 的实现错误。
+  \item \textbf{第二步：张量形状、梯度流与结构不变性单元测试}。为每一个核心模块编写自动化断言：
+  \begin{itemize}
+    \item \textbf{数值差分梯度校验}：在极小玩具尺寸（\texttt{float64}）上调用 \texttt{torch.autograd.gradcheck} 验证自定义反向传播或核函数；
+    \item \textbf{因果掩码未来不变性测试（Causal Future-Invariance Test）}：对自回归 Transformer（第 5 卷第 4 章），随机篡改输入序列中位置 $t + 1$ 及之后的所有 Token，断言位置 $0, 1, \dots, t$ 的输出 logits 变化量\textbf{严格为零}（$< 10^{-6}$）——任何写错的掩码符号、误用的全局 LayerNorm 或转置错位都会立刻现原形！
+    \item \textbf{批次独立性测试（Batch-Independence Test）}：把批次中第 $0$ 条样本以外的所有样本替换成剧烈随机噪声，断言第 $0$ 条样本的输出（以及反向传播给第 $0$ 条样本的输入梯度）在 \texttt{eval()} 模式下严格不变——专治写错 \texttt{.view()} / \texttt{.reshape()} 导致的跨样本数据串台！
+  \end{itemize}
+  \item \textbf{第三步：确定性随机种子与实验全溯源（Deterministic Provenance）}。每次实验运行自动落盘四件套：（a）精确 Git Commit SHA 与未提交 \texttt{git diff} 补丁；（b）完整解析后的超参配置 YAML；（c）Python、NumPy、PyTorch CPU/CUDA 全部随机种子；（d）硬件型号、CUDA/PyTorch 版本与数据集 SHA-256 校验和。没有溯源日志的实验结果不能进入论文表格。
+  \item \textbf{第四步：极简干净基线先行，严禁一次叠加五个技巧}。先把最朴素、零花哨组件的最小可运行基线（MVP）跑通并记录多种子分数，此后\textbf{每次只打开一个新模块或一个超参改动}，逐项确认增益后再向前推进。一旦同时堆砌五个技巧，不仅无法知道是谁起了作用，更可能出现“一个正面技巧掩盖了一个有 Bug 的负面技巧”的灾难。
+  \item \textbf{第五步：失败切片误差分析（Failure-Slice Error Analysis）}。不要只盯着一条平滑下降的标量验证 Loss 曲线！打印出验证集上损失最高、最自信却判错的前 $20$ 条具体样本，肉眼逐条诊断：是数据标注本身有脏标签？是长尾长度截断？还是某类特定子分布系统性崩盘？科研史上绝大多数真正有价值的算法灵感，都诞生于盯着失败样本发呆的那一个小时。
+\end{enumerate}
+
+下面是一套可直接复制到任何 PyTorch 科研仓库中作为 \texttt{tests/test\_sanity.py} 的复现诊断工具箱：
+
+\begin{lstlisting}[caption={PyTorch 零 Bug 复现核心自检套件：单批过拟合、因果不变性与批次独立性}]
+import random, numpy as np, torch
+import torch.nn.functional as F
+
+def set_all_seeds(seed: int = 2026):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def test_overfit_single_batch(model, x_one, y_one, steps: int = 200, lr: float = 1e-2):
+    """Step 1: Any bug-free model must drive single-batch loss near zero."""
+    model.train()
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
+    loss_val = float("inf")
+    for _ in range(steps):
+        opt.zero_grad()
+        loss = F.cross_entropy(model(x_one), y_one)
+        loss.backward()
+        opt.step()
+        loss_val = float(loss.item())
+    assert loss_val < 0.05, f"Failed single-batch overfit! Final loss={loss_val:.4f}"
+    return loss_val
+
+@torch.no_grad()
+def test_causal_future_invariance(lm_model, seq_len: int = 16, vocab: int = 128):
+    """Step 2a: Mutating tokens > t must NOT alter logits at positions <= t."""
+    lm_model.eval()
+    x1 = torch.randint(0, vocab, (2, seq_len))
+    x2 = x1.clone()
+    t_cut = seq_len // 2
+    x2[:, t_cut + 1:] = torch.randint(0, vocab, (2, seq_len - t_cut - 1))
+    diff = (lm_model(x1)[:, :t_cut + 1] - lm_model(x2)[:, :t_cut + 1]).abs().max().item()
+    assert diff < 1e-5, f"Causal mask leakage detected! max_diff={diff:.2e}"
+
+def test_batch_independence(model, x_batch):
+    """Step 2b: Gradient on sample 0 must be zero w.r.t. other samples in batch."""
+    model.eval()
+    x = x_batch.detach().clone().requires_grad_(True)
+    out = model(x)
+    # Backprop ONLY from sample 0's output sum
+    out[0].sum().backward()
+    cross_grad = x.grad[1:].abs().max().item()
+    assert cross_grad == 0.0, f"Cross-sample leakage detected! grad={cross_grad:.2e}"
+\end{lstlisting}
+
+\subsection{从 Loss 曲线读出静默 Bug：初始化校验与常见症状速查}
+
+在正式开训的第 $0$ 步（尚未做任何梯度更新前），还有一个极其廉价却屡试不爽的数学锚点——\textbf{零步初始化交叉熵校验}。对于均衡的 $C$ 分类任务（或词表大小为 $V$ 的语言模型），如果输出层权重初始化合理、没有偏置爆炸也没有重复施加 Softmax，那么第 $0$ 步的期望交叉熵损失应当非常接近均匀猜测熵 $\ln C$（例如 CIFAR-10 为 $\ln 10 \approx 2.303$，词表 $V = 32{,}000$ 的大模型为 $\ln 32000 \approx 10.37$）。一旦你看到第 $0$ 步损失竟然高达 $18.5$ 或奇怪地低至 $0.9$，立刻停机检查：前者往往是初始化方差失控（未遵循第 5 卷第 2 章 Kaiming/Xavier 缩放），后者往往是把概率错当成 logits 喂给了交叉熵或标签里混入了未屏蔽的填充符（Padding Token）！表 \ref{tab:debug-symptoms} 总结了复现中最常见的六类训练异常症状及其第一优先排查路径。
+
+\begin{table}[htbp]
+  \centering
+  \caption{深度模型从零复现的典型静默故障症状与定位排查表}
+  \label{tab:debug-symptoms}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{34mm}p{50mm}X@{}}
+    \toprule
+    \textbf{观测到的异常症状} & \textbf{最高频隐蔽根因} & \textbf{即时定位与修复动作} \\
+    \midrule
+    第 $0$ 步损失远偏离 $\ln C$ & 重复 Softmax；初始化尺度错；未设 \texttt{ignore\_index} & 打印输出 logits 的均值与标准差；核查标签值域与填充屏蔽掩码 \\
+    单批过拟合 Loss 纹丝不动 & 忘记 \texttt{zero\_grad()}；误用 \texttt{.detach()}；输入与标签错位 & 打印首尾层 \texttt{p.grad.norm()}；检查张量是否意外脱离计算图 \\
+    训练 $10$ 步内突然 \texttt{NaN} & 学习率过大未预热；\texttt{fp16} 下 \texttt{exp} 溢出；除零方差 & 开启 \texttt{grad\_clip} 与线性预热；切换 \texttt{bf16} 或在 Softmax/LN 升回 \texttt{fp32} \\
+    \texttt{train()} 正常、\texttt{eval()} 暴跌 & BatchNorm 统计量污染；漏关自定义噪声层；测试预处理不一致 & 核对均值方差归一化常数；检查 \texttt{model.eval()} 下小批次 BN 动量 \\
+    语言模型困惑度低得反常 & 因果注意力掩码漏加或符号写反（偷看未来词元！） & 立即运行 \texttt{test\_causal\_\allowbreak future\_invariance}，核查下三角掩码 \\
+    多种子间准确率剧烈震荡 & 缺少残差或预归一化；学习率处于不稳定临界边缘 & 降低峰值学习率并延长预热步数；核查是否对 LN/偏置误加权重衰减 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{实测范例：多随机种子受控消融研究（8 层 ResMLP）}
+
+消融实验（Ablation Study）是把工程经验升格为科学证据的核心仪轨——它逐一拆除系统中的关键构件，回答“\textbf{究竟是谁贡献了性能提升？谁又稳住了优化方差？}”。
+
+配套脚本 \texttt{code/vol7\_experiments.py} 中的 \texttt{exp6\_repro\_ablation} 构造了一个清晰的受控消融范例：在 $16$ 维非线性二分类任务（真实决策函数 $y = \mathbb{I}[x_0 x_1 + 0.5 x_2^2 - x_3 > 0]$，训练集 $260$ 条、测试集 $140$ 条）上，搭建一个由 $8$ 个块堆叠而成的深层多层感知机（隐藏维 $d = 48$，统一采用 AdamW，$lr = 3\times 10^{-3}$，权重衰减 $10^{-2}$，训练 $80$ 步）。我们严格控制其他一切变量不变，仅独立开关\textbf{残差连接（Residual Connection，第 5 卷第 3 章）}与\textbf{层归一化（Pre-LayerNorm，第 5 卷第 2 章）}两个开关，形成 $2 \times 2$ 析因消融矩阵，且每组配置均在 \textbf{$6$ 个独立随机种子}（\texttt{seed} $= 100, \dots, 105$）上完整重跑。实测数据保存在 \texttt{data/repro\_ablation.csv}，按 NeurIPS/ICML 顶会规范呈现于表 \ref{tab:repro-ablation} 与误差棒图 \ref{fig:repro-ablation}。
+
+\begin{table}[htbp]
+  \centering
+  \caption{8 层 ResMLP 的 $2 \times 2$ 受控多随机种子消融实验表（$6$ 独立种子，均值 $\pm$ 样本标准差）}
+  \label{tab:repro-ablation}
+  \small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    实验配置变体 & 残差连接 & Pre-LN & 测试准确率（均值 $\pm$ 标准差） & 相对完整版 $\Delta$ 均值 & 跨种子标准差倍率 \\
+    \midrule
+    \textbf{Full (Res+LN)} & \checkmark & \checkmark & $\mathbf{80.95\% \pm 3.31\%}$ & $0.00\%$（基准） & $1.00\times$ \\
+    w/o LayerNorm          & \checkmark & $\times$   & $80.48\% \pm 2.62\%$          & $-0.47\%$        & $0.79\times$ \\
+    w/o Residual           & $\times$   & \checkmark & $80.00\% \pm 5.03\%$          & $-0.95\%$        & $\mathbf{1.52\times}$（方差飙升） \\
+    Plain (No Res/LN)      & $\times$   & $\times$   & $78.21\% \pm 5.42\%$          & $\mathbf{-2.74\%}$ & $\mathbf{1.64\times}$（最不稳定） \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.82\linewidth,
+      height=6.2cm,
+      ybar,
+      bar width=28pt,
+      ylabel={测试集准确率（\%，6 种子均值 $\pm$ 标准差）},
+      xmin=-0.65, xmax=3.65,
+      ymin=70, ymax=89,
+      xtick={0, 1, 2, 3},
+      xticklabels={{Full\\(Res+LN)}, {w/o\\LayerNorm}, {w/o\\Residual}, {Plain\\(No Res/LN)}},
+      xticklabel style={align=center, font=\footnotesize\sffamily, color=ink},
+      ytick={70, 74, 78, 82, 86},
+      ymajorgrids=true,
+      grid style={dashed, tealLine!70},
+      label style={font=\small\sffamily, color=ink},
+      tick label style={font=\footnotesize, color=slate},
+      axis line style={color=slate}
+    ]
+      \addplot[
+        fill=tealLight,
+        draw=tealDark,
+        very thick,
+        error bars/.cd,
+        y dir=both,
+        y explicit,
+        error bar style={color=ochre, very thick},
+        error mark options={rotate=90, mark size=4.5pt, color=ochre, thick}
+      ] table[
+        x expr=\coordindex,
+        y=mean_acc,
+        y error=std_acc,
+        col sep=comma
+      ]{data/repro_ablation.csv};
+
+      % Clean value labels positioned strictly above each upper error-bar cap
+      \node[font=\scriptsize\bfseries\sffamily, text=tealDark] at (axis cs:0, 85.4) {$80.95\%$};
+      \node[font=\scriptsize\bfseries\sffamily, text=tealDark] at (axis cs:1, 84.2) {$80.48\%$};
+      \node[font=\scriptsize\bfseries\sffamily, text=tealDark] at (axis cs:2, 86.2) {$80.00\%$};
+      \node[font=\scriptsize\bfseries\sffamily, text=tealDark] at (axis cs:3, 84.8) {$78.21\%$};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{8 层 ResMLP 四组消融配置的 6 种子测试准确率均值与标准差误差棒图（数据来源：\texttt{data/repro\_ablation.csv}）。完整版（Res+LN）不仅取得最高平均准确率（$80.95\%$），更将移除残差连接后的剧烈跨种子方差（$5.03\% \sim 5.42\%$）大幅压缩至 $3.31\%$。}
+  \label{fig:repro-ablation}
+\end{figure}
+
+\subsection{像老练审稿人一样“诚实解读”表 \ref{tab:repro-ablation}}
+
+一份真正顶级的消融分析，绝不只是机械复述“我们的 Full 模型数值排第一”，而要洞察数据背后两层更深的科学真相：
+\begin{enumerate}
+  \item \textbf{方差压缩往往比均值提升更本质}：对比第一行与第三、四行，去掉残差连接后平均准确率从 $80.95\%$ 滑落到 $80.00\%$（全裸版跌至 $78.21\%$），而更触目惊心的变化在于\textbf{跨种子标准差从 $3.31\%$ 猛增至 $5.03\%$ 与 $5.42\%$（增幅超过 $60\%$）}！这从实验上精准印证了第 5 卷第 3 章的雅可比频谱理论：在 $8$ 层深度下，没有恒等捷径 $h + F(h)$ 保底，不同随机初始化导致的梯度连乘极易滑向退化鞍点，训练稳定性严重恶化。
+  \item \textbf{保持统计谦逊，绝不过度吹嘘}：请留意第二行（\texttt{w/o LayerNorm}：$80.48\% \pm 2.62\%$）与第一行（$80.95\% \pm 3.31\%$）的误差棒高度重叠，均值仅差 $0.47\%$！一个不诚实的作者可能会只挑一个有利种子宣称“LayerNorm 带来了突破性提升”；而严谨的研究者会如实写道：“\emph{在当前 $8$ 块浅宽度玩具规模与 $6$ 个种子下，残差连接对提升均值与压低方差的贡献最为突出；单独移除 LayerNorm 的均值差异（$-0.47\%$）尚在统计波动区间内，其显著优势预计会在更深层（如 $32$ 层以上）或大激活尺度的 Transformer 场景下才充分凸显。}”——\textbf{这种克制与诚实，正是顶尖科学家最令人敬佩的徽章。}
+\end{enumerate}
+
+\section{一篇优秀 AI 论文的骨架与诚实写作规范}
+
+当你完成了扎实复现、发现了现有方法的真瓶颈并验证了自己的新思路，如何将其写成一篇配得上“天书”审美的学术论文？几乎所有跨越十年依然被反复引用的经典 AI 论文（如 ResNet、Attention Is All You Need、LoRA、FlashAttention、DPO），都共享一条极其清澈的\textbf{五段式逻辑脊梁}：
+
+\begin{enumerate}
+  \item \textbf{具体痛点（Concrete Problem）}：用一针见血的反例、诊断曲线或算力瓶颈定量展示现有方法究竟在何处失效，拒绝空洞宏大的“人工智能非常重要”式开场白；
+  \item \textbf{可证伪假设（Falsifiable Hypothesis）}：明确提出一个清晰且\textbf{有可能被实验推翻}的核心假设（例如“长上下文注意力瓶颈不在 FLOPs 而在 HBM 访存带宽”或“深层网络退化源于优化难以拟合恒等映射”）；
+  \item \textbf{极简数理/算法洞见（Minimal Insight）}：像 Paul Erdős 追寻 \emph{THE BOOK} 中的最美证明那样，做减法而不是做加法！不断剥离一切装饰性的启发式技巧，直到只剩那一个不可再简化的核心公式或系统原语，让人看完不禁拍案叫绝：“原来如此，理应如此！”
+  \item \textbf{受控多维证据（Controlled Evidence）}：用同等算力/数据预算下的强基线、多种子不确定性区间、严格析因消融、尺度外推规律（Scaling Laws）以及失败切片分析，全方位交叉检验核心假设；
+  \item \textbf{诚实局限边界（Honest Limitations）}：主动划定方法适用的前提条件、额外计算或内存开销、失效场景与潜在安全伦理风险。隐瞒缺陷换来的一时录用经不起时间检验，而诚实指明边界恰恰为整个社区指明了下一代突破的起点。
+\end{enumerate}
+
+\begin{failBox}{科研复现与论文写作中的三大典型雷区}
+\begin{enumerate}
+  \item \textbf{跳过单批过拟合，直接拿大集群“盲跑炼丹”}：在没有写完最小单元测试与单批过拟合自检之前，就把模型扔进 8 卡 GPU 跑三天，结果 Loss 勉强下降但效果惨淡，此时根本无法分辨是算法理论不行、超参没调好，还是第 147 行写漏了一个 \texttt{.transpose(-1, -2)}！
+  \item \textbf{不公平的“稻草人基线（Strawman Baseline）”}：自己新方法精调了学习率预热、余弦退火、梯度裁剪与最新数据配比，却直接抄三年前旧论文里没调优的数字填进主表宣称“大胜 $+4\%$”。这种对比一旦被同行用同一套训练配方重跑基线，学术信誉立刻破产。
+  \item \textbf{只展示精选成功样例，隐藏高方差与崩盘种子}：论文主表只报告最好的一次运行，附录不给超参敏感度，生成模型只放精挑细选的 4 张漂亮图片（Cherry-Picking）——请时刻铭记第 1 章的随机种子挑选幻觉定理：隐藏方差就是隐藏真相。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{顶会开源复现清单（NeurIPS / ICLR Reproducibility Checklist）与开放科学规范}
+为对抗科研“不可复现危机”，NeurIPS、ICML 与 ICLR 等顶会已全面推行结构化\textbf{可复现性审查清单}，优秀的开源科研仓库通常包含五项标准构件：
+\begin{itemize}
+  \item \textbf{一键环境锁死}：提供精确版本的 \texttt{requirements.txt} / \texttt{pyproject.toml} 或 Dockerfile，消除 PyTorch / CUDA 算子版本漂移；
+  \item \textbf{数据预处理与切分脚本}：公开原始数据下载链接、精确切分索引及防污染哈希校验；
+  \item \textbf{单命令复现脚本}：提供 \texttt{scripts/run\_main.sh} 与 \texttt{scripts/run\_ablation.sh}，确保评审人只需一条命令即可重跑论文核心表与图（如本卷的 \texttt{code/vol7\_experiments.py} 自动生成全部 \texttt{data/*.csv}！）；
+  \item \textbf{训练日志与误差棒公开}：同时释出各随机种子的原始指标而非仅一个汇总数；
+  \item \textbf{计算资源与伦理披露}：透明报告 GPU 型号、总 GPU 小时数、参数量、推理延迟以及安全/偏见审计结论。
+\end{itemize}
+\end{extBox}
+
+\section{全七卷总收官：现代智能系统的全栈解剖总图}
+
+从第一卷翻开第一页的向量与矩阵，到今天走完第七卷的最后一章，你已经走过了一段纵贯数学、算法、深度学习、强化学习、GPU 系统与科学方法论的壮阔长征。为了不让这七卷知识散落成孤立的章节点，现在让我们用一台具体的当代旗舰人工智能系统作为解剖标本——
+
+\begin{center}
+  \textbf{\color{tealDark}旗舰解剖标本：一个经人类偏好对齐、具备工具调用能力的多模态推理智能体}
+\end{center}
+
+想象当你向这位智能体上传一张报错截图和一份代码仓库，要求它“定位 Bug、编写修复补丁、跑通单元测试并给出安全风险报告”时，在这短短几十秒的背后，\textbf{全部七卷书的知识正在同一毫秒内协同共振}！图 \ref{fig:seven-vol-synthesis} 将整座全栈智能大厦从地基到穹顶完整绘出，表 \ref{tab:seven-vol-matrix} 则给出了逐卷精准的数学落点与工程失效症状对照。
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.99\linewidth}{!}{%
+  \begin{tikzpicture}[
+    >=Stealth,
+    tier/.style={
+      rectangle, rounded corners=2mm, minimum height=14.2mm, text width=119mm,
+      align=left, inner xsep=4.5mm, inner ysep=2.2mm, font=\sffamily\footnotesize, text=ink
+    },
+    badge/.style={
+      rectangle, rounded corners=1.4mm, minimum width=18mm, minimum height=9mm,
+      align=center, font=\sffamily\bfseries\scriptsize, text=white
+    },
+    uparr/.style={-{Stealth[length=2.2mm]}, very thick, teal!80}
+  ]
+    % Outer gallery frame
+    \draw[rounded corners=2.6mm, draw=tealLine, line width=0.9pt, fill=white]
+      (-3.1, -1.12) rectangle (14.35, 14.35);
+
+    % Top Title Banner inside frame
+    \fill[tealDark, rounded corners=1.8mm] (-2.75, 13.15) rectangle (14.0, 14.05);
+    \node[font=\sffamily\bfseries\small, text=white] at (5.62, 13.60)
+      {《天书中的智能》全七卷全栈解剖总图：对齐的多模态工具推理智能体};
+
+    % ==================== 7 Stacked Tiers (Bottom = Vol 1 -> Top = Vol 7) ====================
+    % Vol 1
+    \node[tier, draw=navy, thick, fill=navyLight] (v1) at (5.95, 0.35)
+      {\textbf{\color{navy}张量几何与矩阵微积分地基}\;：\;\textnormal{词元/图像嵌入、高维内积相似度、SVD 低秩压缩（LoRA 根基）、多变量链式法则与雅可比矩阵}};
+    \node[badge, fill=navy] (b1) at (-1.55, 0.35) {第 1 卷\\线性微积分};
+
+    % Vol 2
+    \node[tier, draw=navy, thick, fill=navyLight!70!white] (v2) at (5.95, 2.15)
+      {\textbf{\color{navy}概率推理与信息论语言}\;：\;\textnormal{自回归条件概率分解、贝叶斯更新、交叉熵（Next-Token 损失）、KL 散度约束与 MLE/MAP 估计}};
+    \node[badge, fill=navy!88!teal] (b2) at (-1.55, 2.15) {第 2 卷\\概率信息论};
+
+    % Vol 3
+    \node[tier, draw=teal, thick, fill=tealLight!70!white] (v3) at (5.95, 3.95)
+      {\textbf{\color{tealDark}经典搜索、图模型与序贯决策}\;：\;\textnormal{束搜索 / MCTS 推理树搜索、状态空间规划、贝叶斯因果图与马尔可夫决策过程（MDP）贝尔曼方程}};
+    \node[badge, fill=teal!85!navy] (b3) at (-1.55, 3.95) {第 3 卷\\搜索与 MDP};
+
+    % Vol 4
+    \node[tier, draw=teal, thick, fill=tealLight] (v4) at (5.95, 5.75)
+      {\textbf{\color{tealDark}凸优化、泛化理论与经典统计学习}\;：\;\textnormal{凸性/KKT 对偶、正则化与 $L_1$ 稀疏（SAE/特征选择）、核方法、树集成、EM 与变分证据下界（ELBO）}};
+    \node[badge, fill=teal] (b4) at (-1.55, 5.75) {第 4 卷\\优化与统计};
+
+    % Vol 5
+    \node[tier, draw=plum, thick, fill=plumLight!75!white] (v5) at (5.95, 7.55)
+      {\textbf{\color{plum}深度架构、表示与生成引擎}\;：\;\textnormal{自动微分、Kaiming/LN/AdamW、残差流、Transformer/RoPE、CLIP InfoNCE 视觉编码、扩散与流匹配生成}};
+    \node[badge, fill=plum] (b5) at (-1.55, 7.55) {第 5 卷\\深度与生成};
+
+    % Vol 6
+    \node[tier, draw=gold!90!black, very thick, fill=ochreLight!55!white] (v6) at (5.95, 9.35)
+      {\textbf{\color{ochre}强化对齐与 GPU 系统规模化}\;：\;\textnormal{TD/DQN、策略梯度、PPO/GRPO 推理强化、RLHF/DPO 对齐、Roofline/FlashAttention、3D 并行、LoRA、量化与 PagedAttention}};
+    \node[badge, fill=gold!92!black] (b6) at (-1.55, 9.35) {第 6 卷\\RL 与系统};
+
+    % Vol 7 (Crowning Tier)
+    \node[tier, draw=ochre, very thick, fill=ochreLight] (v7) at (5.95, 11.45)
+      {\textbf{\color{ochre}科学标尺、安全护栏与可复现闭环（本收官卷）}\;：\;\textnormal{Bootstrap/McNemar 显著性、温度校准与共形覆盖、PGD/提示注入/DP-SGD、IG 完备性与公平性定理、无偏 \texttt{pass@k}/Arena Elo、五步复现与消融}};
+    \node[badge, fill=ochre] (b7) at (-1.55, 11.45) {第 7 卷\\评测与伦理};
+
+    % Horizontal connectors from badges to tiers
+    \foreach \i in {1,2,3,4,5,6,7} {
+      \draw[slate!65, thick] (b\i.east) -- (v\i.west);
+    }
+
+    % Vertical upward architectural spine arrows between consecutive tiers
+    \draw[uparr] (v1.north) -- (v2.south);
+    \draw[uparr] (v2.north) -- (v3.south);
+    \draw[uparr] (v3.north) -- (v4.south);
+    \draw[uparr] (v4.north) -- (v5.south);
+    \draw[uparr] (v5.north) -- (v6.south);
+    \draw[uparr, ochre] (v6.north) -- (v7.south);
+
+    % Left macro-stage labels / subtle vertical accent bars
+    \draw[navy, line width=1.8pt] (-2.68, -0.15) -- (-2.68, 2.65);
+    \node[rotate=90, font=\sffamily\bfseries\scriptsize, text=navy] at (-2.90, 1.25) {数理基石};
+
+    \draw[teal, line width=1.8pt] (-2.68, 3.45) -- (-2.68, 6.25);
+    \node[rotate=90, font=\sffamily\bfseries\scriptsize, text=teal] at (-2.90, 4.85) {核心范式};
+
+    \draw[plum, line width=1.8pt] (-2.68, 7.05) -- (-2.68, 9.85);
+    \node[rotate=90, font=\sffamily\bfseries\scriptsize, text=plum] at (-2.90, 8.45) {规模智能};
+
+    \draw[ochre, line width=1.8pt] (-2.68, 10.75) -- (-2.68, 12.15);
+    \node[rotate=90, font=\sffamily\bfseries\scriptsize, text=ochre] at (-2.90, 11.45) {科学护栏};
+
+    % Right-hand golden closed-loop scientific feedback rail (Vol 7 -> Vol 6, 5, 4)
+    \draw[->, gold!90!black, very thick, rounded corners=3mm]
+      (v7.east) -- (13.25, 11.45) -- (13.25, 5.75) -- (v4.east);
+    \draw[->, gold!90!black, very thick] (13.25, 9.35) -- (v6.east);
+    \draw[->, gold!90!black, very thick] (13.25, 7.55) -- (v5.east);
+    \node[rotate=-90, font=\sffamily\bfseries\scriptsize, text=gold!85!black, fill=white, inner sep=2.5pt]
+      at (13.68, 8.60) {评测审计 $\cdot$ 红队纠错 $\cdot$ 消融迭代闭环};
+
+    % Bottom footer motto inside frame
+    \node[font=\kaishu\footnotesize, text=slate] at (5.62, -0.76)
+      {从一行向量内积到一座受科学标尺与安全护栏守护的现代智能体——七卷贯通，无一处黑箱悬空。};
+  \end{tikzpicture}}
+  \caption{《天书中的智能》全七卷全栈架构总图。以“对齐的多模态工具推理智能体”为核心主线，展示第 1 卷至第 7 卷的数理地基、经典与统计引擎、深度架构、强化对齐与 GPU 系统如何层层支撑，并在第 7 卷的严谨评测、安全红队与可复现消融反馈下构成持续演进的科学闭环。}
+  \label{fig:seven-vol-synthesis}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{全七卷跨卷知识映射矩阵：旗舰多模态工具推理智能体的逐层解剖}
+  \label{tab:seven-vol-matrix}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{13mm}p{36mm}p{51mm}X@{}}
+    \toprule
+    \textbf{卷次} & \textbf{核心数理与算法支柱} & \textbf{在旗舰多模态推理智能体中的落点} & \textbf{若缺失或出错的典型工程症状} \\
+    \midrule
+    \textbf{第 1 卷} & 张量、SVD、雅可比、矩阵微积分 & 多模态嵌入投影、低秩微调矩阵分解、反向传播链式求导与条件数诊断 & 维度错位、矩阵奇异导致数值爆炸、梯度消失 \\
+    \textbf{第 2 卷} & 贝叶斯、交叉熵、KL 散度、MLE/MAP & 自回归词元似然训练、采样温度与核采样、策略更新中的 KL 锚定约束 & 概率分布塌缩、模型胡言乱语或过度偏移基座 \\
+    \textbf{第 3 卷} & 搜索、MCTS、贝叶斯网、MDP 贝尔曼 & 多步工具规划、测试期推理树搜索、状态转移建模与长程回报折现 & 短视贪心死循环、无法回溯纠错、规划发散 \\
+    \textbf{第 4 卷} & 凸性、KKT、泛化界、核/树/EM ELBO & 权重衰减与稀疏正则（SAE）、结构化表格工具模型、变分隐变量推理 & 严重过拟合、超参失控、高维特征无法解耦 \\
+    \textbf{第 5 卷} & Autodiff、LN/AdamW、ResNet、Transformer/RoPE、InfoNCE、扩散/流 & 视觉--文本对齐编码、长上下文旋转位置编码、深层残差稳定与图像生成工具 & 深层不收敛、长文失忆、跨模态语义错位 \\
+    \textbf{第 6 卷} & TD/DQN、PPO/GRPO、RLHF/DPO、Roofline/FlashAttn、3D 并行/LoRA/量化/PagedAttn & 推理思维链强化学习、人类价值对齐、千卡训练与高并发低延迟推理引擎 & 显存 OOM、延迟高企、拒绝失衡或奖励黑客 \\
+    \textbf{第 7 卷} & Bootstrap/McNemar、校准/共形、对抗/DP、IG/公平、无偏 \texttt{pass@k}/Arena、五步复现 & 统计显著性把关、不确定性拒答、提示注入权限隔离、归因审计与帕累托评测 & 种子幻觉刷榜、盲目自信幻觉、越权泄露与不可复现 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{致读者：合上第七卷之后}
+
+当你读到这一节，已经正式走完了《天书中的智能：人工智能的七卷手记》的全部旅程。
+
+回望来路，这套七卷书从未试图向你兜售“三天精通大模型”的速成幻觉，也从未把公式当作故弄玄虚的装饰墙。恰恰相反，每一卷我们都在坚持同一种笨拙而诚实的信念——\textbf{保罗·埃尔德什（Paul Erdős）心目中那本“天书（\emph{THE BOOK}）”的信念}：在纷繁喧嚣的论文标题与商业炒作之下，真正驱动人工智能前行的，是少数几条异常清澈、彼此严密咬合的数学与系统原理。
+
+\begin{itemize}
+  \item 当你再听到有人说“深度学习只是炼丹黑箱”时，你会想起第一卷的奇异值与雅可比、第四卷的泛化界与凸对偶、第五卷的残差流与归一化，以及第七卷的激活修补与稀疏自编码器——黑箱正在被人类理性一寸寸照亮；
+  \item 当你再看到一份令人眼花缭乱的新榜单宣称“全方位超越人类”时，你会冷静地问出第七卷教给你的四个问题：\textbf{样本量与置信区间呢？有没有数据污染？校准误差与失败切片在哪里？同等成本延迟下的帕累托前沿呢？}
+  \item 当你亲手设计下一代更强大的智能体与生成系统时，愿你始终记得康德的箴言与香农的警钟：技术的力量越是澎湃，科学的谦逊、安全的边界与对人的尊重就越是不可或缺。
+\end{itemize}
+
+牛顿说自己站在巨人的肩膀上；而从此刻起，你已经不再只是仰望巨人的旁观者。合上第七卷，打开终端、纸笔与最新的预印本，去提出属于你自己的可证伪假设，去写下一个零 Bug 的干净基线，去寻找属于你自己的那一页“天书”。
+
+前路漫漫，祝你永葆好奇、手中有尺、心中有光。
+
+\section{分层习题}
+
+\exTier{A 层}{概念核查与基础演练}
+
+\begin{enumerate}[label=\textbf{7.6.\arabic*}]
+  \item \textbf{（Keshav 三遍阅读法的实战分诊）} 从近期 NeurIPS、ICML 或 ICLR 论文列表中任选一篇与你兴趣相关的长文（例如 FlashAttention、DPO、LoRA 或某篇 Agent 评测论文），严格计时 $12$ 分钟完成\textbf{第一遍鸟瞰分诊}，输出一份不超过 $200$ 字的 5C 卡片，必须明确回答：（a）核心痛点与假设；（b）最关键的一张图或一张表；（c）作者自己承认的至少一条局限（Limitation）；（d）你决定进入第二遍还是止损归档的理由。
+  \exHint{第一遍切忌陷入推导细节！重点核对“引言承诺的贡献”与“主实验表和局限段”之间是否首尾一致。}
+
+  \item \textbf{（精准解读表 \ref{tab:repro-ablation} 的消融结论）} 仔细审视表 \ref{tab:repro-ablation} 中 8 层 ResMLP 的 6 种子受控消融数据：
+  \begin{enumerate}
+    \item 计算 \texttt{Full (Res+LN)} 相对 \texttt{Plain (No Res/LN)} 的均值标准误估计（提示：独立双样本标准误 $\mathrm{SE}_{\Delta} = \sqrt{s_1^2/n_1 + s_2^2/n_2}$，$n_1 = n_2 = 6$），检验该差值 $+2.74\%$ 是否超过 $1.96\,\mathrm{SE}_\Delta$；
+    \item 同样计算 \texttt{Full (Res+LN)} 相对 \texttt{w/o LayerNorm} 的 $\mathrm{SE}_\Delta$，解释为何在正文分析中我们刻意克制、没有宣称“LayerNorm 带来了统计显著的准确率暴涨”。
+  \end{enumerate}
+  \exHint{第一对 $\mathrm{SE}_\Delta = \sqrt{(3.31^2 + 5.42^2)/6} \approx 2.59\%$（$6$ 种子非配对检验尚在临界区，若做同种子配对检验则显著性更清晰）；第二对 $\mathrm{SE}_\Delta \approx 1.72\%$，远大于均值差 $0.47\%$！}
+\end{enumerate}
+
+\exTier{B 层}{数学推导与定理证明}
+
+\begin{enumerate}[label=\textbf{7.6.\arabic*}, start=3]
+  \item \textbf{（$2 \times 2$ 析因消融中的主效应与交互效应分解）} 记表 \ref{tab:repro-ablation} 中四种配置的测试准确率均值为 $\mu_{11} = 80.95$（Res+LN）、$\mu_{10} = 80.48$（仅 Res）、$\mu_{01} = 80.00$（仅 LN）、$\mu_{00} = 78.21$（均无）。在经典实验设计（ANOVA / $2^2$ Factorial Design）中，定义：
+  \[
+    E_{\text{Res}} = \frac{(\mu_{11} - \mu_{01}) + (\mu_{10} - \mu_{00})}{2}, \quad
+    E_{\text{LN}} = \frac{(\mu_{11} - \mu_{10}) + (\mu_{01} - \mu_{00})}{2},
+  \]
+  以及两者的\textbf{交互效应（Interaction Effect）} $E_{\text{Res}\times\text{LN}} = (\mu_{11} - \mu_{10}) - (\mu_{01} - \mu_{00})$。
+  \begin{enumerate}
+    \item 分别计算 $E_{\text{Res}}$、$E_{\text{LN}}$ 与 $E_{\text{Res}\times\text{LN}}$ 的具体数值；
+    \item 解释为什么 $E_{\text{Res}\times\text{LN}} < 0$（负交互，又称亚可加性 / 边际递减）在深度网络正则与稳定组件中极为常见：当残差连接已经大幅改善了浅中层梯度流之后，LayerNorm 的边际增幅为何会小于在无残差网络上的边际增幅？
+  \end{enumerate}
+  \exHint{算得 $E_{\text{Res}} = \frac{0.95 + 2.27}{2} = +1.61\%$，$E_{\text{LN}} = \frac{0.47 + 1.79}{2} = +1.13\%$，$E_{\text{Res}\times\text{LN}} = 0.47 - 1.79 = -1.32\%$——说明在无残差的裸网中 LN 救命效果更明显（$+1.79\%$），而在已有残差时两者功能部分重叠！}
+
+  \item \textbf{（配对消融方差为何严格小于非配对消融方差？）} 设 $X_s$ 与 $Y_s$ 分别表示在第 $s$ 个共享随机种子（相同数据切分与同源初始化）下，完整模型与消融变体的测试准确率，两者样本方差分别为 $\sigma_X^2, \sigma_Y^2$，跨种子相关系数为 $\rho \in [-1, 1]$。
+  \begin{enumerate}
+    \item 证明同种子配对差值 $D_s = X_s - Y_s$ 的方差等于 $\Var(D_s) = \sigma_X^2 + \sigma_Y^2 - 2\rho\sigma_X\sigma_Y$；
+    \item 当 $\rho > 0$ 时，配对设计相比独立双样本设计节省了多大比例的所需随机种子数（以达到相同均值差置信区间宽度为基准）？请据此说明为何 \texttt{exp6\_repro\_ablation} 刻意让四组变体共享 \texttt{seed = 100..105}。
+  \end{enumerate}
+  \exHint{若 $\sigma_X = \sigma_Y = \sigma$ 且跨种子相关性 $\rho = 0.75$，配对方差从 $2\sigma^2$ 骤降至 $0.5\sigma^2$，相当于免费把有效种子数量扩大了 $4$ 倍！}
+\end{enumerate}
+
+\exTier{C 层}{算法分析与编程实验}
+
+\begin{enumerate}[label=\textbf{7.6.\arabic*}, start=5]
+  \item \textbf{（亲手捕获三个经典“静默深度学习 Bug”）} 编写一个微型 GPT 字符级自回归语言模型（$2$ 层 Transformer），然后人为向其中依次注入以下三个不会触发任何 Python 报错的静默 Bug：
+  \begin{enumerate}
+    \item \textbf{Bug A（因果掩码符号写反）}：把上三角掩码误写为下三角或忘记加 $-\infty$；
+    \item \textbf{Bug B（跨样本 Reshape 串台）}：在多头注意力拼接前把 \texttt{.transpose(1, 2).\allowbreak contiguous().\allowbreak view(B, T, C)} 错写成直接 \texttt{.view(B, T, C)}；
+    \item \textbf{Bug C（双重 Softmax 梯度衰减）}：模型输出层先做了一次 \texttt{F.softmax(..., dim=-1)}，再传给 \texttt{F.cross\_entropy}。
+  \end{enumerate}
+  运行本章给出的三项诊断测试（\texttt{test\_overfit\_\allowbreak single\_batch}、\texttt{test\_causal\_\allowbreak future\_invariance} 与 \texttt{test\_batch\_\allowbreak independence}），验证每一项自检分别能在几秒内精准揪出哪几个静默 Bug！
+  \exHint{Bug A 立刻被因果未来不变性测试捕获；Bug B 被批次独立性测试（或形状不变量）捕获；Bug C 会导致单批过拟合测试在 $200$ 步后 Loss 死活卡在 $\ge 1.5$ 附近无法归零！}
+
+  \item \textbf{（把 8 层 ResMLP 消融扩展到深层 24 块与配对统计检验）} 修改 \texttt{code/vol7\_experiments.py} 中的 \texttt{exp6\_repro\_ablation}：
+  \begin{enumerate}
+    \item 将残差块深度从 $8$ 块加倍至 $24$ 块，并将独立种子数扩大到 $12$ 个，保存每个种子的逐一结果；
+    \item 计算完整版与其余三个变体的\textbf{同种子配对差值均值}、$95\%$ 配对 Bootstrap 置信区间与配对 $t$ 检验 $p$ 值，观察在 $24$ 层深度下，\texttt{Plain (No Res/LN)} 与 \texttt{w/o Residual} 的准确率是否发生梯度消失崩盘，以及 LayerNorm 的贡献是否跃升为高度统计显著！
+  \end{enumerate}
+  \exHint{深度拉到 $24$ 层后，无残差无归一化的裸 ReLU 网络几乎立刻陷入死亡神经元与梯度消失（退化至接近 $50\%$ 随机猜测），残差与 Pre-LN 的联合价值会以极为震撼的反差呈现出来。}
+\end{enumerate}
+
+\exTier{D 层}{开放探究与科研实战}
+
+\begin{enumerate}[label=\textbf{7.6.\arabic*}, start=7]
+  \item {\rightskip=0pt plus 1fil\relax \textbf{（独立顶会复现毕业大项目：从论文到开源报告）} 从你最感兴趣的方向（如第 5 卷的扩散模型/RoPE/CLIP、第 6 卷的 DPO/GRPO/LoRA、或第 7 卷的共形预测/SAE）中选定一篇经典核心论文，执行一次端到端的微型从零复现闭环并撰写 $3$ 页科研复现报告，必须包含：\par}
+  \begin{enumerate}
+    \item 完整通过五步复现协议中的单批过拟合与核心不变性单元测试；
+    \item 至少一组 $3$ 种子以上的受控析因消融表与配对 Bootstrap 置信区间；
+    \item 一节专门的“失败切片误差分析”与“论文未明说但影响复现的 3 个隐藏细节记录”。
+  \end{enumerate}
+  \exHint{不必追求复现百亿参数规模！用 MNIST / CIFAR-10 / TinyShakespeare / GSM8K-mini 等轻量基准把核心机理、消融趋势与统计显著性彻底跑透，胜过盲目照抄庞大代码库。}
+
+  \item \textbf{（全七卷终极架构设计：为一门真实高风险场景设计端到端 AI 系统）} 选择一个你未来希望投身的高价值现实场景（如“自动定理证明与科研代码助手”“临床多模态影像辅助诊断系统”或“工业级金融合规审计智能体”），参照图 \ref{fig:seven-vol-synthesis} 与表 \ref{tab:seven-vol-matrix}，绘制一份跨越第 1 卷至第 7 卷的\textbf{系统技术蓝图}：
+  \begin{enumerate}
+    \item 明确写出该系统在表示架构（第 5 卷）、对齐与高效推理部署（第 6 卷）以及统计显著评测、校准拒答、安全隔离与公平/可解释审计（第 7 卷）六个模块的具体技术选型；
+    \item 列出上线前必须通过的 $5$ 条“一票否决红线指标”（涵盖共形覆盖率、对抗/注入拦截率、帕累托延迟预算与群体误报率上限），并阐明其中最棘手的一对数学权衡（如安全与有用性、延迟与精度、校准与均等赔率）应如何决策。
+  \end{enumerate}
+  \exHint{好的系统架构设计不是把所有热门名词堆进 PPT，而是为每一个选型写清“为何需要它、它的代价是什么、以及用什么定量审计指标来防止它静默失效”。}
+\end{enumerate}

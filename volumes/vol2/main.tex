@@ -1,0 +1,115 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME II};
+
+  % Bespoke fine-art geometric probability & KL-divergence composition (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.48, transform shape]
+    % Soft concentric 2D Gaussian contour ellipses
+    \begin{scope}[rotate=22, opacity=0.14]
+      \draw[navy, line width=0.9pt] (0.5, 0.4) ellipse (2.6cm and 1.15cm);
+      \draw[navy, line width=0.75pt] (0.5, 0.4) ellipse (1.85cm and 0.80cm);
+      \draw[navy, line width=0.6pt] (0.5, 0.4) ellipse (1.1cm and 0.48cm);
+    \end{scope}
+    % Translucent bimodal vs unimodal KL curves
+    \draw[slate!40, thin] (-2.8,-0.6) -- (2.8,-0.6);
+    \fill[teal, opacity=0.09, domain=-2.7:2.7, samples=90]
+      (-2.7,-0.6) -- plot (\x, {-0.6 + 1.85*(0.55*exp(-1.1*(\x+1.05)*(\x+1.05)) + 0.55*exp(-1.1*(\x-1.05)*(\x-1.05)))}) -- (2.7,-0.6) -- cycle;
+    \draw[teal, opacity=0.35, line width=1.2pt, domain=-2.7:2.7, samples=90]
+      plot (\x, {-0.6 + 1.85*(0.55*exp(-1.1*(\x+1.05)*(\x+1.05)) + 0.55*exp(-1.1*(\x-1.05)*(\x-1.05)))});
+    \draw[gold, opacity=0.45, line width=1.1pt, dashed, domain=-2.7:2.7, samples=90]
+      plot (\x, {-0.6 + 1.35*exp(-0.26*\x*\x)});
+    \draw[ochre, opacity=0.42, line width=1.0pt, dotted, domain=-0.6:2.7, samples=60]
+      plot (\x, {-0.6 + 1.55*exp(-1.15*(\x-1.05)*(\x-1.05))});
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 2 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{24}{32}\selectfont\sffamily\bfseries\color{ink}AI 概率论、数理统计、\\信息论与首个回归/分类闭环}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}用概率、熵与散度理解噪声与学习，亲手完成纯 NumPy 端到端模型闭环}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 Stanford CS109 / MIT 6.3700 / CMU 36-401 / 北大概率建模，承接第 1 卷线代与微积分}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  arc=2mm,
+  boxrule=0.6pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位：补齐 AI 专属概率统计底座，打通首个完整监督学习闭环}\par\vspace{1.2mm}
+\small
+传统考研概率偏重二维积分技巧，而人工智能真正高频依赖的是一套完全不同的概率语言。本卷承接第 1 卷的 NumPy、谱定理、矩阵微分与梯度下降，用 6 章打通“不确定性建模 $\to$ 信息论损失 $\to$ 端到端分类实战”：
+\begin{itemize}
+  \item \textbf{直击 AI 高频概率工具}：条件独立与 Explaining Away、多元高斯几何与条件分布、Jensen 与 Hoeffding 浓度不等式、蒙特卡洛采样与重要性采样。
+  \item \textbf{从零讲透信息论核心}：熵、条件熵、互信息、交叉熵与 KL 散度（含正向 vs 反向 KL 行为差异），一次性打通分类损失、语言模型困惑度、决策树、VAE 与 DPO 的共同语言。
+  \item \textbf{统一统计估计与回归/分类}：严格推导 MLE $\equiv$ 最小二乘、MAP $\equiv$ 岭/Lasso、Bernoulli MLE $\equiv$ 二元交叉熵 $\equiv$ 最小 KL 散度，并用 Bootstrap 量化模型置信区间。
+  \item \textbf{端到端无框架实战 + 48 题四层精解}：纯 NumPy 实现防溢出逻辑/Softmax 回归、防数据泄漏流水线与完整评测指标，所有曲线与数据表均由本机实测生成。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 2 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心能力、下游用途与代码实战} \\
+\midrule
+序\quad 章 & 本卷坐标与八校考点覆盖对照 & 为什么不能只靠应试概率、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 概率建模、条件独立与 Bayes 推断 & 先验/似然/后验更新、罕见病反例、独立 vs 条件独立、朴素贝叶斯雏形 \\
+第 2 章 & AI 核心概率分布与多元高斯 & Bernoulli/Categorical/Beta、多元高斯马氏距离、仿射封闭性与条件高斯 \\
+第 3 章 & 极限定理、浓度不等式与蒙特卡洛 & Jensen 不等式、Markov/Chebyshev/Hoeffding 样本量界、CLT 与重要性采样 \\
+第 4 章 & 信息论：熵、交叉熵与 KL 散度 & Shannon 熵、互信息、Gibbs 非负性、正向/反向 KL 差异与困惑度 \\
+第 5 章 & 统计估计：MLE、MAP 与 Bootstrap & 偏差-方差分解、MLE 过拟合反例、Beta-Bernoulli 共轭与非参数置信区间 \\
+第 6 章 & 纯 NumPy 回归/分类端到端闭环 & MLE/MAP、Sigmoid+MSE 反例、BCE/Softmax 稳定实现、防泄漏与实测扫参 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol2\_experiments.py} 与实测数据随本卷提供。上一卷：第 1 卷；下一卷：第 3 卷《经典人工智能：搜索、博弈、概率图与序列决策》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_prob_bayes_indep}
+\include{chapters/ch02_distributions_mvg}
+\include{chapters/ch03_limits_conc_mc}
+\include{chapters/ch04_info_theory}
+\include{chapters/ch05_estimation_bootstrap}
+\include{chapters/ch06_logreg_pipeline}
+
+% ==================== Back Matter / Appendix ====================
+\appendix
+\include{chapters/app_solutions}
+
+\end{document}

@@ -1,0 +1,294 @@
+\chapter{全卷 48 道分层习题完整精解}
+\label{app:solutions}
+
+\chapEpigraph{学习数学的唯一方法，就是去做数学。}{保罗·哈尔莫斯（Paul R. Halmos）}
+
+\begin{chapIntro}{使用指南}
+本附录为第 1--6 章全部 \textbf{48 道四层递进习题}（A 概念反例 / B 手算推演 / C 实用证明 / D 可自检编程）提供完整解答、推导细节与数值自检基准。建议合上附录、独立完成后再逐项对照，尤其注意 A 类反例的边界条件与 D 类断言阈值。
+\end{chapIntro}
+
+% ====================================================================
+\section{第 1 章习题解答（1.1--1.8）}
+% ====================================================================
+
+\textbf{1.1 [A]}
+(1) 按广播三步规则（右对齐、维长相等或一侧为 $1$）：
+(a) \texttt{(8,1,5)} 与 \texttt{(4,5)} $\to$ 补前导 $1$ 得 \texttt{(1,4,5)}，合法，输出 \texttt{(8,4,5)}；
+(b) \texttt{(8,3,5)} 与 \texttt{(3,1)} $\to$ 补成 \texttt{(1,3,1)}，合法，输出 \texttt{(8,3,5)}；
+(c) \texttt{(10,4)} 与 \texttt{(10,)} $\to$ 补成 \texttt{(1,10)}，末尾维 $4\neq 10$，\textbf{冲突报错}；
+(d) \texttt{(64,1)} 与 \texttt{(64,)} $\to$ 补成 \texttt{(1,64)}，合法，输出 \texttt{(64,64)}。\\
+(2) \texttt{y\_pred - y\_true} 静默广播成 $(64,64)$ 矩阵，其中第 $(i,j)$ 项为 $\hat{y}_i - y_j$（把第 $i$ 个预测与全部 $64$ 个样本标签两两相减），导致求出的 MSE 严重偏大且不报错。修复方式：
+(i) 统一一维化 \texttt{y\_pred.reshape(-1) - y\_true.reshape(-1)}；
+(ii) 显式断言 \texttt{assert y\_pred.shape == y\_true.shape}。
+
+\textbf{1.2 [A]}
+输出为 \texttt{A[0, 0] = 1.0}（原数组被污染！），\texttt{C = [[1.0, 0.0], [0.0, 3.0]]}。两处错误：
+(1) \texttt{A[:]} 返回原内存的\textbf{视图（view）}，原地除法 \texttt{/=} 同时改写了 \texttt{A}，应改为 \texttt{A\_scaled = A.copy()}；
+(2) \texttt{*} 是逐元素 Hadamard 乘积而非矩阵乘法，应改为 \texttt{C = A\_scaled @ B}（正确结果为 $\begin{psmallmatrix}1.0 & 4.0\\ 0.5 & 3.0\end{psmallmatrix}$）。
+
+\textbf{1.3 [B]}
+$A = \begin{psmallmatrix}1&2\\0&-1\\3&1\end{psmallmatrix},\; B = \begin{psmallmatrix}2&-1\\1&3\end{psmallmatrix}$。
+\begin{enumerate}[label=(\arabic*)]
+  \item \textbf{列线性组合}：第 1 列 $2\begin{psmallmatrix}1\\0\\3\end{psmallmatrix} + 1\begin{psmallmatrix}2\\-1\\1\end{psmallmatrix} = \begin{psmallmatrix}4\\-1\\7\end{psmallmatrix}$；第 2 列 $(-1)\begin{psmallmatrix}1\\0\\3\end{psmallmatrix} + 3\begin{psmallmatrix}2\\-1\\1\end{psmallmatrix} = \begin{psmallmatrix}5\\-3\\0\end{psmallmatrix}$。
+  \item \textbf{行线性组合}：第 1 行 $1(2,-1)+2(1,3)=(4,5)$；第 2 行 $0(2,-1)+(-1)(1,3)=(-1,-3)$；第 3 行 $3(2,-1)+1(1,3)=(7,0)$。
+  \item \textbf{外积秩 1 求和}：
+  \[
+    AB = \begin{pmatrix}1\\0\\3\end{pmatrix}\begin{pmatrix}2 & -1\end{pmatrix}
+       + \begin{pmatrix}2\\-1\\1\end{pmatrix}\begin{pmatrix}1 & 3\end{pmatrix}
+       = \begin{pmatrix}2&-1\\0&0\\6&-3\end{pmatrix}
+       + \begin{pmatrix}2&6\\-1&-3\\1&3\end{pmatrix}
+       = \begin{pmatrix}4&5\\-1&-3\\7&0\end{pmatrix}.
+  \]
+  每个外积项的每一列都是左向量的标量倍，非零故列空间维数为 $1$，秩必为 $1$。
+\end{enumerate}
+
+\textbf{1.4 [B]}
+(1) 沿样本轴 \texttt{axis=0} 聚合：\texttt{mean = [[4., 15., 4.]]}，\texttt{std = [[2., 5., 0.]]}（注意第 3 列常值特征方差为 $0$，实际标准化时须防除以零），去中心化矩阵为 $\begin{psmallmatrix}-2 & -5 & 0\\ 2 & 5 & 0\end{psmallmatrix}$。\\
+(2) 翻译结果：
+(a) $y_i = \sum_j A_{ij} x_j$，等价于 \texttt{A @ x}，形状 \texttt{(m,)}；
+(b) $c_n = \sum_i U_{ni} V_{ni}$，等价于 \texttt{np.sum(U * V, axis=1)}，形状 \texttt{(N,)}；
+(c) $Y_{btm} = \sum_d H_{btd} W_{dm}$，等价于 \texttt{H @ W}，形状 \texttt{(B, T, M)}。
+
+\textbf{1.5 [C]（证明）}
+\begin{enumerate}[label=(\arabic*)]
+  \item 矩阵 $M = uv^T$ 的第 $j$ 列为 $v_j u \in \spanop\{u\}$，故 $\col(M) \subseteq \spanop\{u\}$，从而 $\rank(M) \le 1$；又因 $u\neq 0, v\neq 0$，存在 $i,j$ 使 $u_i v_j \neq 0$，即 $M \neq 0$，故 $\rank(M) = 1$。
+  \item 当 $m=n$ 时，$\tr(uv^T) = \sum_{i=1}^n (uv^T)_{ii} = \sum_{i=1}^n u_i v_i = u^T v$。
+  \item 由外积求和视角 $AB = \sum_{k=1}^p a_{\cdot k} b_{k\cdot}^T$，每项秩至多为 $1$，由秩的次可加性 $\rank(X+Y)\le \rank(X)+\rank(Y)$ 立得 $\rank(AB) \le \sum_{k=1}^p \rank(a_{\cdot k} b_{k\cdot}^T) \le p$。$\square$
+\end{enumerate}
+
+\textbf{1.6 [C]}
+方案一先算 $BA \in \R^{d\times d}$ 需 $d^2 r$ 次乘法，再乘 $x$ 需 $d^2$ 次，合计 $d^2(r+1)$；方案二先算 $Ax \in \R^r$ 需 $dr$ 次，再左乘 $B$ 需 $dr$ 次，合计 $2dr$。加速比为 $\frac{d^2(r+1)}{2dr} = \frac{d(r+1)}{2r}$。代入 $d=4096, r=16$ 得 $\frac{4096\times 17}{32} = 2176$ 倍！这正是大模型 LoRA 推理与训练中绝不显式展开 $BA$ 的原因。
+
+\textbf{1.7--1.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{1.7}：展开法核心公式为 \texttt{D2 = np.sum(X**2, axis=1, keepdims=True)} + \texttt{np.sum(Y**2, axis=1)} $-$ \texttt{2.0 * (X @ Y.T)}，再取 \texttt{np.sqrt(np.maximum(D2, 0.0))} 防浮点负零导致 \texttt{NaN}。$N=M=1000, D=64$ 时广播法分配 $1000\times 1000\times 64$ 约 $512\,\text{MB}$ 临时数组，而展开法走 BLAS 仅占 $8\,\text{MB}$，快数十倍以上。
+  \item \textbf{1.8}：数值稳定行 Softmax 分三步：\texttt{S = S - S.max(axis=-1, keepdims=True)}，随后 \texttt{W = np.exp(S)}，再除以 \texttt{W.sum(axis=-1, keepdims=True)}。确认 \texttt{@} 版本（\texttt{Q @ K.swapaxes(-1,-2) / np.sqrt(D\_h)}）与 \texttt{einsum} 版本差 $<10^{-12}$，且加 $1000$ 后输出逐位一致。
+\end{itemize}
+
+% ====================================================================
+\section{第 2 章习题解答（2.1--2.8）}
+% ====================================================================
+
+\textbf{2.1 [A]}
+(1) 不是范数。取 $u=(1,0)^T, v=(0,1)^T$，有 $f(u)=1, f(v)=1$，但 $f(u+v) = (\sqrt{1}+\sqrt{1})^2 = 4 > f(u)+f(v)=2$，违背三角不等式（对应非凸单位球）。\\
+(2) 取 $P = \begin{psmallmatrix}1&1\\0&0\end{psmallmatrix}$，显然 $P^2=P$ 但 $P^T\neq P$。取 $b=(0,1)^T$，得 $Pb=(1,0)^T$、$b-Pb=(-1,1)^T$，内积 $\inner{b-Pb}{Pb}=-1\neq 0$（斜投影）。\\
+(3) 错误。$\cos\theta(u,v)=1$ 仅蕴含同向共线，即存在正标量 $\alpha>0$ 使 $u = \alpha v$（如 $u=(2,0)^T, v=(1,0)^T$）。
+
+\textbf{2.2 [A]}
+(1) 设 $A$ 第 1、2 列相同，则 $z=(1,-1,0,\dots,0)^T \in \nul(A)$。若 $\hat{w}$ 是最小二乘解，则 $\hat{w}+tz$ 对任意 $t\in\R$ 有相同拟合向量 $A(\hat{w}+tz)=A\hat{w}$，故\textbf{$\hat{w}$ 不唯一}；但由正交分解唯一性，$\hat{b}=A\hat{w}$ 是 $b$ 在 $\col(A)$ 上的唯一正交投影，\textbf{$\hat{b}$ 必唯一}。\\
+(2) 疏漏一：用训练 MSE 而非未见测试集 MSE 选模型；疏漏二：忽视了权重范数 $\|w_{\text{OLS}}\|_2 \approx 9.94\times 10^6$ 的剧烈爆炸——高次多项式靠相邻高次项巨额正负抵消强行穿过 15 个含噪点，导致区间内剧烈震荡。
+
+\textbf{2.3 [B]}
+对 $A = \begin{psmallmatrix}1&0&1\\0&1&1\\1&1&2\end{psmallmatrix}$ 做行化简得 $\begin{psmallmatrix}1&0&1\\0&1&1\\0&0&0\end{psmallmatrix}$，$\rank(A)=2$。
+\begin{itemize}
+  \item $\row(A) = \spanop\{(1,0,1)^T,\; (0,1,1)^T\}$（维数 $2$）；$\nul(A) = \spanop\{(1,1,-1)^T\}$（维数 $1$），验证两两内积为 $0$，$2+1=3$。
+  \item $\col(A) = \spanop\{(1,0,1)^T,\; (0,1,1)^T\}$（维数 $2$）；$\nul(A^T) = \spanop\{(1,1,-1)^T\}$（维数 $1$），验证两两内积为 $0$，$2+1=3$。
+\end{itemize}
+
+\textbf{2.4 [B]}
+$A = \begin{psmallmatrix}1&-1\\1&0\\1&1\\1&2\end{psmallmatrix},\; b=\begin{psmallmatrix}0\\1\\1\\3\end{psmallmatrix}$。
+(1) 正规方程：$A^TA = \begin{psmallmatrix}4&2\\2&6\end{psmallmatrix},\; A^Tb = \begin{psmallmatrix}5\\7\end{psmallmatrix}$，解得 $\hat{w} = (\frac{4}{5},\; \frac{9}{10})^T = (0.8, 0.9)^T$。拟合值 $(-0.1, 0.8, 1.7, 2.6)^T$，残差 $e = (0.1, 0.2, -0.7, 0.4)^T$，验算 $A^T e = (0.1+0.2-0.7+0.4,\; -0.1+0-0.7+0.8)^T = (0,0)^T$。\\
+(2) Gram-Schmidt：$q_1 = \frac{1}{2}(1,1,1,1)^T$，$r_{11}=2$；$r_{12} = q_1^T a_2 = 1$，$u_2 = a_2 - q_1 = (-\frac{3}{2},-\frac{1}{2},\frac{1}{2},\frac{3}{2})^T$，$\|u_2\|_2 = \sqrt{5} = r_{22}$，$q_2 = \frac{1}{2\sqrt{5}}(-3,-1,1,3)^T$。得 $R = \begin{psmallmatrix}2&1\\0&\sqrt{5}\end{psmallmatrix}$，$Q^T b = (\frac{5}{2},\; \frac{9}{2\sqrt{5}})^T$。回代 $R\hat{w} = Q^T b$ 得 $w_1 = \frac{9}{10},\; w_0 = \frac{4}{5}$，完全一致。
+
+\textbf{2.5 [C]（证明）}
+(1) 设 $k$ 为使 $|x_k| = \norm{x}_\infty$ 的下标，则 $\norm{x}_\infty^2 = x_k^2 \le \sum_{i=1}^n x_i^2 = \norm{x}_2^2 \implies \norm{x}_\infty \le \norm{x}_2$（取 $e_1$ 取等）；再因 $\norm{x}_2^2 = \sum x_i^2 \le (\sum |x_i|)^2 = \norm{x}_1^2 \implies \norm{x}_2 \le \norm{x}_1$（取 $e_1$ 取等）；对全 $1$ 向量 $\mathbf{1}$ 与 $|x|$ 应用 Cauchy-Schwarz：$\norm{x}_1 = \inner{\mathbf{1}}{|x|} \le \norm{\mathbf{1}}_2 \norm{x}_2 = \sqrt{n}\norm{x}_2$（取 $\mathbf{1}$ 取等）。\\
+(2) $(I-P)^T = I-P^T = I-P$，$(I-P)^2 = I-2P+P^2 = I-P$，故 $I-P$ 为正交投影矩阵。又 $\inner{Pb}{(I-P)b} = b^T P^T(I-P)b = b^T(P-P^2)b = 0$，由勾股定理立得 $\norm{b}_2^2 = \norm{Pb}_2^2 + \norm{(I-P)b}_2^2$。$\square$
+
+\textbf{2.6 [C]（证明）}
+由最优性定义，分别比较 $\hat{w}_{\lambda_1}$ 与 $\hat{w}_{\lambda_2}$ 在两个目标上的取值：
+\begin{align*}
+  \norm{A\hat{w}_{\lambda_1}-y}_2^2 + \lambda_1 \norm{\hat{w}_{\lambda_1}}_2^2
+  &\le \norm{A\hat{w}_{\lambda_2}-y}_2^2 + \lambda_1 \norm{\hat{w}_{\lambda_2}}_2^2, \\
+  \norm{A\hat{w}_{\lambda_2}-y}_2^2 + \lambda_2 \norm{\hat{w}_{\lambda_2}}_2^2
+  &\le \norm{A\hat{w}_{\lambda_1}-y}_2^2 + \lambda_2 \norm{\hat{w}_{\lambda_1}}_2^2.
+\end{align*}
+两式相加消去拟合残差项得 $(\lambda_2 - \lambda_1)\norm{\hat{w}_{\lambda_2}}_2^2 \le (\lambda_2 - \lambda_1)\norm{\hat{w}_{\lambda_1}}_2^2$。因 $\lambda_2 > \lambda_1$，立即得到 $\norm{\hat{w}_{\lambda_2}}_2 \le \norm{\hat{w}_{\lambda_1}}_2$。代回第一式移项即得 $\norm{A\hat{w}_{\lambda_2}-y}_2^2 - \norm{A\hat{w}_{\lambda_1}-y}_2^2 \ge \lambda_1(\norm{\hat{w}_{\lambda_1}}_2^2 - \norm{\hat{w}_{\lambda_2}}_2^2) \ge 0$。$\square$
+
+\textbf{2.7--2.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{2.7}：$\varepsilon=10^{-8}$ 时 $A^TA = \begin{psmallmatrix}1+10^{-16} & 1\\ 1 & 1+10^{-16}\end{psmallmatrix}$ 在 float64 中退化为全 $1$ 奇异矩阵，\texttt{solve} 抛 \texttt{LinAlgError}；而 \texttt{np.linalg.qr} 与 \texttt{lstsq} 不平方条件数，全程保持误差 $<10^{-14}$。
+  \item \textbf{2.8}：(1) 实测 $d=1000$ 时标准差 $0.0317$（理论 $0.0316$），$P(|\cos|<0.1)=99.9\%$；(2) 增广矩阵 $A_{\text{aug}} = \begin{psmallmatrix}A\\ \sqrt{\lambda} P\end{psmallmatrix}$（$P$ 去掉首行或首对角置 $0$）用 \texttt{lstsq} 求解，$\lambda=10^{-3}$ 时测试 MSE $= 0.02161$，$\norm{\hat{w}}_2 = 14.73$。
+\end{itemize}
+
+% ====================================================================
+\section{第 3 章习题解答（3.1--3.8）}
+% ====================================================================
+
+\textbf{3.1 [A]}
+取非对称阵 $A = \begin{psmallmatrix}1&4\\0&1\end{psmallmatrix}$，特征值均为 $1 > 0$，但对称化 $S = \frac{1}{2}(A+A^T) = \begin{psmallmatrix}1&2\\2&1\end{psmallmatrix}$ 特征值为 $3$ 与 $-1$，在 $x=(1,-1)^T$ 处 $x^T A x = x^T S x = -2 < 0$（根源：二次型只感知对称部分，非对称阵特征值不能判定二次型符号）。\\
+半正定反例：取 $Q = \begin{psmallmatrix}0&0\\0&-1\end{psmallmatrix}$，顺序主子式 $\Delta_1=0, \Delta_2=0$ 均 $\ge 0$，但 $e_2^T Q e_2 = -1 < 0$（负半定！半正定须检查\textbf{全部主子式} $\ge 0$）。
+
+\textbf{3.2 [A]}
+(a) \textbf{假}。取 $A = \begin{psmallmatrix}1&1\\0&0\end{psmallmatrix}$（特征值 $1,0$，可对角化）与 $B = \begin{psmallmatrix}0&0\\0&1\end{psmallmatrix}$（对角阵），则 $A+B = \begin{psmallmatrix}1&1\\0&1\end{psmallmatrix}$ 不可对角化。\\
+(b) \textbf{真}（实对称阵谱定理引理二已证）。\\
+(c) \textbf{假}。反例 $J_2(0.9)=\begin{psmallmatrix}0.9&1\\0&0.9\end{psmallmatrix}$，特征值全为 $0.9<1$，但 $\|J_2(0.9)^k\|_F$ 先瞬态放大至 $k=9$ 的 $3.9128$ 才衰减。\\
+(d) \textbf{真}。$P_1, P_2$ 元素非负故 $P_1P_2$ 非负，且 $(P_1 P_2)\mathbf{1} = P_1(P_2\mathbf{1}) = P_1\mathbf{1} = \mathbf{1}$。
+
+\textbf{3.3 [B]}
+(1) 特征多项式 $(3-\lambda)^2 - 1 = 0 \implies \lambda_1=4,\; \lambda_2=2$。单位特征向量 $q_1 = \frac{1}{\sqrt{2}}\binom{1}{-1},\; q_2 = \frac{1}{\sqrt{2}}\binom{1}{1}$，谱分解 $S = 4 q_1 q_1^T + 2 q_2 q_2^T$。\\
+(2) 条件数 $\cond(S) = 4/2 = 2$。在特征坐标 $y = Q^T x$ 下 $4y_1^2 + 2y_2^2 = 8 \iff \frac{y_1^2}{2} + \frac{y_2^2}{4} = 1$：短半轴沿 $q_1$ 长 $\sqrt{2}$，长半轴沿 $q_2$ 长 $2$。\\
+(3) $S^{10}$ 最大特征值为 $4^{10} = 1{,}048{,}576$；$S^{-1} = \frac{1}{4}q_1 q_1^T + \frac{1}{2}q_2 q_2^T = \frac{1}{8}\begin{psmallmatrix}3&1\\1&3\end{psmallmatrix}$。
+
+\textbf{3.4 [B]}
+(1) $W = \begin{psmallmatrix}0&1&0\\1&0&1\\0&1&0\end{psmallmatrix}$，$D = \diag(1,2,1)$，$L = \begin{psmallmatrix}1&-1&0\\-1&2&-1\\0&-1&1\end{psmallmatrix}$。\\
+(2) 特征多项式 $-\lambda(\lambda-1)(\lambda-3)=0 \implies \lambda_1=0, \lambda_2=1, \lambda_3=3$（均 $\ge 0$ 且 $0$ 为单根，对应图连通）。单位特征基：$q_1 = \frac{1}{\sqrt{3}}(1,1,1)^T$，$q_2 = \frac{1}{\sqrt{2}}(1,0,-1)^T$，$q_3 = \frac{1}{\sqrt{6}}(1,-2,1)^T$。\\
+(3) $P = D^{-1}W = \begin{psmallmatrix}0&1&0\\0.5&0&0.5\\0&1&0\end{psmallmatrix}$，每行非负和为 $1$。解 $\pi^T P = \pi^T$ 且 $\sum \pi_i = 1$（或按度数比例 $\pi_i \propto d_i$）立得平稳分布 $\pi^* = (\frac{1}{4}, \frac{1}{2}, \frac{1}{4})$。
+
+\textbf{3.5 [C]（证明）}
+(1) 对任意 $x\in\R^n$，$x^T(\alpha A+\beta B)x = \alpha(x^TAx) + \beta(x^TBx) \ge 0$，且 $\alpha A+\beta B$ 对称，故半正定。\\
+(2) $H$ 对称且对 $x\neq 0$ 有 $x^T H x = \norm{Xx}_2^2 + \lambda\norm{x}_2^2 \ge \lambda\norm{x}_2^2 > 0$，故 $H\succ 0$。若 $X^TX$ 特征值为 $\mu_i \ge 0$，则 $H$ 特征值为 $\mu_i+\lambda$，故 $\cond(H) = \frac{\mu_{\max}+\lambda}{\mu_{\min}+\lambda}$。\\
+(3) 谱分解 $A = Q\Lambda Q^T$（$\lambda_i\ge 0$），令 $A^{1/2} := Q\Lambda^{1/2}Q^T$（$\Lambda^{1/2}=\diag(\sqrt{\lambda_i})$），显然对称半正定且 $(A^{1/2})^2 = Q\Lambda Q^T = A$。唯一性：若 $B\succeq 0$ 满足 $B^2 = A$，则对每个 $A$ 的特征子空间 $E_\mu(A)$，因 $BA=B^3=AB$，$E_\mu(A)$ 是 $B$-不变子空间；在其上 $B$ 对称半正定且特征值平方均为 $\mu$，故特征值必全为 $\sqrt{\mu}$，即 $B|_{E_\mu} = \sqrt{\mu} I = A^{1/2}|_{E_\mu}$，从而 $B = A^{1/2}$ 唯一。$\square$
+
+\textbf{3.6 [C]（证明）}
+任取非零 $x\perp q_1$，在标准正交基 $\{q_1,\dots,q_n\}$ 下展开为 $x = \sum_{i=2}^n c_i q_i$（因 $c_1 = q_1^T x = 0$）。代入 Rayleigh 商：
+\[
+  \frac{x^T S x}{x^T x} = \frac{\sum_{i=2}^n \lambda_i c_i^2}{\sum_{i=2}^n c_i^2} \ge \frac{\lambda_2 \sum_{i=2}^n c_i^2}{\sum_{i=2}^n c_i^2} = \lambda_2,
+\]
+且取 $x = q_2$ 时等号成立。对连通图拉普拉斯 $L$，$\lambda_1=0$ 对应 $q_1 = \frac{1}{\sqrt{n}}\mathbf{1}$，约束 $\sum x_i = 0$ 恰为 $x \perp q_1$，因此极小化图平滑能量 $x^T L x = \sum_{\{i,j\}\in E} w_{ij}(x_i-x_j)^2$ 的单位信号必为 Fiedler 向量 $q_2$。$\square$
+
+\textbf{3.7--3.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{3.7}：实测 $m=2$ 在 $k=9$ 达峰 $3.9128$；$m=3$ 在 $k\approx 19$ 达峰 $\approx 28.5$；$m=4$ 在 $k\approx 29$ 达峰 $>160$。\texttt{eigh} 利用对称性比 \texttt{eig} 快 3--5 倍、零虚部且正交误差 $<10^{-13}$。
+  \item \textbf{3.8}：用 \texttt{P @ L @ P.T} 置换节点后，Fiedler 向量 \texttt{q2} 的正负号严格分离两个社群（允许整体取反号），准确率恒为 $100\%$。
+\end{itemize}
+
+% ====================================================================
+\section{第 4 章习题解答（4.1--4.8）}
+% ====================================================================
+
+\textbf{4.1 [A]}
+(a) \textbf{假}。取错切阵 $A=\begin{psmallmatrix}1&1\\0&1\end{psmallmatrix}$，特征值全为 $1$，但 $A^TA=\begin{psmallmatrix}1&1\\1&2\end{psmallmatrix}$ 奇异值为 $\frac{\sqrt{5}\pm 1}{2}\approx 1.618, 0.618 \neq 1$（仅正规阵满足 $\sigma_i = |\lambda_i|$）。\\
+(b) \textbf{真}（未去中心化时原点到质心的位移能量主导总平方和）。\\
+(c) \textbf{真}（显式形成 $\widetilde{X}^T\widetilde{X}$ 会使条件数平方，淹没小奇异值）。\\
+(d) \textbf{真}（定理~\ref{thm:ch4-min-norm} 直接推论）。
+
+\textbf{4.2 [A]}
+取 $A = \begin{psmallmatrix}1&1\\0&0\end{psmallmatrix},\; B = \begin{psmallmatrix}1&0\\0&0\end{psmallmatrix}$。算得 $AB = \begin{psmallmatrix}1&0\\0&0\end{psmallmatrix} \implies (AB)^+ = \begin{psmallmatrix}1&0\\0&0\end{psmallmatrix}$；但 $A^+ = \frac{1}{2}\begin{psmallmatrix}1&0\\1&0\end{psmallmatrix},\; B^+ = \begin{psmallmatrix}1&0\\0&0\end{psmallmatrix} \implies B^+ A^+ = \frac{1}{2}\begin{psmallmatrix}1&0\\0&0\end{psmallmatrix} \neq (AB)^+$。同例中 $AA^+ = \begin{psmallmatrix}1&0\\0&0\end{psmallmatrix} \neq \frac{1}{2}\begin{psmallmatrix}1&1\\1&1\end{psmallmatrix} = A^+A$（因 $\col(A)\neq \row(A)$）。
+
+\textbf{4.3 [B]}
+(1) $AA^T = \begin{psmallmatrix}2&0\\0&4\end{psmallmatrix}$，按降序得 $\sigma_1 = 2, u_1 = \binom{0}{1}$；$\sigma_2 = \sqrt{2}, u_2 = \binom{1}{0}$。由 $v_i = \frac{1}{\sigma_i}A^T u_i$ 得 $v_1 = (0,0,1)^T,\; v_2 = \frac{1}{\sqrt{2}}(1,1,0)^T$，零空间补基 $v_3 = \frac{1}{\sqrt{2}}(1,-1,0)^T$。秩 1 近似 $A_1 = 2 u_1 v_1^T = \begin{psmallmatrix}0&0&0\\0&0&2\end{psmallmatrix}$，相对 Frobenius 误差 $\frac{\sigma_2}{\sqrt{\sigma_1^2+\sigma_2^2}} = \frac{\sqrt{2}}{\sqrt{6}} = \frac{1}{\sqrt{3}}\approx 0.5774$。\\
+(2) $A^+ = V_2\Sigma_2^{-1}U^T = \begin{psmallmatrix}1/2 & 0\\ 1/2 & 0\\ 0 & 1/2\end{psmallmatrix}$，$x^+ = A^+\binom{2}{4} = (1,1,2)^T$。\\
+(3) $\nul(A) = \spanop\{v_3\}$，$v_3^T x^+ = \frac{1}{\sqrt{2}}(1 - 1 + 0) = 0$，精确正交。
+
+\textbf{4.4 [B]}
+(1) $\mu = (4,5)$，$\widetilde{X} = \begin{psmallmatrix}-3&-1\\-1&-3\\1&3\\3&1\end{psmallmatrix}$。\\
+(2) $\Sigma_{\text{cov}} = \frac{1}{4}\widetilde{X}^T\widetilde{X} = \begin{psmallmatrix}5&3\\3&5\end{psmallmatrix}$，特征值 $\lambda_1=8, \lambda_2=2$，主方向 $v_1 = \frac{1}{\sqrt{2}}\binom{1}{1},\; v_2 = \frac{1}{\sqrt{2}}\binom{-1}{1}$。\\
+(3) 投影坐标 $Z_1 = \widetilde{X}v_1 = (-2\sqrt{2}, -2\sqrt{2}, 2\sqrt{2}, 2\sqrt{2})^T$；重构 $\widehat{X}_1 = \mathbf{1}\mu^T + Z_1 v_1^T$ 得四点 $(2,3),\allowbreak(2,3),\allowbreak(6,7),\allowbreak(6,7)$；PC1 解释方差比例为 $\frac{8}{8+2} = 80\%$。
+
+\textbf{4.5 [C]（证明）}
+(1) $Q_1 A Q_2 = (Q_1 U)\Sigma (Q_2^T V)^T$。因正交阵乘积仍正交（$(Q_1U)^T(Q_1U)=I$，$(Q_2^TV)^T(Q_2^TV)=I$），此即 $Q_1 A Q_2$ 的合法 SVD，故奇异值集合 $\Sigma$ 完全不变，从而 2-范数 $\sigma_1$ 与 Frobenius 范数 $\sqrt{\sum\sigma_i^2}$ 均不变。\\
+(2) 令 $Q = UV^T,\; S = V\Sigma V^T$。显然 $Q^TQ = VU^TUV^T = I_n$（正交），$S$ 对称且特征值 $\sigma_i\ge 0$（半正定），且 $QS = UV^TV\Sigma V^T = U\Sigma V^T = A$。$\square$
+
+\textbf{4.6 [C]（证明）}
+将 $A = U\Sigma V^T$ 代入得 $A^TA + \lambda I_n = V(\Sigma^T\Sigma + \lambda I_n)V^T$，求逆后右乘 $A^T b = V\Sigma^T U^T b$：
+\[
+  x_\lambda = V(\Sigma^T\Sigma + \lambda I_n)^{-1}\Sigma^T U^T b
+  = \sum_{i=1}^r \frac{\sigma_i}{\sigma_i^2 + \lambda}(u_i^T b) v_i
+  = \sum_{i=1}^r \underbrace{\frac{\sigma_i^2}{\sigma_i^2+\lambda}}_{f_\lambda(\sigma_i)} \frac{u_i^T b}{\sigma_i} v_i.
+\]
+令 $\lambda \to 0^+$，每一项 $f_\lambda(\sigma_i) \to 1$，故极限恰为 $\sum_{i=1}^r \frac{u_i^T b}{\sigma_i}v_i = A^+ b$。滤波解释：大奇异值（$\sigma_i \gg \sqrt{\lambda}$）处 $f_\lambda \approx 1$ 几乎无损保留信号；微小奇异值（$\sigma_i \ll \sqrt{\lambda}$）处 $f_\lambda \approx \sigma_i^2/\lambda \to 0$，强力压制噪声被 $1/\sigma_i$ 放大的灾难。$\square$
+
+\textbf{4.7--4.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{4.7}：由于每步梯度 $A^T(Ax-b) \in \row(A)$，从 $x^{(0)}=0$ 出发的轨迹永远留在 $\row(A)$ 内，绝不产生 $\nul(A)$ 分量，故必收敛到唯一最小范数解 $x^+$；随机初值则保留了初值的零空间分量 $(I-A^+A)x^{(0)}$，使范数更大但行空间投影与 $x^+$ 完全重合。
+  \item \textbf{4.8}：能量守恒误差 $<10^{-14}$；$\varepsilon=10^{-8}$ 时 \texttt{svd} 精准给出 $\sigma_2 \approx 10^{-8}$，而 \texttt{eigh(X.T @ X)} 因 $1 + 10^{-16} == 1$ 丢掉全部精度。
+\end{itemize}
+
+% ====================================================================
+\section{第 5 章习题解答（5.1--5.8）}
+% ====================================================================
+
+\textbf{5.1 [A]}
+(a) \textbf{假}。梯度只决定\textbf{局部}瞬时变化率最快的方向，对非凸多峰函数或偏心椭圆等高线，负梯度既不一定指向全局最优点，甚至不指向局部极小点（如图 5.1 所示，负梯度垂直接触椭圆切线而非直指圆心）。\\
+(b) \textbf{假}。1D 反例 $f(x) = x^3$ 在 $x^*=0$ 处 $f'(0)=0$ 且 $f''(0)=0 \ge 0$（半正定），但 $0$ 是拐点而非局部极小值（2D 反例 $f(x_1,x_2)=x_1^2 + x_2^3$ 在 $(0,0)$ 处 $H=\diag(2,0)\succeq 0$ 但非极小值）。
+
+\textbf{5.2 [A]}
+致命错误在于把 $\tr(AWB(dW)^T)$ 错误化简成了 $\tr(BW^TA\,dW)$！对非对称 $A,B$，正确转置应为：
+\[
+  \tr(AWB(dW)^T) = \tr\big((AWB(dW)^T)^T\big) = \tr\big((dW) B^T W^T A^T\big) = \tr(B^T W^T A^T\,dW).
+\]
+因此 $df = \tr\big((BW^TA + B^TW^TA^T)\,dW\big) = \tr\big((A^TWB^T + AWB)^T dW\big)$，正确梯度为 $\nabla_W f = A^T W B^T + A W B$（仅当 $A,B$ 均对称时才简化为 $2AWB$）。
+
+\textbf{5.3 [B]}
+(a) $\nabla f(x_1, x_2) = (3x_1^2 - 3x_2,\; -3x_1 + 3x_2^2)^T$。在 $(1,0)^T$ 处 $\nabla f(1,0) = (3, -3)^T$，故 $D_u f(1,0) = 3\cdot\frac{3}{5} + (-3)\cdot\frac{4}{5} = -\frac{3}{5} = -0.6$。\\
+(b) 令 $\nabla f = 0 \implies x_2 = x_1^2$ 且 $x_1 = x_2^2 = x_1^4 \implies x_1(x_1^3-1)=0$，得两实驻点 $(0,0)^T$ 与 $(1,1)^T$。Hessian $H_f(x) = \begin{psmallmatrix}6x_1 & -3\\ -3 & 6x_2\end{psmallmatrix}$：
+\begin{itemize}
+  \item 在 $(0,0)^T$：$H = \begin{psmallmatrix}0&-3\\-3&0\end{psmallmatrix}$，特征值 $\pm 3$（不定），为\textbf{鞍点}；
+  \item 在 $(1,1)^T$：$H = \begin{psmallmatrix}6&-3\\-3&6\end{psmallmatrix}$，特征值 $9, 3 > 0$（正定），为\textbf{严格局部极小值点}。
+\end{itemize}
+
+\textbf{5.4 [B]}
+(a) 前向：$z = Wx = (1, 0)^T$；$a = \tanh(z) \approx (0.7616,\; 0.0000)^T$；$L = \frac{1}{2}\big((0.7616-1)^2 + (0-1)^2\big) \approx 0.5284$。\\
+(b) 反向 VJP：$\nabla_a L = a - y \approx (-0.2384,\; -1.0000)^T$；因 $\tanh'(z)=1-a^2 \approx (0.4200,\; 1.0000)^T$，得 $\nabla_z L = (\nabla_a L)\had(1-a^2) \approx (-0.1001,\; -1.0000)^T$；于是
+\[
+  \nabla_W L = (\nabla_z L) x^T \approx \begin{pmatrix}-0.1001 & 0\\ -1.0000 & 0\end{pmatrix},\qquad
+  \nabla_x L = W^T \nabla_z L \approx \begin{pmatrix}-0.1001\\ -1.8999\end{pmatrix}.
+\]
+
+\textbf{5.5 [C]（证明）}
+取全微分：$dJ = (Xw-y)^T X\,dw + \lambda w^T dw = \big(X^T(Xw-y) + \lambda w\big)^T dw$，故 $\nabla_w J(w) = (X^TX + \lambda I)w - X^Ty$。再微分得 $d(\nabla_w J) = (X^TX + \lambda I)\,dw$，故 $H_J(w) = X^TX + \lambda I$。对一切非零 $v$，$v^T H_J v = \norm{Xv}_2^2 + \lambda\norm{v}_2^2 \ge \lambda\norm{v}_2^2 > 0$，故无论 $X$ 秩如何均有 $H_J \succ 0$（可逆）。令 $\nabla_w J = 0$ 得唯一驻点 $w_{\text{ridge}} = (X^TX+\lambda I)^{-1}X^Ty$，由二阶展开 $J(w) = J(w_{\text{ridge}}) + \frac{1}{2}(w-w_{\text{ridge}})^T H_J (w-w_{\text{ridge}}) \ge J(w_{\text{ridge}})$ 知其为唯一全局极小点。$\square$
+
+\textbf{5.6 [C]（证明）}
+构造拉格朗日函数 $\mathcal{L}(u, v, \alpha, \beta) = u^T A v - \frac{\alpha}{2}(u^T u - 1) - \frac{\beta}{2}(v^T v - 1)$。分别对 $u, v$ 求梯度置零：
+\[
+  \nabla_u \mathcal{L} = Av - \alpha u = 0 \implies Av = \alpha u,\qquad
+  \nabla_v \mathcal{L} = A^T u - \beta v = 0 \implies A^T u = \beta v.
+\]
+左乘 $u^T$ 于第一式、左乘 $v^T$ 于第二式，结合单位长约束得 $\alpha = u^T A v = \beta$。记 $\sigma := \alpha = \beta$，代回得 $A^T A v = \sigma A^T u = \sigma^2 v$，即 $v$ 为 $A^T A$ 的单位特征向量，$\sigma^2$ 为对应特征值；目标值 $u^T A v = \sigma$ 最大化时，必取最大奇异值 $\sigma = \sigma_1(A)$。$\square$
+
+\textbf{5.7--5.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{5.7}：\texttt{c @ (W2 @ W1)} 需 $O(d^3)$（约 $5\times 10^8$ 次乘加），而反向 \texttt{(c @ W2) @ W1} 仅做两次向量-矩阵乘 $O(d^2)$（约 $1.3\times 10^6$ 次），在 $d=800$ 时通常加速 $50\text{--}200\times$。
+  \item \textbf{5.8}：解析反传核心四式：\texttt{dY = Y\_hat - Y}、\texttt{dW2 = dY @ A1.T}、\texttt{dZ1 = (W2.T @ dY) * (1.0 - A1**2)}、\texttt{dW1 = dZ1 @ X.T}。用 \texttt{check\_gradient} 校验两矩阵相对误差均 $<10^{-10}$。
+\end{itemize}
+
+% ====================================================================
+\section{第 6 章习题解答（6.1--6.8）}
+% ====================================================================
+
+\textbf{6.1 [A]}
+(a) \textbf{假}。负梯度仅保证\textbf{充分小步长}下函数下降；一旦步长跨过 $\eta_{\max}=2/\lambda_{\max}$（如正文 6.1 节 $f(w)=\frac{1}{2}(w_1^2+10w_2^2)$ 取 $\eta=0.21 > 0.2$），就会越过谷底飞到更高处，$f(w_{t+1}) > f(w_t)$ 且指数发散。\\
+(b) \textbf{假}。当 $\epsilon=10^{-14}$ 时，$f(w+\epsilon e_i)-f(w-\epsilon e_i)$ 发生严重灾难性抵消，浮点舍入误差 $O(u/\epsilon)\sim 10^{-2}$ 远大于 $\epsilon=10^{-5}$ 处的最佳平衡点（$\sim 10^{-11}$）。
+
+\textbf{6.2 [A]}
+错误一：\textbf{数据泄露}——用含测试集的 \texttt{X\_all} 算 \texttt{mu, sigma} 会将测试分布信息提前泄露给训练过程，应先切分训练集/测试集，仅在训练集上 \texttt{fit} 得到 \texttt{mu\_tr, sigma\_tr} 再变换两边。\\
+错误二：\textbf{推理坐标系错配}——\texttt{w\_std} 是在标准化空间学出的权重，直接乘未缩放的 \texttt{x\_new} 会导致量纲彻底错乱；正确做法是推理时先用同一组 \texttt{(mu\_tr, sigma\_tr)} 标准化 \texttt{x\_new}，或按式~\eqref{eq:ch6-recover-w} 解析还原出原始空间权重 $(w, b)$。
+
+\textbf{6.3 [B]}
+(a) $Q=\begin{psmallmatrix}5&3\\3&5\end{psmallmatrix}$ 特征值 $\lambda_{\max}=8,\; \lambda_{\min}=2$，条件数 $\cond(Q)=4$；解 $Qw^*=b$ 得 $w^*=(1,1)^T$。\\
+(b) $\eta_{\max} = 2/8 = 0.25$；最优步长 $\eta^* = 2/(8+2) = 0.2$；最优单步收缩因子 $\rho^* = \frac{4-1}{4+1} = 0.6$。\\
+(c) 在 $w_0=(0,0)^T$ 处 $\nabla f(w_0) = -b = (-8,-8)^T$。取 $\eta^*=0.2$ 得 $w_1 = (1.6, 1.6)^T$（误差 $e_1=(0.6,0.6)^T = -0.6 e_0$）；取 $\eta=1/8=0.125$ 得 $w_1 = (1,1)^T = w^*$。\textbf{原因}：初始误差 $e_0 = (-1,-1)^T$ 恰好完全落在 $\lambda_{\max}=8$ 的特征方向 $v_1=\frac{1}{\sqrt{2}}(1,1)^T$ 上（在 $\lambda_{\min}=2$ 方向分量为 $0$），故取 $\eta=1/\lambda_{\max}=1/8$ 使因子 $1-\eta\lambda_{\max} = 0$，一步直接归零！
+
+\textbf{6.4 [B]}
+由 $\tilde{x}_1 = \frac{x_1-100}{25},\; \tilde{x}_2 = \frac{x_2-10}{5}$，还原得：
+\[
+  w_1 = \frac{50}{25} = 2,\qquad w_2 = \frac{-15}{5} = -3,\qquad
+  b = 300 - 2\times 100 - (-3)\times 10 = 130,
+\]
+即 $\hat{y} = 130 + 2x_1 - 3x_2$。代入 $(125, 5)$：标准化坐标 $\tilde{x}=(1, -1)$，标准化式得 $300+50-(-15)=365$；原始式得 $130+250-15=365$，完全相等。
+
+\textbf{6.5 [C]（证明）}
+由第 3 章谱映射性质，$H_\alpha = H_0 + \alpha I$ 的最大、最小特征值为 $\lambda_{\max}+\alpha$ 与 $\lambda_{\min}+\alpha$，故 $\cond(H_\alpha) = \frac{\lambda_{\max}+\alpha}{\lambda_{\min}+\alpha}$。作差得
+\[
+  \cond_0 - \cond(H_\alpha) = \frac{\lambda_{\max}}{\lambda_{\min}} - \frac{\lambda_{\max}+\alpha}{\lambda_{\min}+\alpha}
+  = \frac{\alpha(\lambda_{\max} - \lambda_{\min})}{\lambda_{\min}(\lambda_{\min}+\alpha)} > 0,
+\]
+故 $\cond(H_\alpha) < \cond_0$。进一步，最优收缩因子 $\rho^*(\alpha) = \frac{\cond(H_\alpha)-1}{\cond(H_\alpha)+1} = \frac{\lambda_{\max}-\lambda_{\min}}{\lambda_{\max}+\lambda_{\min}+2\alpha}$，分子为正常数、分母随 $\alpha>0$ 严格增大，故 $\rho^*(\alpha)$ 严格单调减小。$\square$
+
+\textbf{6.6 [C]（推导）}
+对 $E(\epsilon) = \frac{K}{6}\epsilon^2 + \frac{Mu}{\epsilon}$ 求导并置零：
+\[
+  E'(\epsilon) = \frac{K}{3}\epsilon - \frac{Mu}{\epsilon^2} = 0 \implies \epsilon^* = \left(\frac{3Mu}{K}\right)^{1/3}.
+\]
+因 $E''(\epsilon) = \frac{K}{3} + \frac{2Mu}{\epsilon^3} > 0$，此为唯一极小值点。代回得最小总误差：
+\[
+  E(\epsilon^*) = \frac{K}{6}\left(\frac{3Mu}{K}\right)^{2/3} + Mu\left(\frac{K}{3Mu}\right)^{1/3}
+  = \frac{3}{2}\left(\frac{K}{3}\right)^{1/3}(Mu)^{2/3}.
+\]
+代入 $K\sim M\sim 1$ 与 $u\approx 2.22\times 10^{-16}$：$\epsilon^* \approx (6.66\times 10^{-16})^{1/3} \approx 8.7\times 10^{-6} \sim 10^{-5}$，$E(\epsilon^*) \approx 3.8\times 10^{-11}$，与图~\ref{fig:ch6-gradcheck} 实测底部（$\epsilon=10^{-5}$ 处误差 $2.62\times 10^{-11}$）数量级完全吻合。$\square$
+
+\textbf{6.7--6.8 [D]（编程自检要点）}
+\begin{itemize}
+  \item \textbf{6.7}：原始特征尺度差 $10^5$ 倍，Hessian 条件数约 $10^{10}$；标准化后条件数降至 $\sim 1.1$--$1.3$，最优步长 $\eta^* \approx 1.0$，不到 $20$ 步相对误差即可跌破 $10^{-10}$。
+  \item \textbf{6.8}：注意 $L_2(w)$ 前向写成 \texttt{np.mean(np.logaddexp(0.0, X @ w) - y * (X @ w)) + 0.5 * lam * np.dot(w, w)}，梯度为 \texttt{(X.T @ (1.0 / (1.0 + np.exp(-X @ w)) - y)) / N + lam * w}；两损失在 $\epsilon=10^{-5}$ 下相对误差均 $\sim 10^{-11} < 10^{-9}$，改错符号后相对误差跳升至 $O(1)$ 并立即触发 \texttt{passed == False}。
+\end{itemize}

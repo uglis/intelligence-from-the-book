@@ -1,0 +1,107 @@
+\chapter*{序章：八校培养共识、七卷全景与本卷使用指南}
+\addcontentsline{toc}{chapter}{序章：八校培养共识、七卷全景与本卷使用指南}
+\markboth{序章\quad 八校培养共识与七卷全景}{}
+
+\begin{chapIntro}{本章定位}
+本序章说明整套七卷本本科人工智能自学讲义的课程设计依据（综合北美四大 CMU、MIT、Stanford、UC Berkeley 与国内清北交南最新培养方案）、第 1 卷在整套体系中的精确位置与八校考点覆盖对照，以及阅读与习题自检守则。
+\end{chapIntro}
+
+\section*{0.1\quad 从八校培养方案到七卷本阶梯体系}
+\addcontentsline{toc}{section}{0.1\quad 从八校培养方案到七卷本阶梯体系}
+
+对照北美四大（CMU BSAI、MIT Course 6-4、Stanford CS AI Track、UC Berkeley EECS/CS）与国内四校（清华智班、北大通班、上交国智班、南京大学 2025 版 AI 培养方案），顶尖本科 AI 教育已形成高度一致的能力结构：
+\begin{enumerate}
+  \item \textbf{AI 定制化的数理与编程底座}（MIT 6.100+18.C06、Stanford Math 51+CS109、清华《AI 应用数学》）：不按纯数学系那样深挖多项式环或曲面积分，而是把\textbf{Python/NumPy 数值编程、AI 线性代数、多元矩阵微积分、概率统计与信息论}打通为可直接建模的底层语言。
+  \item \textbf{经典 AI 决策与现代统计机器学习并重}（CMU 07-280/07-380、Stanford CS221+CS229、Berkeley CS188+189+EECS127、南大最优化与 ML）：先用搜索、概率图与 MDP 建立智能体决策直觉，再系统攻克凸优化与经典机器学习的泛化理论。
+  \item \textbf{深度学习前置、408 升级为 AI 系统与科研复现}（交大《深度学习及应用》、Stanford CS224n / CS231n / CS234 / CS336、CMU 15-213、MIT SERC）：尽早吃透自动微分与 Transformer，将计算机组成原理/OS/网络知识升级为 GPU 显存与算术强度直觉，最终通过顶会复现与消融实验完成本科科研训练。
+\end{enumerate}
+
+据此，本系列划分为职责纯粹、零跨卷越界的\textbf{七卷本体系}：
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}p{13mm}p{52mm}X@{}}
+\toprule
+\textbf{卷次} & \textbf{卷名} & \textbf{核心主题与对应课程} \\
+\midrule
+\textbf{第 1 卷} & \textbf{Python/NumPy 编程、AI 线性代数与多元微积分} & \textbf{（本卷）}向量化与广播、矩阵乘法四视角、正交投影与最小二乘、谱定理与 PSD、SVD/PCA、矩阵微分与二次型梯度下降 \\
+第 2 卷 & AI 概率论、数理统计、信息论与首个回归/分类闭环 & 条件独立与 Bayes、多元高斯、浓度不等式、熵/交叉熵/KL 散度、MLE/MAP、纯 NumPy 线性/逻辑/Softmax 回归全实验 \\
+第 3 卷 & 经典人工智能：搜索、博弈、概率图与序列决策 & A* 搜索、Minimax/$\alpha$-$\beta$/MCTS、CSP、贝叶斯网络与 HMM 推断、MDP 与 Bellman 方程（衔接 408 算法） \\
+第 4 卷 & 凸优化与经典机器学习 & $L$-光滑/强凸收敛率、拉格朗日对偶与 KKT、偏差-方差与泛化、SVM/核方法、树与 GBDT、聚类与 EM 算法 \\
+第 5 卷 & 深度学习、自动微分与现代架构 & 手写 Micro-Autograd、残差/归一化/AdamW/排错、CNN 与 ViT、Transformer 与迷你 GPT、VAE 与扩散模型 \\
+第 6 卷 & 强化学习、大模型后训练与 AI 系统 & DQN/PPO、Scaling Laws/SFT/LoRA/RLHF/DPO/GRPO、GPU HBM/SRAM 与 Roofline、FlashAttention、$16\Phi$ 显存与多卡并行 \\
+第 7 卷 & AI 科研实践、严谨评测、安全伦理与顶会复现 & 论文三遍精读、多随机种子与消融实验、误差分析、分布偏移与安全伦理边界、完整顶会复现与技术报告 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.2\quad 第 1 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.2\quad 第 1 卷八校核心考点覆盖对照表}
+
+为确保本卷\textbf{不偷工减料、不留基础漏洞，同时不堆砌冷门炫技内容}，下表列出八校对“AI 数值编程 + 线代 + 微积分”模块要求的全部核心考点及其在本卷的对应章节：
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{34mm}p{34mm}p{16mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+NumPy 内存/广播/向量化与 \texttt{einsum} & MIT 6.100 / Stanford CS231n & 第 1 章 & 第 2--6 卷全部代码实现与高维张量排错 \\
+矩阵乘法四视角（列/行/外积/批处理） & MIT 18.06 / 18.C06 & 第 1 章 & Attention 加权、SVD/LoRA 秩 1 分解、反传外积梯度 \\
+向量空间、秩、行列式与高维几何 & MIT 18.06 / 清华 AI 数学 & 第 2 章 & 线性变换直觉、$L_1/L_2$ 正则化、Embedding 检索与维度灾难 \\
+四大子空间、超定最小二乘与岭回归 & MIT 18.06 / Stanford Math 51 & 第 2 章 & 线性回归解析解、过拟合与正则化初体验 \\
+特征值几何、特征分解、Jordan 链与矩阵幂 & MIT 18.06 / 18.C06 & 第 3 章 & 动力系统稳定性、RNN/梯度迭代发散判定 \\
+实对称谱定理、PSD 矩阵与条件数 $\kappa$ & 18.C06 / Berkeley EECS127 & 第 3 章 & 协方差阵、核矩阵、Hessian 凸地形与收敛快慢 \\
+行随机矩阵与图拉普拉斯矩阵直觉 & MIT 18.06 / 北大通班 & 第 3 章 & 马尔可夫链、MDP、Softmax 注意力、谱聚类 \\
+SVD、最优低秩近似、伪逆与 PCA & 18.06 / CS229 / 清华 & 第 4 章 & 数据降维、图像压缩、过参数化最小范数、LoRA \\
+方向导数、Jacobian 链式法则与 Hessian & Stanford Math 51 / CS229 & 第 5 章 & 第 5 卷反向传播、二阶优化与局部极值判定 \\
+拉格朗日乘子与矩阵微分迹技巧 & Berkeley EECS127 / CS229 & 第 5 章 & PCA 约束优化、第 4 卷对偶/KKT、矩阵目标求导 \\
+二次型梯度下降步长阈值与有限差分 & CS229 / CS231n & 第 6 章 & 特征标准化调参、手写反向传播正确性自检 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.3\quad 本卷知识阶梯与四层习题使用法}
+\addcontentsline{toc}{section}{0.3\quad 本卷知识阶梯与四层习题使用法}
+
+本卷严格按\textbf{零超前依赖}的有向无环阶梯展开（先内积投影，后谱定理与正定性，再 SVD 与微积分，最后落脚梯度下降动力学）：
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=36mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white, line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\Python/NumPy 与\\矩阵乘法四视角};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\范数、高维几何与\\正交投影最小二乘};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\特征分解、谱定理\\与半正定矩阵};
+
+  \node[ch, below=9mm of c1] (c4) {\textbf{第 4 章}\\SVD、伪逆与\\PCA 降维实战};
+  \node[ch, below=9mm of c2] (c5) {\textbf{第 5 章}\\AI 多元微积分\\与矩阵微分};
+  \node[goal, below=9mm of c3] (c6) {\textbf{\color{ochre}第 6 章（通向第 2 卷）}\\二次型梯度下降与\\有限差分梯度校验};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] ([xshift=-10mm]c2.south) -- ([xshift=4mm]c4.north);
+  \draw[arr] ([xshift=-12mm]c3.south) -- ([xshift=12mm]c4.north);
+  \draw[arr] (c1.south) -- (c4.north);
+  \draw[arr] (c2.south) -- (c5.north);
+  \draw[arr] ([xshift=-4mm]c3.south) -- ([xshift=10mm]c5.north);
+  \draw[arr] (c3.south) -- (c6.north);
+  \draw[arr] (c5) -- (c6);
+\end{tikzpicture}}
+\end{center}
+
+\begin{insightBox}{阅读与做题建议（零压力、真掌握）}
+\begin{itemize}
+  \item \textbf{区分主干与选读}：正文全部为后续必用主干，顺着“具体小例 $\to$ 严格推导 $\to$ 代码验证”即可流畅读懂；紫色边框的\textbf{【选读拓展】}初读可直接跳过，二刷再看。
+  \item \textbf{善用每章 8 道四层习题}：A 类（概念反例）和 B 类（手算小例）务必合上书独立完成；C 类（实用证明）卡住时先看题末【提示】；D 类（编程实验）务必亲手跑出断言通过再对照附录。
+\end{itemize}
+\end{insightBox}

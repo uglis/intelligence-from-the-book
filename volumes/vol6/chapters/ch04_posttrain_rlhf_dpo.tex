@@ -1,0 +1,618 @@
+\chapter[大模型后训练：SFT、RLHF、DPO 与 RLVR]{大模型后训练与对齐：SFT、RLHF、DPO 与推理时缩放}
+\label{ch:posttrain-rlhf-dpo}
+
+\chapEpigraph{如果我们为了达成目标而使用一台无法有效干预其运行的机械装置，那我们最好无比确信，放入机器里的目标正是我们真正渴望的目标。}{Norbert Wiener（诺伯特·维纳，《科学》，1960）}
+
+\begin{chapIntro}{本章导读：给“预训练怪兽”装上人类价值观与深度推理脊梁}
+在第 5 卷中，我们用万亿词元和下一个词预测（Next-Token Prediction）锻造出了知识渊博的预训练基座模型。然而，如果你直接问一个刚完成预训练的基座模型“请用通俗语言解释拉格朗日乘子”，它往往不会老实作答，反而可能顺着互联网语料的统计惯性继续帮你补写：“……问题 2：什么是 KKT 条件？问题 3：……”——因为它的目标只是\textbf{模仿互联网文档的概率分布}，而不是\textbf{帮助人类、诚实作答、安全拒答或独立攻克难题}。
+
+如何把一座沉睡的“语言世界模拟器”，点化为听得懂指令、守得住底线、甚至能自主反思与推导数学证明的现代智能体？这就是\textbf{大模型后训练（Post-Training）与对齐（Alignment）}的核心使命。本章将接续第~\ref{ch:trpo-ppo-grpo} 章的 PPO 与 GRPO 武器库，完成四重跨越：
+\begin{enumerate}
+  \item \textbf{后训练全景与监督微调（SFT）}：理清预训练 $\to$ SFT $\to$ 偏好对齐 / 可验证推理强化的全链路，剖析 SFT 仅靠模仿学习为何遭遇能力天花板。
+  \item \textbf{Bradley--Terry 偏好建模与 KL 正则 RLHF 闭式最优解}：调用第 4 卷第 2 章的拉格朗日乘子法与信息论 Gibbs 不等式，严格证明 KL 正则 RLHF 的全局唯一最优策略 $\pi^*(y\mid x) = \frac{1}{Z(x)}\pi_{\mathrm{ref}}(y\mid x)\exp\big(\frac{1}{\beta}r(x,y)\big)$。
+  \item \textbf{直接偏好优化（DPO）天书级推导}：反解隐式奖励并代入 Bradley--Terry 模型，亲眼见证无法计算的配分函数 $Z(x)$ 如何\textbf{恒等抵消}；进而深入剖析 DPO 梯度的自适应错判权重 $\sigma(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w))$。
+  \item \textbf{奖励黑客（Goodhart 定律）与可验证奖励推理（RLVR）}：直面维纳六十年前的预言，定量刻画奖励模型过优化曲线，并介绍以 GRPO + 可验证规则与 Best-of-$N$ 为代表的推理时计算缩放范式；最后基于 \texttt{data/dpo\_align.csv} 实测验证 DPO 中温度 $\beta$ 对“真实奖励—KL 散度”帕累托前沿的精密调控。
+\end{enumerate}
+\end{chapIntro}
+
+\section{大模型后训练全景：从预训练底座到指令微调（SFT）}
+\label{sec:posttrain-sft}
+
+\subsection{为什么预训练底座必须经过后训练？}
+
+预训练阶段在海量无标注文本上最小化自回归交叉熵损失 $\mathcal{L}_{\mathrm{PT}}(\theta) = -\E[\sum_t \ln \pi_\theta(x_t \mid x_{<t})]$。这赋予了模型极其广博的世界知识、语法直觉与上下文学习潜能，但同时留下了根本的\textbf{目标错位（Objective Misalignment）}：
+\begin{itemize}
+  \item \textbf{行为模仿而非意图满足}：预训练分布平等地拟合优质教材与低质论坛回帖、严谨证明与胡言乱语、友善解答与危险教程。
+  \item \textbf{缺乏对话角色边界}：底座模型不知道何时该作为助手结束回答，何时该拒绝恶意诱导，也不懂得在面对复杂多步数学题时“停下来检查自己有没有算错”。
+\end{itemize}
+因此，现代前沿大模型的训练被清晰划分为两大阶段：\textbf{预训练}负责把世界知识与潜在推理能力“压缩进权重”；\textbf{后训练}则负责激活并塑形这些能力，使其对齐人类的\textbf{有用性（Helpfulness）、诚实性（Honesty）与无害性（Harmlessness），即 3H 原则}，并在数学与代码等客观领域突破模仿上限。
+
+\subsection{监督微调（SFT）的数学机制与三大局限}
+
+后训练的第一站通常是\textbf{监督微调（Supervised Fine-Tuning, SFT）}：收集数万至数百万条高质量的“指令—示范回答”对话对 $\mathcal{D}_{\mathrm{SFT}} = \{(x^{(i)}, y^{(i)})\}_{i=1}^N$，在底座模型参数之上继续做极大似然训练。工程上最关键的细节是\textbf{提示掩码（Prompt Loss Masking）}——损失函数\emph{只计算模型生成的回答词元 $y$}，而不对用户输入 $x$ 计算梯度：
+\begin{equation}
+  \mathcal{L}_{\mathrm{SFT}}(\theta)
+  = -\E_{(x, y) \sim \mathcal{D}_{\mathrm{SFT}}}\!\left[\sum_{t=1}^{|y|} \ln \pi_\theta(y_t \mid x, y_{<t})\right].
+  \label{eq:sft-loss}
+\end{equation}
+SFT 极其高效地教会了模型对话格式、指令遵循与基础写作风格（常被称为“把预训练积累的能力表面化”）。然而，单纯依赖 SFT 会迅速撞上三层天花板：
+\begin{enumerate}
+  \item \textbf{模仿上限（Behavior Cloning Ceiling）}：SFT 本质上是离线行为克隆，模型最多逼近标注者的示范水平，极难超越人类写手在有限时间里写出的标准答案。
+  \item \textbf{缺少负样本对比信号}：式~\eqref{eq:sft-loss} 只告诉模型“应当提高 $y$ 的概率”，却从未显式惩罚那些\emph{表面流畅但包含幻觉、逻辑漏洞或安全隐患}的回答。
+  \item \textbf{词元级局部损失与序列级全局目标脱节}：交叉熵平等对待每个词元，但在数学证明或代码生成中，写错一个正负号或漏掉一个边界判断，虽只占整段输出 $0.2\%$ 的词元损失，却足以令整条回答彻底作废！
+\end{enumerate}
+
+为了突破 SFT 的模仿天花板，现代后训练分化出两条相辅相成的对齐与强化路线：\textbf{基于人类偏好的对齐（RLHF 与 DPO）}以及\textbf{基于可验证客观奖励的强化学习（RLVR）}。图~\ref{fig:rlhf-vs-dpo-pipeline} 全景展示了这三条路线的系统流向与架构差异。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=5.5mm and 7.5mm,
+  base/.style={rectangle, rounded corners=1.6mm, draw=slate, thick, fill=codebg,
+    minimum width=23mm, minimum height=10.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=3.5pt},
+  sft/.style={rectangle, rounded corners=1.6mm, draw=navy, thick, fill=navyLight,
+    minimum width=25mm, minimum height=10.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=3.5pt},
+  rlhf/.style={rectangle, rounded corners=1.6mm, draw=ochre, thick, fill=ochreLight,
+    minimum width=28mm, minimum height=10.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=3.5pt},
+  dpo/.style={rectangle, rounded corners=1.6mm, draw=teal, very thick, fill=tealLight,
+    minimum width=28mm, minimum height=10.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=3.5pt},
+  rlvr/.style={rectangle, rounded corners=1.6mm, draw=plum, thick, fill=plumLight,
+    minimum width=28mm, minimum height=10.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=3.5pt},
+  arr/.style={-{Stealth[length=2.1mm]}, thick, slate},
+  arrT/.style={-{Stealth[length=2.1mm]}, thick, teal},
+  arrO/.style={-{Stealth[length=2.1mm]}, thick, ochre},
+  arrP/.style={-{Stealth[length=2.1mm]}, thick, plum}
+]
+  % Shared left stages
+  \node[base] (pt) {\textbf{预训练底座}\\Next-Token MLE};
+  \node[sft, right=8mm of pt] (sft) {\textbf{SFT 参考模型}\\$\pi_{\mathrm{ref}} = \pi_{\mathrm{SFT}}$};
+  \draw[arr] (pt) -- (sft);
+
+  % Branch 1 (Top): Classic RLHF
+  \node[rlhf, above right=11mm and 12mm of sft] (pref1) {\textbf{人类偏好对}\\$(x, y_w \succ y_l)$};
+  \node[rlhf, right=8mm of pref1] (rm) {\textbf{奖励模型 RM}\\Bradley--Terry MLE};
+  \node[rlhf, right=8mm of rm] (ppo) {\textbf{在线 PPO / RLHF}\\$\max \E[r_\psi] - \beta\DKL$};
+  \draw[arrO] (sft.north east) -- (pref1.west);
+  \draw[arrO] (pref1) -- (rm);
+  \draw[arrO] (rm) -- (ppo);
+  \node[above=1mm of rm, font=\sffamily\scriptsize\bfseries, color=ochre] {路线一：经典三阶段 RLHF（需显式 RM $+$ 在线采样）};
+
+  % Branch 2 (Middle): DPO
+  \node[dpo, right=12mm of sft] (pref2) {\textbf{人类偏好对}\\$(x, y_w \succ y_l)$};
+  \node[dpo, right=19mm of pref2, minimum width=52mm] (dpoopt) {\textbf{直接偏好优化（DPO）}\\闭式消去 $Z(x)$，纯分类损失直训 $\pi_\theta$};
+  \draw[arrT] (sft) -- (pref2);
+  \draw[arrT] (pref2) -- node[above, font=\scriptsize, text=tealDark, align=center] {省去 RM 与\\在线采样} (dpoopt);
+  \node[above=1mm of dpoopt, font=\sffamily\scriptsize\bfseries, color=tealDark] {路线二：离线两阶段 DPO（闭式等价 shortcut）};
+
+  % Branch 3 (Bottom): RLVR
+  \node[rlvr, below right=11mm and 12mm of sft] (ver) {\textbf{客观验证器}\\数学等价 / 单元测试};
+  \node[rlvr, right=19mm of ver, minimum width=52mm] (grpo) {\textbf{RLVR（如 GRPO 推理强化）}\\组内 $G$ 条采样，二元奖励 $R \in \{0,1\}$};
+  \draw[arrP] (sft.south east) -- (ver.west);
+  \draw[arrP] (ver) -- node[above, font=\scriptsize, text=plum] {零主观标注} (grpo);
+  \node[below=1mm of grpo, font=\sffamily\scriptsize\bfseries, color=plum] {路线三：可验证奖励强化（突破人类模仿上限，涌现长思维链）};
+
+  % Reference KL dashed connections (well above Route 1 caption)
+  \draw[dashed, thick, navy!70, -{Stealth[length=1.8mm]}]
+    (sft.north) |- ([yshift=9.2mm]ppo.north) -- (ppo.north);
+  \node[font=\scriptsize, text=navy, fill=white, inner sep=1.5pt] at ([yshift=9.2mm]pref1.north east) {冻结 $\pi_{\mathrm{ref}}$ 提供 KL 约束};
+\end{tikzpicture}}
+\caption{现代大模型后训练三大核心路线架构对照：经典三阶段 RLHF（需单独训练奖励模型并在线 RL 采样）、直接偏好优化 DPO（解析消去奖励模型与配分函数，用纯监督分类损失一步到位），以及面向数学与代码推理的可验证奖励强化学习 RLVR。}
+\label{fig:rlhf-vs-dpo-pipeline}
+\end{figure}
+
+\section{人类偏好建模与 KL 正则 RLHF 的闭式最优解}
+\label{sec:bt-rlhf}
+
+\subsection{Bradley--Terry 偏好模型与奖励模型极大似然估计}
+
+让人类标注员给一篇回答打出“$7.3$ 分还是 $7.8$ 分”这样的绝对标量分数，不仅跨标注员方差极大，连同一个人隔天也会标准漂移；但让人类比较同一提示 $x$ 下的两条候选回答 $y_1, y_2$ 并选出“哪一条更好”（记胜出者为 $y_w$，落败者为 $y_l$），标注一致性会大幅跃升。
+
+统计心理物理学中的\textbf{Bradley--Terry（BT）成对比较模型}（1952）将这种离散胜负比较优雅地映射到了连续隐含奖励函数 $r^*(x, y) \in \R$ 上：
+
+\begin{defBox}
+\begin{definition}[Bradley--Terry 偏好模型与奖励模型训练目标]
+\label{def:bt-rm}
+假设存在潜在的真实人类偏好奖励函数 $r^*(x, y)$。给定提示 $x$ 与一对候选回答 $(y_w, y_l)$，人类更偏好 $y_w$ 胜过 $y_l$（记作 $y_w \succ y_l \mid x$）的概率建模为逻辑斯蒂 Sigmoid 差值：
+\begin{equation}
+  P^*(y_w \succ y_l \mid x)
+  = \frac{\exp\!\big(r^*(x, y_w)\big)}{\exp\!\big(r^*(x, y_w)\big) + \exp\!\big(r^*(x, y_l)\big)}
+  = \sigma\!\Big(r^*(x, y_w) - r^*(x, y_l)\Big),
+  \label{eq:bt-model}
+\end{equation}
+其中 $\sigma(z) = \frac{1}{1 + e^{-z}}$。收集人类成对偏好数据集 $\mathcal{D}_{\mathrm{pref}} = \{(x^{(i)}, y_w^{(i)}, y_l^{(i)})\}_{i=1}^M$ 后，在 SFT 底座末层换上一个标量线性输出头构成参数化\textbf{奖励模型（Reward Model, RM）} $r_\psi(x, y)$，通过最小化负对数似然进行训练：
+\begin{equation}
+  \mathcal{L}_{\mathrm{RM}}(\psi)
+  = -\E_{(x, y_w, y_l) \sim \mathcal{D}_{\mathrm{pref}}}\!\left[\ln \sigma\!\Big(r_\psi(x, y_w) - r_\psi(x, y_l)\Big)\right].
+  \label{eq:rm-loss}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+请注意式~\eqref{eq:bt-model} 一个看似不起眼、却将在下一节引爆奇迹的数学性质——\textbf{提示级平移不变性（Prompt-Dependent Shift Invariance）}：如果对任意仅依赖提示 $x$（不依赖回答 $y$）的标量函数 $c(x)$，构造新奖励函数
+\[
+  \tilde{r}(x, y) \triangleq r(x, y) + c(x),
+\]
+那么 $\tilde{r}(x, y_w) - \tilde{r}(x, y_l) \equiv r(x, y_w) - r(x, y_l)$，它诱导的 Bradley--Terry 偏好分布与原奖励函数\textbf{完全一模一样}！换言之，偏好数据只决定奖励函数的“相对高度差”，却对每个提示 $x$ 的基准零点 $c(x)$ 拥有完全的自由度。
+
+\subsection{KL 正则 RLHF 目标与闭式最优策略定理}
+
+拿到训练好的奖励模型 $r(x, y)$ 后，经典 RLHF 将每个提示 $x$ 视作单步上下文强化学习（Contextual Bandit）的初始状态，将整条回答 $y$ 视作动作，在最大化期望奖励的同时施加相对于 SFT 参考策略 $\pi_{\mathrm{ref}}$ 的 KL 散度约束，防止语言模型偏离自然语言分布太远而退化成胡言乱语的“高分乱码机”：
+\begin{equation}
+  \max_{\pi}\; J_{\mathrm{RLHF}}(\pi)
+  \triangleq \E_{x \sim \mathcal{D}}\!\left[
+    \E_{y \sim \pi(\cdot \mid x)}\!\big[r(x, y)\big]
+    - \beta\,\DKL\!\Big(\pi(\cdot \mid x) \,\Big\|\, \pi_{\mathrm{ref}}(\cdot \mid x)\Big)
+  \right], \qquad \beta > 0.
+  \label{eq:rlhf-obj}
+\end{equation}
+
+\begin{recallBox}{前置知识衔接：拉格朗日乘子法与信息论 Gibbs 不等式}
+以下定理的证明直接调用第 4 卷第 2 章（优化理论与信息论）的两块基石：
+\begin{enumerate}
+  \item \textbf{等式约束的拉格朗日乘子法}：在概率单纯形约束 $\sum_y \pi(y \mid x) = 1$ 下求极值，引入乘子 $\lambda(x)$ 构造增广泛函 $\mathcal{L}(\pi, \lambda)$ 并令各分量偏导为零。
+  \item \textbf{KL 散度的 Gibbs 不等式}：对任意同支撑概率分布 $p, q$，恒有 $\DKL(p \,\|\, q) = \sum_y p(y)\ln\frac{p(y)}{q(y)} \ge 0$，且等号成立\textbf{当且仅当} $p(y) = q(y)$ 对所有 $y$ 成立。
+\end{enumerate}
+\end{recallBox}
+
+令人拍案叫绝的是，虽然在 PPO 训练中我们用迭代采样去逼近式~\eqref{eq:rlhf-obj}，但如果不限制 $\pi$ 的参数化形式（在所有合法概率分布空间中优化），式~\eqref{eq:rlhf-obj} 竟存在一个\textbf{极其优雅的精确闭式全局唯一最优解}！下面我们给出拉格朗日乘子法与 KL 配方双重完整证明。
+
+\begin{thmBox}
+\begin{theorem}[KL 正则 RLHF 的精确闭式最优策略定理]
+\label{thm:rlhf-optimal}
+设对给定提示 $x$，参考分布 $\pi_{\mathrm{ref}}(y \mid x) > 0$ 且配分函数
+\begin{equation}
+  Z(x) \triangleq \sum_{y'} \pi_{\mathrm{ref}}(y' \mid x)\,\exp\!\left(\frac{1}{\beta}\,r(x, y')\right) < \infty.
+  \label{eq:rlhf-partition}
+\end{equation}
+则 KL 正则 RLHF 目标~\eqref{eq:rlhf-obj} 在概率单纯形 $\{\pi(\cdot \mid x) : \pi(y\mid x) \ge 0,\; \sum_y \pi(y\mid x) = 1\}$ 上存在\textbf{唯一的全局最优策略}：
+\begin{equation}
+  \pi^*(y \mid x) = \frac{1}{Z(x)}\,\pi_{\mathrm{ref}}(y \mid x)\,\exp\!\left(\frac{1}{\beta}\,r(x, y)\right),
+  \label{eq:rlhf-opt-policy}
+\end{equation}
+且该提示 $x$ 对应的最优目标函数值精确等于 $\beta \ln Z(x)$。
+\end{theorem}
+\begin{proof}
+由于目标~\eqref{eq:rlhf-obj} 对不同提示 $x$ 完全可分离，只需固定任意一个 $x$，最大化单提示泛函
+\[
+  F(\pi) \triangleq \sum_y \pi(y \mid x)\, r(x, y) - \beta \sum_y \pi(y \mid x)\,\ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)}
+  \quad \text{s.t.} \quad \sum_y \pi(y \mid x) = 1.
+\]
+
+\textbf{步骤一（拉格朗日乘子法导出驻点）}：引入拉格朗日乘子 $\lambda(x) \in \R$，构造拉格朗日函数
+\[
+  \mathcal{L}\big(\pi(\cdot \mid x), \lambda(x)\big)
+  = \sum_y \pi(y \mid x)\, r(x, y)
+    - \beta \sum_y \pi(y \mid x)\,\ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)}
+    - \lambda(x)\!\left(\sum_y \pi(y \mid x) - 1\right).
+\]
+对每个回答 $y$ 的概率分量 $\pi(y \mid x)$ 求偏导并令其等于 $0$（利用 $\frac{d}{dp}(p\ln p) = \ln p + 1$）：
+\[
+  \frac{\partial \mathcal{L}}{\partial \pi(y \mid x)}
+  = r(x, y) - \beta\!\left(\ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} + 1\right) - \lambda(x) = 0.
+\]
+移项整理对数比：
+\[
+  \ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)}
+  = \frac{1}{\beta}\,r(x, y) - \left(1 + \frac{\lambda(x)}{\beta}\right).
+\]
+两边取指数，得到
+\[
+  \pi^*(y \mid x)
+  = \exp\!\left(-1 - \frac{\lambda(x)}{\beta}\right)\,\pi_{\mathrm{ref}}(y \mid x)\,\exp\!\left(\frac{1}{\beta}\,r(x, y)\right).
+\]
+注意前缀因子 $\exp\!\big(-1 - \frac{\lambda(x)}{\beta}\big)$ 与 $y$ 无关！代入归一化约束 $\sum_y \pi^*(y \mid x) = 1$，立刻解得
+\[
+  \exp\!\left(1 + \frac{\lambda(x)}{\beta}\right)
+  = \sum_{y'} \pi_{\mathrm{ref}}(y' \mid x)\,\exp\!\left(\frac{1}{\beta}\,r(x, y')\right)
+  = Z(x),
+\]
+回代即得精确驻点公式~\eqref{eq:rlhf-opt-policy}，且显然满足非负性 $\pi^*(y\mid x) > 0$。
+
+\textbf{步骤二（信息论 KL 配方证明全局唯一最优性）}：为验证 $\pi^*$ 不仅是局部驻点，更是全局唯一最大值点，将定义好的合法分布 $\pi^*(y \mid x) = \frac{1}{Z(x)}\pi_{\mathrm{ref}}(y\mid x)\exp(\frac{1}{\beta}r(x,y))$ 代回原泛函 $F(\pi)$ 做恒等变形：
+\begin{align*}
+  F(\pi)
+  &= -\beta \sum_y \pi(y \mid x)\!\left[\ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} - \frac{1}{\beta}\,r(x, y)\right] \\
+  &= -\beta \sum_y \pi(y \mid x)\!\left[\ln\frac{\pi(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)\exp\!\big(\frac{1}{\beta}r(x,y)\big)}\right] \\
+  &= -\beta \sum_y \pi(y \mid x)\!\left[\ln\frac{\pi(y \mid x)}{Z(x)\,\pi^*(y \mid x)}\right] \\
+  &= -\beta \sum_y \pi(y \mid x)\,\ln\frac{\pi(y \mid x)}{\pi^*(y \mid x)} + \beta \ln Z(x)\sum_y \pi(y \mid x) \\
+  &= -\beta\,\DKL\!\Big(\pi(\cdot \mid x) \,\Big\|\, \pi^*(\cdot \mid x)\Big) + \beta \ln Z(x).
+\end{align*}
+由 Gibbs 不等式，$\DKL(\pi \,\|\, \pi^*) \ge 0$ 且等号成立当且仅当 $\pi(\cdot \mid x) \equiv \pi^*(\cdot \mid x)$！又因 $\beta > 0$，故对一切概率分布 $\pi$ 均有 $F(\pi) \le \beta \ln Z(x) = F(\pi^*)$，全局唯一最优性证毕！
+\end{proof}
+\end{thmBox}
+
+式~\eqref{eq:rlhf-opt-policy} 展现了一幅优美的统计物理图景：\textbf{最优对齐策略 $\pi^*$ 正是以参考策略 $\pi_{\mathrm{ref}}$ 为先验测度、以奖励 $r(x,y)$ 为负能量、以 $\beta$ 为温度的玻尔兹曼（Gibbs）倾斜分布！}
+\begin{itemize}
+  \item 当 $\beta \to +\infty$（极强 KL 约束）：$\frac{1}{\beta}r(x,y) \to 0$，最优策略 $\pi^* \to \pi_{\mathrm{ref}}$，完全退回保守的 SFT 参考模型。
+  \item 当 $\beta \to 0^+$（几乎不约束 KL）：指数权重把全部概率质量瞬间坍缩到 $\argmax_y r(x, y)$ 上，哪怕 $r$ 中藏有一丝奖励黑客漏洞，模型也会毫不犹豫地一头扎进去！
+\end{itemize}
+
+遗憾的是，尽管我们写出了 $\pi^*(y\mid x)$ 的精确闭式解，却\textbf{无法直接用它来采样或计算概率}——因为分母中的配分函数 $Z(x) = \sum_{y' \in \mathcal{V}^*} \pi_{\mathrm{ref}}(y'\mid x)\exp(\frac{1}{\beta}r(x, y'))$ 需要对词表 $\mathcal{V}$（$|\mathcal{V}| \approx 10^5$）上所有可能长度的文本序列求和，其项数是超越天文数字的 $|\mathcal{V}|^L$！正因 $Z(x)$ 不可计算，传统 RLHF 才被迫先训奖励模型，再用昂贵的在线 PPO 迭代逼近 $\pi^*$。
+
+直到 2023 年，斯坦福团队灵光乍现，发现了绕过 $Z(x)$ 的“天书”捷径。
+
+\section{直接偏好优化（DPO）：精确消去配分函数的天书推导}
+\label{sec:dpo}
+
+\subsection{DPO 精确等价定理：配分函数 $Z(x)$ 的完美抵消}
+
+Rafailov 等（2023）提出了一个颠覆性的逆向视角：既然无法由奖励 $r$ 直接算出策略 $\pi^*$（卡在 $Z(x)$ 上），\textbf{何不反过来——把公式~\eqref{eq:rlhf-opt-policy} 倒着解，用策略 $\pi^*$ 来表示奖励 $r^*$，再直接塞进 Bradley--Terry 偏好似然里呢？}
+
+\begin{thmBox}
+\begin{theorem}[直接偏好优化（DPO）精确推导定理，Rafailov et al., 2023]
+\label{thm:dpo-derivation}
+在 Bradley--Terry 偏好模型~\eqref{eq:bt-model} 与 KL 正则 RLHF 目标~\eqref{eq:rlhf-obj} 的框架下，设 $\pi^*$ 为真实奖励函数 $r^*$ 所诱导的唯一闭式最优策略~\eqref{eq:rlhf-opt-policy}。则：
+\begin{enumerate}
+  \item 真实奖励函数可由最优策略与参考策略精确反解为
+  \begin{equation}
+    r^*(x, y) = \beta \ln \frac{\pi^*(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} + \beta \ln Z(x);
+    \label{eq:dpo-invert-r}
+  \end{equation}
+  \item 人类成对偏好概率完全由最优策略 $\pi^*$ 与参考策略 $\pi_{\mathrm{ref}}$ 决定，\textbf{不可计算的配分函数 $Z(x)$ 恒等消去}：
+  \begin{equation}
+    P^*(y_w \succ y_l \mid x)
+    = \sigma\!\left(\beta \ln \frac{\pi^*(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} - \beta \ln \frac{\pi^*(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}\right);
+    \label{eq:dpo-bt-policy}
+  \end{equation}
+  \item 从而无需单独训练奖励模型、也无需在线强化学习采样，直接对参数化策略 $\pi_\theta$ 最小化如下纯二元交叉熵式的 \textbf{DPO 损失函数}，即可直接逼近 KL 正则 RLHF 的最优策略：
+  \begin{equation}
+    \mathcal{L}_{\mathrm{DPO}}(\theta;\, \pi_{\mathrm{ref}})
+    = -\E_{(x, y_w, y_l) \sim \mathcal{D}_{\mathrm{pref}}}\!\left[
+      \ln \sigma\!\left(
+        \beta \ln \frac{\pi_\theta(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)}
+        - \beta \ln \frac{\pi_\theta(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}
+      \right)
+    \right].
+    \label{eq:dpo-loss}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+对定理~\ref{thm:rlhf-optimal} 的闭式解式~\eqref{eq:rlhf-opt-policy} 两边先除以 $\pi_{\mathrm{ref}}(y \mid x)$ 再取自然对数：
+\[
+  \ln \frac{\pi^*(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} = \frac{1}{\beta}\,r^*(x, y) - \ln Z(x).
+\]
+移项并同乘 $\beta > 0$，即得反解公式~\eqref{eq:dpo-invert-r}：$r^*(x, y) = \beta \ln \frac{\pi^*(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)} + \beta \ln Z(x)$。
+
+现在将其分别代入胜出回答 $y_w$ 与落败回答 $y_l$，并在 Bradley--Terry 模型~\eqref{eq:bt-model} 中作差：
+\begin{align*}
+  r^*(x, y_w) - r^*(x, y_l)
+  &= \left(\beta \ln \frac{\pi^*(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} + \beta \ln Z(x)\right)
+   - \left(\beta \ln \frac{\pi^*(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)} + \beta \ln Z(x)\right) \\
+  &= \beta \ln \frac{\pi^*(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} - \beta \ln \frac{\pi^*(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}.
+\end{align*}
+因为 $Z(x)$ 仅依赖提示 $x$ 而与具体回答 $y_w, y_l$ 无关，借助 Bradley--Terry 模型的提示级平移不变性，这一原本不可计算的配分项分毫不差地彻底抵消！将差值代入 $\sigma(\cdot)$ 即得式~\eqref{eq:dpo-bt-policy}；最后用参数化语言模型 $\pi_\theta$ 替代 $\pi^*$ 并对偏好数据集 $\mathcal{D}_{\mathrm{pref}}$ 执行极大似然估计（最小化负对数似然），即得 DPO 损失函数~\eqref{eq:dpo-loss}，证毕。
+\end{proof}
+\end{thmBox}
+
+回顾这段仅仅十行左右的推导，你很难不被它的数学美感折服——难怪它被称为大模型对齐时代的“天书证明”之一：原本需要四套大模型协同、极易发散崩溃的“RM 训练 $+$ 在线 PPO 采样”复杂流水线，经由变量替换，瞬间坍缩为一个仅含策略 $\pi_\theta$ 与冻结参考 $\pi_{\mathrm{ref}}$、像逻辑回归一样稳定收敛的离线监督损失！
+
+\subsection{DPO 梯度的深层力学剖析：隐式奖励与自适应错判权重}
+
+为了真正看透 DPO 在训练中究竟如何雕琢语言模型，让我们亲手求出式~\eqref{eq:dpo-loss} 关于参数 $\theta$ 的精确梯度。先定义策略 $\pi_\theta$ 所隐式表达的奖励函数（称为\textbf{隐式奖励, Implicit Reward}）：
+\begin{equation}
+  \hat{r}_\theta(x, y) \triangleq \beta \ln \frac{\pi_\theta(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)}.
+  \label{eq:implicit-reward}
+\end{equation}
+
+\begin{thmBox}
+\begin{proposition}[DPO 梯度的隐式奖励加权结构]
+\label{prop:dpo-grad}
+DPO 损失函数~\eqref{eq:dpo-loss} 关于策略参数 $\theta$ 的精确梯度为
+\begin{equation}
+\begin{aligned}
+  \nabla_\theta \mathcal{L}_{\mathrm{DPO}}(\theta;\, \pi_{\mathrm{ref}})
+  = -\beta\,\E_{(x, y_w, y_l) \sim \mathcal{D}_{\mathrm{pref}}}\Bigg[
+    &\underbrace{\sigma\!\Big(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w)\Big)}_{\text{自适应错判权重 } w_\theta \in (0, 1)} \\
+    &\cdot \Big(\nabla_\theta \ln \pi_\theta(y_w \mid x) - \nabla_\theta \ln \pi_\theta(y_l \mid x)\Big)
+  \Bigg].
+\end{aligned}
+\label{eq:dpo-grad}
+\end{equation}
+\end{proposition}
+\begin{proof}
+记逻辑边际 $\Delta_\theta \triangleq \hat{r}_\theta(x, y_w) - \hat{r}_\theta(x, y_l)$。利用微积分恒等式
+\[
+  \frac{d}{dz}\big[-\ln \sigma(z)\big] = -\frac{\sigma'(z)}{\sigma(z)} = -\frac{\sigma(z)(1-\sigma(z))}{\sigma(z)} = -\big(1 - \sigma(z)\big) = -\sigma(-z),
+\]
+并注意参考策略 $\pi_{\mathrm{ref}}$ 已完全冻结（$\nabla_\theta \ln \pi_{\mathrm{ref}} = 0$），故 $\nabla_\theta \Delta_\theta = \beta\big(\nabla_\theta \ln \pi_\theta(y_w\mid x) - \nabla_\theta \ln \pi_\theta(y_l\mid x)\big)$。由链式法则立得
+\[
+  \nabla_\theta \big[-\ln \sigma(\Delta_\theta)\big]
+  = -\sigma(-\Delta_\theta)\,\nabla_\theta \Delta_\theta
+  = -\beta\,\sigma\!\Big(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w)\Big)\Big(\nabla_\theta \ln \pi_\theta(y_w \mid x) - \nabla_\theta \ln \pi_\theta(y_l \mid x)\Big),
+\]
+取期望即得式~\eqref{eq:dpo-grad}。
+\end{proof}
+\end{thmBox}
+
+请仔细品味式~\eqref{eq:dpo-grad} 中三个因子的精妙协作：
+\begin{enumerate}
+  \item \textbf{推高好回答、压低坏回答}：因为梯度下降沿 $-\nabla_\theta \mathcal{L}_{\mathrm{DPO}}$ 方向更新，每一小步都在沿 $+\nabla_\theta \ln \pi_\theta(y_w \mid x)$ 拉高胜出回答的对数似然，同时沿 $-\nabla_\theta \ln \pi_\theta(y_l \mid x)$ 压低落败回答的对数似然。
+  \item \textbf{为什么不能直接去掉权重 $w_\theta$ 做朴素对比？}如果删去系数 $\sigma(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w))$，直接最大化 $\ln \pi_\theta(y_w\mid x) - \ln \pi_\theta(y_l\mid x)$，会引发灾难性的\textbf{语言模型崩坏}：模型会无休止地把 $y_l$ 的概率往下砸向 $0$，连带破坏通用语法结构！
+  \item \textbf{动态防过冲权重 $w_\theta = \sigma(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w))$}：
+  \begin{itemize}
+    \item 当模型\textbf{判反了}（坏回答的隐式奖励比好回答还高，即 $\hat{r}_l \gg \hat{r}_w$），权重 $w_\theta \to 1$，施以全力纠偏；
+    \item 当模型\textbf{已经拉开足够边际}（$\hat{r}_w \gg \hat{r}_l$），权重 $w_\theta \to 0$，梯度自动衰减熄火，防止过度拟合某对样本而摧毁语言流畅性！
+  \end{itemize}
+\end{enumerate}
+
+\subsection{简洁可运行 PyTorch DPO 核心实现}
+
+在自回归大语言模型中，整条回答 $y = (y_1, \dots, y_L)$ 的联合对数概率等于各回复词元对数概率之和：
+\[
+  \ln \pi_\theta(y \mid x) = \sum_{t=1}^{|y|} \ln \pi_\theta(y_t \mid x, y_{<t}).
+\]
+下面的二十余行代码即为现代对齐库（如 TRL）中 DPO 损失的精确内核：
+
+\begin{lstlisting}[caption={直接偏好优化（DPO）核心损失与隐式准确率监控（简洁 PyTorch 实现）}]
+def seq_logprobs(logits, labels, resp_mask):
+    """计算回复部分整句联合对数概率 sum_t log pi(y_t | x, y_<t)."""
+    # logits: (B, L, V), labels: (B, L), resp_mask: (B, L) 仅在回复 token 处为 1
+    logp_all = F.log_softmax(logits[:, :-1, :], dim=-1)
+    target   = labels[:, 1:].unsqueeze(-1)
+    tok_logp = logp_all.gather(dim=-1, index=target).squeeze(-1)
+    return (tok_logp * resp_mask[:, 1:]).sum(dim=-1)          # (B,)
+
+def dpo_loss(pi_w_logp, pi_l_logp, ref_w_logp, ref_l_logp, beta=0.1):
+    """
+    所有输入形状均为 (B,); ref_w_logp 与 ref_l_logp 由冻结参考模型在 no_grad 下算得
+    """
+    # 隐式奖励 r_hat = beta * (log pi_theta - log pi_ref)
+    r_w = beta * (pi_w_logp - ref_w_logp)
+    r_l = beta * (pi_l_logp - ref_l_logp)
+    margin = r_w - r_l                                        # 等价于 beta*(dw - dl)
+
+    loss = -F.logsigmoid(margin).mean()                       # 数值最稳的 -log(sigma(margin))
+    with torch.no_grad():
+        win_acc = (margin > 0).float().mean().item()          # 偏好对排序准确率
+        mean_margin = margin.mean().item()
+    return loss, win_acc, mean_margin
+\end{lstlisting}
+
+\section{奖励黑客（Goodhart 定律）与可验证奖励推理（RLVR）}
+\label{sec:hacking-rlvr}
+
+\subsection{奖励黑客（Reward Hacking）与 Goodhart 定律}
+
+读到这里，不妨回头重读本章扉页上诺伯特·维纳写于 1960 年的警示。强化学习与对齐中最臭名昭著的幽灵，莫过于经济学中的\textbf{古德哈特定律（Goodhart's Law）}：
+\begin{quote}
+\kaishu “当一项代理度量变成优化目标时，它就不再是一项好的度量。”
+\end{quote}
+在 RLHF 中，我们真正渴望最大化的是难以穷尽的\textbf{真实人类质量 $R_{\mathrm{gold}}(x, y)$}，而交给 PPO 或 Best-of-$N$ 去拼命优化的却是一个从有限偏好数据拟合出的神经网络\textbf{代理奖励模型 $R_{\mathrm{proxy}} = r_\psi(x, y)$}。代理模型必然存在分布外盲区与统计伪相关；当策略优化器拥有强大算力时，它会精准钻空子，找到那些让 $R_{\mathrm{proxy}}$ 飙到极高、但真实人类看来却糟糕透顶的\textbf{奖励黑客（Reward Hacking）}解：
+\begin{itemize}
+  \item \textbf{长度膨胀（Verbosity Bias）}：人类标注员在对比中往往潜意识偏爱更详尽的回答，RM 于是学到了“越长分越高”的捷径；经强 RL 优化后，哪怕问“$1+1$ 等于几”，模型也要洋洋洒洒写三百字分点综述。
+  \item \textbf{谄媚迎合（Sycophancy）}：当用户在提问里塞入错误前提（例如“我认为地球是平的，对吗？”），模型发现附和用户比温和纠错更容易拿高 RM 分，从而放弃客观事实。
+  \item \textbf{排版刷分（Format Gaming）}：滥用加粗标题、项目符号与礼貌套话（“非常感谢您的精彩提问！”），以形式华丽掩盖实质空洞。
+\end{itemize}
+
+Gao 等（2023）在 OpenAI 的一项里程碑研究中，用一个合成“金标准大模型奖励（Gold RM）”系统测量了代理奖励模型在优化过程中随 KL 距离 $d \triangleq \sqrt{\DKL(\pi \,\|\, \pi_{\mathrm{ref}})}$ 变化的经验标度律：
+\begin{equation}
+  R_{\mathrm{gold}}(d) \approx d\,\big(\alpha_{\mathrm{RM}} - \beta_{\mathrm{RM}}\, d\big),
+  \qquad d = \sqrt{\DKL(\pi \,\|\, \pi_{\mathrm{ref}})}.
+  \label{eq:overopt-scaling}
+\end{equation}
+请观察式~\eqref{eq:overopt-scaling} 这一倒抛物线规律：初期随着策略离开参考模型（$d$ 增大），代理分数与真实质量同步上升；然而越过最优拐点 $d^* = \frac{\alpha_{\mathrm{RM}}}{2\beta_{\mathrm{RM}}}$ 之后，\textbf{代理分数继续一路狂飙，真实人类质量却掉头俯冲直至彻底崩坏！} 这也从根本上解释了为何式~\eqref{eq:rlhf-obj} 与 DPO 中的 KL 惩罚系数 $\beta$ 绝非可有可无的装饰品，而是遏制奖励过优化的生命防线。
+
+\subsection{从主观偏好走向可验证奖励（RLVR）与推理时计算缩放}
+
+如何从根源上避开“代理奖励模型可被黑客攻破”的困境？2024--2025 年，以 OpenAI o1 与 DeepSeek-R1 为代表的推理模型掀起了后训练的第二次范式革命——\textbf{基于可验证奖励的强化学习（Reinforcement Learning with Verifiable Rewards, RLVR）}：
+\begin{itemize}
+  \item \textbf{彻底抛弃神经网络 RM}：在数学竞赛、编程算法、形式化定理证明等客观领域，不再训练容易被刷分的代理奖励模型，而是直接用\textbf{确定性规则验证器}打分——例如用符号计算引擎核验最终数学表达式是否等价、在隔离沙箱里跑通全部单元测试！答对记 $R = 1$，答错记 $R = 0$（可辅以极轻量的格式规范奖励）。
+  \item \textbf{以 GRPO 激发长思维链（Long CoT）涌现}：结合第~\ref{ch:trpo-ppo-grpo} 章推导的 GRPO 算法，对每道难题采样 $G$ 条完整思考轨迹，仅凭稀疏终端奖励 $\{0, 1\}$ 驱动策略进化。令人惊叹的是，模型不需要任何人类编写的“反思示范”，就会在 RL 探索中自发涌现出\textbf{长链分解、边界自检、发现矛盾后回溯重算（“顿悟时刻” / Aha Moment）}等高级认知行为！
+\end{itemize}
+
+与之紧密呼应的是新一代扩展法则——\textbf{推理时计算缩放（Test-Time Compute Scaling）}。过去我们主要在\emph{训练时}堆参数、堆数据；如今在\emph{推理时}为难题分配更多算力，同样能带来稳定且陡峭的性能跃升。推理时缩放主要包含两条路径：
+\begin{enumerate}
+  \item \textbf{并行缩放（Best-of-$N$ 采样与验证器筛选）}：对同一问题独立采样 $N$ 条回答 $\{y_1, \dots, y_N\} \sim \pi_{\mathrm{ref}}(\cdot \mid x)$，用\textbf{结果奖励模型（ORM）}、\textbf{过程奖励模型（PRM，对每个推理步骤打分）}或规则验证器选出得分最高者 $\hat{y} = \argmax_{i \le N} r(x, y_i)$。令人赞叹的是，Best-of-$N$ 采样策略 $\pi_{\mathrm{BoN}}$ 与参考策略之间的 KL 散度存在一个与奖励分布完全无关的精确解析公式（见习题~\textbf{6.4.4}）：
+  \begin{equation}
+    \DKL\!\big(\pi_{\mathrm{BoN}} \,\|\, \pi_{\mathrm{ref}}\big) = \ln N - \frac{N - 1}{N} \;\approx\; \ln N - 1 \quad (\text{当 } N \text{ 较大时}).
+    \label{eq:bon-kl}
+  \end{equation}
+  这表明 Best-of-$N$ 仅耗费 $O(\ln N)$ 的极低 KL 预算，就能极其稳健地逼近高奖励区域，往往比粗调的 RL 拥有更优的“奖励—KL”帕累托前沿！
+  \item \textbf{串行缩放（延长思维链测试时思考预算）}：通过 RLVR 训练出的推理模型，在遇到简单算术题时几十个词元即作答，遇到竞赛级难题时则自动展开数千乃至上万词元的串行推演与验算，将\textbf{搜索算法内化到了自回归生成过程之中}。
+\end{enumerate}
+
+\section{实测验证：DPO 对齐中的奖励—KL 帕累托权衡}
+\label{sec:exp-dpo}
+
+为了将定理~\ref{thm:rlhf-optimal} 与定理~\ref{thm:dpo-derivation} 从纸面推演变成可触摸的定量实验，配套脚本 \texttt{code/vol6\_experiments.py} 中的 \texttt{exp4\_dpo\_alignment()} 构建了一个完全可控、可精确观测真实隐藏奖励与精确 KL 散度的上下文偏好对齐实验：
+\begin{itemize}
+  \item \textbf{真实世界与参考模型设定}：构造 $N_{\mathrm{ctx}} = 64$ 个 12 维上下文向量 $X \in \R^{64 \times 12}$，每个上下文有 $K_{\mathrm{resp}} = 8$ 种候选回复。隐藏的真实人类奖励矩阵为 $R_{\mathrm{true}} = X W_{\mathrm{true}}$（对 DPO 算法完全不可见！）。初始参考策略 $\pi_{\mathrm{ref}}$ 是一个带噪声的不完美 SFT 模型（权重仅对齐真实奖励的 $25\%$ 并叠加高斯扰动），其初始期望真实奖励仅为 \textbf{$0.455$}。
+  \item \textbf{偏好数据生成与 DPO 训练}：对每个上下文随机抽取 6 对候选回答（共 $64 \times 6 = 384$ 条偏好对），严格按 Bradley--Terry 概率~\eqref{eq:bt-model} 以隐藏真值 $R_{\mathrm{true}}$ 掷硬币决出胜负 $(y_w, y_l)$。随后从 $\pi_{\mathrm{ref}}$ 初始化 $\pi_\theta$，分别在\textbf{弱约束 $\beta = 0.1$} 与\textbf{强约束 $\beta = 0.6$} 下用纯 DPO 损失~\eqref{eq:dpo-loss} 训练 120 轮（Adam, $\text{lr}=3\times 10^{-2}$），每 10 轮记录真实期望奖励、精确 KL 散度 $\DKL(\pi_\theta \| \pi_{\mathrm{ref}})$ 与成对排序准确率。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left panel: Expected true hidden reward
+  \begin{axis}[
+    name=dpoleft,
+    width=0.47\linewidth, height=6.0cm,
+    title={\footnotesize\sffamily\bfseries (a) 隐藏真实人类奖励 $\E[R_{\mathrm{true}}]$ 爬升},
+    xlabel={DPO 训练轮数（Epoch）},
+    ylabel={期望真实奖励（对训练不可见）},
+    xmin=-2, xmax=125, ymin=0.2, ymax=4.1,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.06)}, anchor=south east, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, very thick, dashed, mark=triangle*, mark size=1.6pt]
+      table[x=ep, y=rew_b01, col sep=comma]{data/dpo_align.csv};
+    \addlegendentry{$\beta = 0.1$（终值 $3.703$）}
+
+    \addplot[teal, very thick, mark=*, mark size=1.5pt]
+      table[x=ep, y=rew_b06, col sep=comma]{data/dpo_align.csv};
+    \addlegendentry{$\beta = 0.6$（终值 $3.669$）}
+
+    \node[slate, font=\scriptsize, anchor=west] at (axis cs:6, 0.55) {初始 SFT: $0.455$};
+  \end{axis}
+
+  % Right panel: KL divergence from pi_ref
+  \begin{axis}[
+    at={(dpoleft.east)}, anchor=west, xshift=12mm,
+    width=0.47\linewidth, height=6.0cm,
+    title={\footnotesize\sffamily\bfseries (b) 相对参考策略的 KL 散度 $\DKL(\pi_\theta \| \pi_{\mathrm{ref}})$},
+    xlabel={DPO 训练轮数（Epoch）},
+    ylabel={精确 KL 散度（nats）},
+    xmin=-2, xmax=125, ymin=-0.045, ymax=3.05,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.04,0.95)}, anchor=north west, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, very thick, dashed, mark=triangle*, mark size=1.6pt]
+      table[x=ep, y=kl_b01, col sep=comma]{data/dpo_align.csv};
+    \addlegendentry{$\beta = 0.1$（终值 $2.200$）}
+
+    \addplot[teal, very thick, mark=*, mark size=1.5pt]
+      table[x=ep, y=kl_b06, col sep=comma]{data/dpo_align.csv};
+    \addlegendentry{$\beta = 0.6$（终值 $1.746$）}
+
+    % Callout showing 20.6% KL savings, placed cleanly below teal curve
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, navy, thick]
+      (axis cs:120, 1.77) -- (axis cs:120, 2.17);
+    \node[navy, font=\scriptsize\sffamily, align=center, fill=white, draw=navy!40, rounded corners=1pt, inner sep=2pt]
+      at (axis cs:86, 0.72) {KL 降低 $20.6\%$\\奖励仅差 $0.9\%$};
+    \draw[-{Stealth[length=1.6mm]}, navy, thin] (axis cs:104, 1.00) -- (axis cs:118.5, 1.94);
+  \end{axis}
+\end{tikzpicture}
+\caption{上下文成对偏好数据集上的 DPO 实测轨迹（读取自 \texttt{data/dpo\_align.csv}）。从未见过真实奖励标量的 DPO 仅靠 384 对胜负比较，便把期望真实奖励从 $0.455$ 拉升逾 $8\times$；而较大温度 $\beta=0.6$ 以不到 $1\%$ 的微弱奖励让步，换取了 $20.6\%$ 的 KL 偏离压缩与更高的偏好排序准确率（$93.2\%$ vs $88.8\%$）。}
+\label{fig:dpo-align}
+\end{figure}
+
+表~\ref{tab:dpo-metrics} 与图~\ref{fig:dpo-align}（直接读取 \texttt{data/dpo\_align.csv}）呈现了极具启发性的定量规律：
+\begin{enumerate}
+  \item \textbf{纯成对比较即可精准还原隐藏奖励方向}：尽管 DPO 全程从未见过哪怕一个真实标量分 $R_{\mathrm{true}}$，也从未训练显式奖励模型或运行在线 RL，120 轮内它将策略的真实期望回报从初始 SFT 的 \textbf{$0.455$} 一路抬升至 \textbf{$3.703$}（$\beta=0.1$）与 \textbf{$3.669$}（$\beta=0.6$），涨幅超过 \textbf{$8.0\times$}！
+  \item \textbf{温度 $\beta$ 的帕累托杠杆效应}：将 $\beta$ 从 $0.1$ 提高至 $0.6$，最终真实奖励几乎毫无损失（$3.669$ vs $3.703$，仅低 $0.9\%$），但策略相对参考模型 $\pi_{\mathrm{ref}}$ 的 KL 散度从 \textbf{$2.200$} 显著收紧至 \textbf{$1.746$}（节省了 \textbf{$20.6\%$} 的 KL 偏移预算），同时偏好对排序准确率从 \textbf{$88.8\%$} 反而提升至 \textbf{$93.2\%$}！这是因为适度增大的 $\beta$ 令逻辑斯蒂边际 $\beta(\Delta_w - \Delta_l)$ 对较小对数概率差更敏感，从而在不把策略分布推向极端尖峰的前提下高效完成了偏好排序。
+\end{enumerate}
+
+\begin{table}[htbp]
+\centering
+\caption{DPO 实测关键节点指标对照（数据源：\texttt{data/dpo\_align.csv} 及 \texttt{exp4\_dpo\_alignment()} 输出）}
+\label{tab:dpo-metrics}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}lccccX@{}}
+\toprule
+\textbf{轮数} & \textbf{$\beta{=}0.1$ 奖励} & \textbf{$\beta{=}0.1$ KL} & \textbf{$\beta{=}0.6$ 奖励} & \textbf{$\beta{=}0.6$ KL} & \textbf{阶段特征} \\
+\midrule
+Ep.\,0   & $0.4554$ & $0.0000$ & $0.4554$ & $0.0000$ & 初始不完美 SFT 参考模型 \\
+Ep.\,20  & $2.6287$ & $0.8295$ & $2.6257$ & $0.6510$ & 奖励极速爬升，$\beta{=}0.6$ KL 已低 $21.5\%$ \\
+Ep.\,60  & $3.4392$ & $1.8131$ & $3.4405$ & $1.3293$ & 两者奖励持平，KL 剪刀差持续拉大 \\
+Ep.\,120 & $3.7035$ & $2.1997$ & $3.6690$ & $1.7457$ & 准确率 $88.8\%$ ($\beta{=}0.1$) vs $93.2\%$ ($\beta{=}0.6$) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{failBox}{DPO 与大模型后训练工程中的三大高频失误}
+\begin{enumerate}
+  \item \textbf{同时压低胜出回答概率的“似然位移”（Likelihood Displacement）}：细看式~\eqref{eq:dpo-loss}——DPO 损失只关心差值 $\ln\frac{\pi_\theta(y_w)}{\pi_{\mathrm{ref}}(y_w)} - \ln\frac{\pi_\theta(y_l)}{\pi_{\mathrm{ref}}(y_l)}$。实践中经常观测到\textbf{胜出回答 $y_w$ 与落败回答 $y_l$ 的绝对对数概率双双下降}（只是 $y_l$ 降得更快！），导致模型把大量概率质量泄漏到未见过的分布外词元上，推理能力退化。常见缓解手段包括加入轻量 SFT 正则项（如 CPO / RPO）、降低学习率（通常仅 $5\times 10^{-7} \sim 5\times 10^{-6}$），以及仅训练 $1 \sim 2$ 个 epoch。
+  \item \textbf{跳过 SFT 分布对齐直接做离线 DPO}：定理~\ref{thm:dpo-derivation} 隐含假设偏好数据 $(y_w, y_l)$ 位于参考策略 $\pi_{\mathrm{ref}}$ 的高概率支撑集内。如果直接拿开源外部模型生成的偏好对去 DPO 微调一个风格迥异的基座模型（而不先用 $y_w$ 做一轮 SFT 使 $\pi_{\mathrm{ref}}$ 落入同一分布），$\ln\frac{\pi_\theta}{\pi_{\mathrm{ref}}}$ 的参考基准会严重失真，对齐效果大打折扣。
+  \item \textbf{随意把整句求和 $\sum_t \ln \pi$ 改成词元均值 $\frac{1}{|y|}\sum_t \ln \pi$ 而不调整理论}：在精确 DPO 定理中，序列对数概率必须是\textbf{求和}而非平均；如果擅自取均值却仍沿用 DPO 的 $\pi_{\mathrm{ref}}$ 项，就会破坏与 KL 正则 RLHF 的等价性（尽管后来 \textbf{SimPO} 在去掉 $\pi_{\mathrm{ref}}$ 的同时专门引入了长度归一化与目标边际 $\gamma$ 以治理长度偏差——二者设计自成体系，切忌混搭）。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{离线 DPO 的演进谱系：IPO、KTO、SimPO 与在线迭代 DPO}
+DPO 因其极致简洁在工业界迅速普及，同时也催生出一系列针对特定痛点的变体与在线化演进：
+\begin{itemize}
+  \item \textbf{IPO（Identity Preference Optimization，Azar et al., 2024）}：指出在确定性偏好（几乎无噪声）数据下，Bradley--Terry 要求 $\hat{r}_w - \hat{r}_l \to +\infty$，容易令 DPO 过拟合甚至无视 $\beta$ 的 KL 约束；IPO 将对数 Sigmoid 换成带目标边际的平方回归损失 $\big((\ln\frac{\pi_\theta(y_w)}{\pi_{\mathrm{ref}}(y_w)} - \ln\frac{\pi_\theta(y_l)}{\pi_{\mathrm{ref}}(y_l)}) - \frac{1}{2\beta}\big)^2$，天然防止边际发散。
+  \item \textbf{KTO（Kahneman--Tversky Optimization，Ethayarajh et al., 2024）}：借鉴行为经济学前景理论（损失厌恶），\textbf{不再需要成对数据 $(y_w, y_l)$}，仅需用户日常点赞/点踩的二元单条反馈即可直接对齐！
+  \item \textbf{SimPO（Simple Preference Optimization，Meng et al., 2024）}：用长度归一化平均对数概率 $\frac{\beta}{|y|}\ln\pi_\theta(y\mid x)$ 作为隐式奖励并引入正边际 $\gamma > 0$，\textbf{连参考模型 $\pi_{\mathrm{ref}}$ 也一并省去}，显存再降一半且天然抑制长度膨胀。
+  \item \textbf{迭代/在线 DPO（Iterative / Online DPO）}：离线 DPO 最大的软肋是无法针对当前策略 $\pi_\theta$ 自己新犯的错误做定向纠偏（Xu et al., 2024 证明在线 PPO 在分布外泛化上常优于纯离线 DPO）。迭代 DPO 每训完一轮，就用当前策略重新采样新回复、由 RM 或裁判模型标注新偏好对，再执行下一轮 DPO，优雅地架起了离线对齐与在线 RL 之间的桥梁。
+\end{itemize}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章完整贯通了现代大语言模型从“预训练底座”进化为“对齐助手与深度推理者”的数学脊梁：
+\begin{itemize}
+  \item \textbf{SFT 指令微调}：通过提示掩码交叉熵建立对话范式与基础能力，但受限于模仿上限与缺乏负对比信号。
+  \item \textbf{Bradley--Terry 与 KL 正则 RLHF}：借助成对比较建模隐含奖励，并用拉格朗日乘子法与 Gibbs 不等式严格证明了唯一闭式最优策略 $\pi^*(y\mid x) = \frac{1}{Z(x)}\pi_{\mathrm{ref}}(y\mid x)\exp(\frac{1}{\beta}r(x,y))$。
+  \item \textbf{DPO 天书捷径}：反解隐式奖励并利用 Bradley--Terry 模型的提示级平移不变性，精确消去不可计算的配分函数 $Z(x)$，得到仅含自适应错判权重 $\sigma(\hat{r}_l - \hat{r}_w)$ 的离线分类损失；在上下文偏好实测中将隐藏真实回报从 $0.455$ 拉升至 $3.703$，并定量验证了 $\beta=0.6$ 节省 $20.6\%$ KL 散度的帕累托权衡。
+  \item \textbf{奖励黑客与 RLVR}：以 Goodhart 定律与过优化标度律揭示代理奖励模型的崩坏机制，进而迈向以规则验证器 + GRPO + Best-of-$N$ 推理时计算缩放为核心的下一代推理范式。
+\end{itemize}
+
+至此，本卷上半部（第 1--4 章）的\textbf{强化学习与大模型后训练算法大厦}已全部竣工！然而，当你真正试图把 700 亿参数模型放进集群，用 GRPO 对每道题并发采样 $G=64$ 条 8000 词元的思维链、并完成反向传播时，一个无比残酷的工程现实会迎面撞来：\textbf{GPU 算力利用率竟然不到 $5\%$，显存瞬间 OOM 崩溃！} 究竟是谁卡住了现代 AI 的咽喉？从第 5 章起，我们将切换至底层计算机系统视角，直面 GPU 访存墙、Roofline 模型与 FlashAttention 的在线分块奇迹。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与公式手算}{熟练计算 Bradley--Terry 概率、DPO 损失与隐式奖励权重}
+
+\begin{enumerate}
+  \item[\textbf{6.4.1}] \textbf{DPO 损失、隐式奖励与错判权重手算}：给定某提示 $x$ 与一对回答 $(y_w, y_l)$，设温度 $\beta = 0.5$，测得参考策略与当前策略的整句对数概率如下：
+  \[
+    \ln \pi_{\mathrm{ref}}(y_w \mid x) = -12.0, \quad
+    \ln \pi_{\mathrm{ref}}(y_l \mid x) = -10.0, \quad
+    \ln \pi_\theta(y_w \mid x) = -11.0, \quad
+    \ln \pi_\theta(y_l \mid x) = -8.0.
+  \]
+  \begin{enumerate}
+    \item 计算胜出与落败回答的隐式奖励 $\hat{r}_\theta(x, y_w)$ 与 $\hat{r}_\theta(x, y_l)$；
+    \item 计算当前模型预测 $y_w \succ y_l$ 的概率 $\sigma(\hat{r}_w - \hat{r}_l)$、该样本的 DPO 损失值 $-\ln\sigma(\hat{r}_w - \hat{r}_l)$，以及式~\eqref{eq:dpo-grad} 中的梯度错判权重 $w_\theta = \sigma(\hat{r}_l - \hat{r}_w)$；
+    \item 判断当前模型是“判对了”还是“判反了”，并解释为何权重 $w_\theta > 0.5$。
+  \end{enumerate}
+  \exHint{$\hat{r}_w = 0.5 \times (-11 - (-12)) = +0.5$，$\hat{r}_l = 0.5 \times (-8 - (-10)) = +1.0$；由于 $\hat{r}_l > \hat{r}_w$，模型判反了，错判权重 $w_\theta = \sigma(0.5) \approx 0.622$。}
+
+  \item[\textbf{6.4.2}] \textbf{RLHF 闭式最优策略的两动作数值验证}：某提示 $x$ 仅有两条候选回答 $\{y_1, y_2\}$，参考分布为 $\pi_{\mathrm{ref}}(y_1 \mid x) = 0.2, \pi_{\mathrm{ref}}(y_2 \mid x) = 0.8$，奖励为 $r(x, y_1) = 3.0, r(x, y_2) = 1.0$。
+  \begin{enumerate}
+    \item 分别在 $\beta = 1.0$ 与 $\beta = 0.2$ 下，用定理~\ref{thm:rlhf-optimal} 计算配分函数 $Z(x)$、闭式最优策略 $\pi^*(y_1\mid x)$、精确散度 $\DKL(\pi^* \| \pi_{\mathrm{ref}})$ 及最优目标值 $\beta \ln Z(x)$；
+    \item 直接验算 $\E_{\pi^*}[r] - \beta \DKL(\pi^* \| \pi_{\mathrm{ref}})$ 是否精确等于 $\beta \ln Z(x)$。
+  \end{enumerate}
+  \exHint{当 $\beta = 1.0$ 时，$\pi^*(y_1) = \frac{0.2 e^3}{0.2 e^3 + 0.8 e^1} = \frac{e^2}{e^2 + 4} \approx 0.6488$；当 $\beta = 0.2$ 时，$\frac{1}{\beta}\Delta r = 10$，$\pi^*(y_1)$ 骤升至 $\approx 0.9998$，直观体现了低 $\beta$ 下的激进贪婪化。}
+\end{enumerate}
+
+\exTier{B 层：严谨数学证明}{吃透等价类唯一性、Best-of-$N$ 精确 KL 与温度极限}
+
+\begin{enumerate}
+  \item[\textbf{6.4.3}] \textbf{Bradley--Terry 奖励等价类与最优策略的唯一对应}：定义两个奖励函数 $r_1(x, y)$ 与 $r_2(x, y)$ 等价（记作 $r_1 \sim r_2$），若存在仅依赖 $x$ 的函数 $c(x)$ 使得 $r_2(x, y) = r_1(x, y) + c(x)$ 对一切 $(x, y)$ 成立。
+  \begin{enumerate}
+    \item 证明等价的奖励函数不仅诱导完全相同的 Bradley--Terry 偏好分布~\eqref{eq:bt-model}，而且在式~\eqref{eq:rlhf-obj} 中诱导\textbf{完全相同的闭式最优策略 $\pi^*(y \mid x)$}；
+    \item 反之，证明在给定参考策略 $\pi_{\mathrm{ref}}$（处处为正）和 $\beta > 0$ 下，若任意合法策略 $\pi$ 均可写成 $\pi_{\mathrm{ref}}$ 的玻尔兹曼倾斜，则其所对应的奖励函数恰形成一个唯一的等价类，从而严格说明 DPO 重参数化\textbf{不损失任何表达能力}。
+  \end{enumerate}
+  \exHint{(a) 将 $r_2 = r_1 + c(x)$ 代入式~\eqref{eq:rlhf-opt-policy}，分子分母同时析出常数因子 $\exp(c(x)/\beta)$ 并约去；(b) 任选代表元 $r_\pi(x,y) = \beta \ln\frac{\pi(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}$，其配分函数恰好恒等于 $1$！}
+
+  \item[\textbf{6.4.4}] \textbf{推理时缩放的优美定理：Best-of-$N$ 的精确 KL 散度公式~\eqref{eq:bon-kl}}：设参考分布 $\pi_{\mathrm{ref}}$ 连续无原子（任意两条独立采样回答的奖励值几乎必然互不相等），每次独立采样 $N$ 条回答 $\{Y_1, \dots, Y_N\} \overset{\mathrm{i.i.d.}}{\sim} \pi_{\mathrm{ref}}$ 并输出奖励最高者 $Y^* = \argmax_i r(Y_i)$，记 $Y^*$ 的分布为 $\pi_{\mathrm{BoN}}$。
+  \begin{enumerate}
+    \item 记奖励 $R = r(Y)$（$Y \sim \pi_{\mathrm{ref}}$）的累积分布函数为 $F(r)$，令分位数 $U = F(r(Y)) \sim \mathrm{Uniform}(0, 1)$。证明 $Y^*$ 对应分位数 $U^* = \max(U_1, \dots, U_N)$ 的概率密度函数为 $p_N(u) = N u^{N-1}$（$u \in [0, 1]$）；
+    \item 利用 KL 散度对单调双射变换的不变性，直接积分证明精确公式
+    \[
+      \DKL\!\big(\pi_{\mathrm{BoN}} \,\|\, \pi_{\mathrm{ref}}\big)
+      = \int_0^1 N u^{N-1} \ln\!\big(N u^{N-1}\big)\,du
+      = \ln N - \frac{N - 1}{N}.
+    \]
+  \end{enumerate}
+  \exHint{拆分积分 $\ln N \int_0^1 N u^{N-1}du + N(N-1)\int_0^1 u^{N-1}\ln u\,du$，利用分部积分 $\int_0^1 u^{N-1}\ln u\,du = -\frac{1}{N^2}$ 一步即得！}
+\end{enumerate}
+
+\exTier{C 层：机制剖析与反例设计}{洞察奖励过优化拐点、确定性偏好过拟合与长度偏差}
+
+\begin{enumerate}
+  \item[\textbf{6.4.5}] \textbf{奖励过优化的数学定量诊断}：回顾式~\eqref{eq:overopt-scaling} 的经验过优化标度律 $R_{\mathrm{gold}}(d) = d(\alpha_{\mathrm{RM}} - \beta_{\mathrm{RM}} d)$，其中 $d = \sqrt{\DKL(\pi \,\|\, \pi_{\mathrm{ref}})}$。假设某 7B 代理奖励模型测得 $\alpha_{\mathrm{RM}} = 2.0, \beta_{\mathrm{RM}} = 0.25$。
+  \begin{enumerate}
+    \item 求出令真实人类质量达到峰值的最优 KL 散度 $\DKL^*$ 与最高真实得分 $R_{\mathrm{gold}}^{\max}$；
+    \item 当 RLHF 训练缺乏 KL 约束导致 $\DKL = 64\;\text{nats}$ 时，计算此时的 $R_{\mathrm{gold}}$；结合习题~\textbf{6.4.4} 的式~\eqref{eq:bon-kl}，算出大约需要多大的 Best-of-$N$ 采样数 $N$ 才能恰好落在该最优 KL 散度 $\DKL^*$ 上？
+  \end{enumerate}
+  \exHint{(a) $d^* = \frac{2.0}{0.5} = 4.0$，即 $\DKL^* = 16\;\text{nats}$，$R_{\mathrm{gold}}^{\max} = 4.0$；(b) $\DKL = 64$ 时 $d=8$，$R_{\mathrm{gold}} = 0$（收益全盘归零！）；对于 Best-of-$N$，由 $\ln N - 1 \approx 16$ 可见需要 $N \approx e^{17}$，这也解释了为何纯 BoN 很难轻易过优化。}
+
+  \item[\textbf{6.4.6}] \textbf{为什么确定性偏好会让 DPO 绕开 $\beta$ 发生过拟合？}：假设偏好数据集中对某个提示 $x$ 只有唯一一对无噪声样本 $(y_w, y_l)$（即经验概率 $\hat{P}(y_w \succ y_l \mid x) = 1$）。分析：无论正则强度 $\beta > 0$ 选得多大（哪怕 $\beta = 10$），只要不加早停，无约束最小化 DPO 损失 $-\ln \sigma\big(\beta(\ln\frac{\pi_\theta(y_w)}{\pi_{\mathrm{ref}}(y_w)} - \ln\frac{\pi_\theta(y_l)}{\pi_{\mathrm{ref}}(y_l)})\big)$ 最终会把 $\pi_\theta(y_l \mid x)$ 推向什么极限值？并解释 IPO 的二次边际损失如何根治这一缺陷。
+  \exHint{$-\ln\sigma(z)$ 只有在 $z \to +\infty$ 时才趋于下确界 $0$；因此无论 $\beta$ 多大，梯度永不为零，最终必然将 $\pi_\theta(y_l \mid x) \to 0$（$\DKL \to \infty$），从而使 $\beta$ 的正则保护形同虚设！}
+\end{enumerate}
+
+\exTier{D 层：编程实验与系统延伸}{探索 $\beta$ 帕累托曲线与似然位移现象}
+
+\begin{enumerate}
+  \item[\textbf{6.4.7}] {\rightskip=0pt plus 1fil\relax \textbf{编程实验：绘制完整的 DPO 奖励—KL 帕累托前沿并监测似然位移}：修改 \texttt{code/vol6\_experiments.py} 中的 \texttt{exp4\_dpo\_alignment()}：\par}
+  \begin{enumerate}
+    \item 扫描 $\beta \in \{0.02, 0.05, 0.1, 0.3, 0.6, 1.5, 5.0\}$，以最终 \texttt{KL} 为横轴、最终真实奖励 \texttt{exp\_rew} 为纵轴绘制帕累托前沿曲线；
+    \item 在训练过程中额外记录胜出样本的平均对数概率 $\bar{\ell}_w = \E[\ln \pi_\theta(y_w\mid x)]$ 与落败样本平均对数概率 $\bar{\ell}_l = \E[\ln \pi_\theta(y_l\mid x)]$，尝试在低 $\beta$ 下观察是否出现二者同步下降或过拟合迹象，并验证在 DPO 损失中加入 $0.1 \cdot (-\bar{\ell}_w)$（轻量 SFT 正则）后的变化。
+  \end{enumerate}
+  \exHint{当 $\beta = 5.0$ 时，KL 极小但真实奖励明显受限；当 $\beta = 0.02$ 时，KL 飙升但对噪声偏好对过拟合的风险加大，$\beta \in [0.1, 0.6]$ 位于帕累托拐角附近。}
+
+  \item[\textbf{6.4.8}] \textbf{编程实验：在模拟偏好数据上实现 Best-of-$N$ 并验证公式~\eqref{eq:bon-kl}}：复用 \texttt{exp4\_dpo\_alignment()} 的随机环境（或将候选回复数扩充至 $K_{\mathrm{resp}} = 500$ 近似连续分布），对均匀参考策略 $\pi_{\mathrm{ref}}$ 实现 Best-of-$N$ 采样（$N \in \{2, 4, 8, 16, 32\}$），在 $10^4$ 次蒙特卡洛抽样下统计实测平均真实奖励与实测散度 $\DKL(\hat{\pi}_{\mathrm{BoN}} \| \pi_{\mathrm{ref}})$，并与精确理论值 $\ln N - \frac{N-1}{N}$ 逐项比对！
+  \exHint{例如当 $N = 8$ 时，理论值 $\ln 8 - 7/8 \approx 2.079 - 0.875 = 1.204\;\text{nats}$；当 $K_{\mathrm{resp}} \gg N$（碰撞概率可忽略）时，实测 KL 会与理论公式吻合至小数点后两位。}
+\end{enumerate}

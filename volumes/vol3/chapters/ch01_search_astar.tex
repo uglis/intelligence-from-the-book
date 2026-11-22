@@ -1,0 +1,556 @@
+\chapter[状态空间搜索与 A* 启发式算法]{状态空间建模、无信息搜索\\与 A* 启发式搜索}\label{ch:search}
+\chapEpigraph{解决问题，就是把它表征为一种使解答变得显而易见的形式。}{赫伯特·西蒙（Herbert A. Simon），《人工科学》}
+
+\begin{chapIntro}{本章定位与学习路线}
+在 408 数据结构中，你已经熟练掌握了图的广度优先搜索（BFS）、深度优先搜索（DFS）与 Dijkstra 最短路算法。本章将把这些经典图算法\textbf{升维}为人工智能中的\textbf{状态空间搜索（State-Space Search）}范式：从隐式指数级状态图出发，系统比较 BFS、DFS、迭代加深搜索（IDS）与一致代价搜索（UCS），进而引入目标导向的启发函数 $h(n)$，给出 \textbf{A* 搜索最优性的两条核心定理（可采纳性与一致性）的完整证明}、无重开闭集时的反例剖析、松弛问题启发式构造法，并在 $25\times 25$ U 型陷阱迷宫上用真实实验量化验证启发式支配定理的剪枝威力。
+\end{chapIntro}
+
+% ======================================================================
+\section{状态空间抽象与无信息搜索（衔接 408 图算法）}\label{sec:uninformed}
+% ======================================================================
+
+在进入一般形式化定义之前，先看一个具体的生活与机器人问题：一台仓库巡检机器人在 $25\times 25$ 的障碍物网格中，需要从起点 $(12,4)$ 移动到终点 $(12,22)$，每次只能向上、下、左、右四个方向移动一格，每步耗费代价 $1$。或者再看一个经典的 8 数码（8-Puzzle）滑块拼图：在 $3\times 3$ 棋盘上滑动数字 $1\text{--}8$ 与空格，从初始排列恢复到有序排列。
+
+表面上这是两个截然不同的问题，但在人工智能视角下，它们共享完全相同的数学骨架——\textbf{状态空间搜索问题}。
+
+\begin{recallBox}{从 408 显式图到 AI 隐式状态图}
+在 408 图论算法中，图 $G=(V,E)$ 通常以邻接矩阵或邻接表\textbf{显式存储}在内存里，顶点数 $|V|$ 一般在 $10^2\sim 10^6$ 量级。而在人工智能搜索问题中，状态总数往往是\textbf{组合爆炸}的：例如 8 数码有 $9!/2 = 181{,}440$ 个可达状态，15 数码有 $16!/2 \approx 1.05\times 10^{13}$ 个状态，魔方更是高达 $4.3\times 10^{19}$ 个状态。我们绝不可能提前把整张图读入内存，而是通过\textbf{后继函数（转移模型）按需动态展开节点}。
+\end{recallBox}
+
+\subsection{状态空间问题的形式化建模}
+
+\begin{defBox}
+\begin{definition}[确定性单智能体状态空间搜索问题]\label{def:search-problem}
+一个确定性状态空间搜索问题由元组 $\mathcal{P} = (S, s_0, A, T, c, G)$ 定义（亦常将状态转移与代价合写为五元组，记目标判定函数 $\text{GoalTest}(s) \equiv \mathbb{I}[s \in G]$）：
+\begin{enumerate}
+  \item \textbf{状态空间（State Space）}$S$：问题所有可能处于的配置集合；
+  \item \textbf{初始状态（Initial State）}$s_0 \in S$：智能体出发时的状态；
+  \item \textbf{动作集合（Action Set）}$A(s)$：在状态 $s$ 下所有合法可执行动作的集合；
+  \item \textbf{转移模型（Transition Model）}$T(s, a) = s'$：在状态 $s$ 执行动作 $a \in A(s)$ 后到达的后继状态 $s' \in S$；
+  \item \textbf{步代价函数（Step Cost）}$c(s, a, s') > 0$：从 $s$ 经动作 $a$ 转移至 $s'$ 的非负代价（通常假设存在常数 $\varepsilon > 0$ 使 $c(s,a,s')\ge \varepsilon$，以防出现零代价无限环）；
+  \item \textbf{目标集合（Goal Set）}$G \subseteq S$：满足终止条件的目标状态集合。
+\end{enumerate}
+一条从 $s_0$ 出发的动作序列 $(a_1, a_2, \dots, a_k)$ 诱导出状态路径 $s_0 \to s_1 \to \dots \to s_k$，其\textbf{路径总代价}为 $g = \sum_{i=1}^{k} c(s_{i-1}, a_i, s_i)$。若 $s_k \in G$，称该路径为一个\textbf{解（Solution）}；在所有解中总代价最小者称为\textbf{最优解（Optimal Solution）}，记最优代价为 $C^*$。
+\end{definition}
+\end{defBox}
+
+初学者极易混淆两个概念：\textbf{状态图（State Graph）}与\textbf{搜索树（Search Tree）}。在状态图中，每个世界状态只出现一次；而在搜索树中，每一个\textbf{搜索节点（Node）}$n$ 代表的是一条\textbf{从 $s_0$ 到达某状态 $n.\text{state}$ 的具体路径}，内部通常封装四个字段：状态 $n.\text{state}$、父节点指针 $n.\text{parent}$、触发动作 $n.\text{action}$ 以及累计路径代价 $n.g$。因此，同一个状态可能对应搜索树中多条不同路径上的多个节点。
+
+围绕“是否记录已访问状态”，所有搜索算法分为两大框架：
+\begin{itemize}
+  \item \textbf{树搜索（Tree Search）}：只维护待扩展的\textbf{边缘集合（Frontier / Open Set）}，不记录已扩展状态。同一状态可能沿不同路径被重复展开，在含环图中甚至可能死循环。
+  \item \textbf{图搜索（Graph Search）}：额外维护一个\textbf{已探索集合（Explored / Closed Set）}，避免对同一状态进行无意义的重复展开。正如我们在 1.2 节将看到的，这一小小改动会对启发函数的理论条件提出更高要求（从可采纳性升级为一致性）。
+\end{itemize}
+
+\subsection{四种经典无信息搜索策略}
+
+所谓\textbf{无信息搜索（Uninformed / Blind Search）}，是指算法除了问题定义本身之外，没有任何关于“当前状态离目标还有多远”的额外领域知识。算法之间的核心差别，仅仅在于\textbf{边缘集合 \texttt{Frontier} 的数据结构与弹出顺序}。记搜索树的最大分支因子为 $b$，最浅目标深度为 $d$，搜索树最大深度为 $m$（可能为 $\infty$），最优路径代价为 $C^*$，最小单步代价为 $\varepsilon > 0$。
+
+\begin{enumerate}
+  \item \textbf{广度优先搜索（BFS）}：使用先进先出队列（FIFO Queue），按深度 $0, 1, 2, \dots$ 逐层向外推进。若 $b$ 有限，BFS 必然在有限步内找到最浅目标（\textbf{完备}）；当且仅当所有边权相等（例如均为 $1$）时，最浅解就是代价最小解（\textbf{最优}）。其致命软肋不是时间，而是\textbf{指数级空间复杂度} $O(b^d)$：在 $b=10, d=12$ 时，仅存储边缘节点就需要 TB 级内存，远远先于 CPU 耗尽而崩溃。
+  \item \textbf{深度优先搜索（DFS）}：使用后进先出栈（LIFO Stack），沿着当前分支一路深挖到底再回溯。它的突出优势是仅需保存当前路径及其兄弟节点，\textbf{空间复杂度仅线性于深度} $O(bm)$。但树搜索版 DFS 在含环或无限深度分支上会一去不回（\textbf{不完备}），且首次碰到的目标往往位于很深的弯路上（\textbf{不最优}）。
+  \item \textbf{迭代加深搜索（Iterative Deepening Search, IDS）}：如何同时拥有 BFS 的完备性、单位代价最优性与 DFS 的线性空间？答案优雅得令人拍案叫绝——\textbf{以深度上限 $\ell = 0, 1, 2, \dots$ 反复运行深度受限 DFS（DLS）}，直到找到目标！
+  初看之下，反复重搜浅层节点似乎很浪费，但指数级增长树的绝大部分节点都在最底层。设目标深度为 $d$，深度 $k$ 层的节点会在 $\ell = k, k+1, \dots, d$ 时被重复生成 $d+1-k$ 次，总节点生成数为：
+  \begin{equation}\label{eq:ids-nodes}
+    N_{\text{IDS}}(b, d) = \sum_{k=0}^{d} (d + 1 - k) b^k = b^d \sum_{j=0}^{d} (j+1) b^{-j} < b^d \sum_{j=0}^{\infty} (j+1) b^{-j} = \frac{b^2}{(b-1)^2}\, b^d.
+  \end{equation}
+  而 BFS 到达深度 $d$ 生成的节点数（含第 $d$ 层）约为 $\frac{b}{b-1} b^d$。两者比值仅为 $\frac{b}{b-1}$！当分支因子 $b=10$ 时，IDS 相比 BFS 只多做约 $11\%$ 的额外工作，却将内存从灾难性的 $O(b^d)$ 一举压低至极其轻量的 $O(bd)$！因此，在无信息且状态空间极大、目标深度未知的等权问题中，\textbf{IDS 是绝对的首选算法}。
+  \item \textbf{一致代价搜索（Uniform-Cost Search, UCS）}：当边权不再相等（例如城市公路里程、不同地形通行耗时），BFS 找到的“最少步数”不再等于“最小代价”。UCS 将边缘集合替换为\textbf{按累计路径代价 $g(n)$ 排序的最小堆（Priority Queue）}，每次弹出 $g(n)$ 最小的节点——这正是 408 中\textbf{懒惰删除版 Dijkstra 算法}在隐式图上的推广。
+\end{enumerate}
+
+\begin{failBox}{UCS / Dijkstra 中最常见的实现 Bug：入队判目标 vs 出队判目标}
+在 BFS 中，我们常习惯在“生成邻居并入队时”就提前判断 \texttt{if v == goal: return}，以节省最后一层出队开销。但在\textbf{带权图的 UCS（以及后文的 A*）中，这会直接导致返回次优解！}
+
+例如 $S \xrightarrow{10} G$ 与 $S \xrightarrow{1} A \xrightarrow{1} G$：当 $S$ 展开时，直接邻居 $G$（代价 $10$）与 $A$（代价 $1$）同时被生成；若在生成瞬间判定目标，就会立刻误选代价为 $10$ 的直连边，错失代价为 $2$ 的最优路径。只有等到目标节点\textbf{从最小堆顶端弹出（Pop / Expansion）}时，才能保证堆中已无任何更低代价的路径，从而确保最优性。
+\end{failBox}
+
+表~\ref{tab:uninformed-compare} 汇总了四种无信息搜索算法的核心理论性质，供随时对照。
+
+\begin{table}[htbp]
+\centering
+\caption{四种经典无信息搜索算法的理论性质对比（$b$：分支因子，$d$：最浅目标深度，$m$：最大深度，$C^*$：最优代价，$\varepsilon$：最小正边权）}\label{tab:uninformed-compare}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{算法} & \textbf{边缘数据结构} & \textbf{完备性} & \textbf{最优性} & \textbf{时间复杂度} & \textbf{空间复杂度} \\
+\midrule
+BFS & FIFO 队列 & 是（$b<\infty$） & 仅当等权边 & $O(b^d)$ & $O(b^d)$ \\
+DFS（树搜索） & LIFO 栈 & 否（可能死循环） & 否 & $O(b^m)$ & $O(bm)$ \\
+IDS & 深度受限栈 & 是（$b<\infty$） & 仅当等权边 & $O(b^d)$ & $O(bd)$ \\
+UCS & 最小堆（按 $g$） & 是（$b<\infty, \varepsilon>0$） & 是（非负正权） & $O\!\left(b^{1+\lfloor C^*/\varepsilon\rfloor}\right)$ & $O\!\left(b^{1+\lfloor C^*/\varepsilon\rfloor}\right)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+尽管 UCS 在非负带权图上兼具完备性与最优性，但它的探索波前呈同心圆状向四周均匀扩散：为了找到位于正东方 20 公里外的终点，它会同样卖力地把正西方、正北方、正南方 20 公里内的所有路口全部展开一遍。要打破这种“盲目扩散”，我们必须给搜索装上一枚指向目标的指南针——这就是下一节的主角：\textbf{A* 启发式搜索}。
+
+% ======================================================================
+\section{A* 搜索：评价函数 $f(n)=g(n)+h(n)$ 与最优性双定理}\label{sec:astar}
+% ======================================================================
+
+\subsection{从贪心最佳优先到 A*：一个 5 节点带权图的手工追踪}
+
+设函数 $h(n) \ge 0$ 是从节点 $n$ 所在状态到达最近目标状态的\textbf{估计剩余代价}，称为\textbf{启发函数（Heuristic Function）}，并约定任何目标状态满足 $h(G) = 0$。若令记号 $h^*(n)$ 表示从 $n$ 到达目标的\textbf{真实最小剩余代价}，则 $h(n)$ 实质上是对未知真值 $h^*(n)$ 的快速近似。
+
+如果我们只看指南针 $h(n)$、完全忽略已经走过的代价 $g(n)$，就得到\textbf{贪心最佳优先搜索（Greedy Best-First Search）}：每次从优先队列弹出 $h(n)$ 最小的节点。它常常直奔目标、速度极快，但容易被眼前的“近距离假象”诱入陷阱或高代价弯路，因此\textbf{既不保证最优，在无闭集的树搜索中也不保证完备}。
+
+1968 年，Hart、Nilsson 与 Raphael 提出了一个简洁而辉煌的折中——\textbf{A* 算法}：用\textbf{经过节点 $n$ 的总路径代价估计值}作为优先队列键值：
+\begin{equation}\label{eq:astar-f}
+  f(n) = g(n) + h(n),
+\end{equation}
+其中 $g(n)$ 是起点 $s_0$ 到 $n$ 的已花实付代价（回顾过去），$h(n)$ 是 $n$ 到目标的估计剩余代价（展望未来）。特例上，取 $h(n)\equiv 0$ 时 A* 退化为 UCS；忽略 $g(n)$ 时退化为贪心搜索。
+
+在证明一般定理之前，让我们亲手在图~\ref{fig:astar-5node} 所示的 5 节点带权图上完整推演一次 A* 搜索，建立最扎实的手感。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=18mm and 26mm,
+  state/.style={
+    circle, draw=tealDark, thick, fill=tealLight,
+    minimum size=11.5mm, font=\sffamily\bfseries\normalsize, text=ink
+  },
+  goal/.style={
+    circle, draw=ochre, very thick, double, double distance=1.4pt, fill=ochreLight,
+    minimum size=11.5mm, font=\sffamily\bfseries\normalsize, text=ochre
+  },
+  edge/.style={-{Stealth[length=2.4mm]}, thick, navy!80},
+  opt/.style={-{Stealth[length=2.6mm]}, very thick, teal},
+  hlabel/.style={font=\footnotesize\sffamily, text=ochre, fill=white, inner sep=1.5pt}
+]
+  \node[state] (S) at (0, 0) {$S$};
+  \node[state] (A) at (3.2, 1.55) {$A$};
+  \node[state] (B) at (3.2, -1.55) {$B$};
+  \node[state] (C) at (6.8, 1.55) {$C$};
+  \node[goal]  (G) at (10.2, 0) {$G$};
+
+  % Heuristics cleanly offset outside nodes
+  \node[hlabel, below=2mm of S] {$h=6$};
+  \node[hlabel, above=2mm of A] {$h=4$};
+  \node[hlabel, below=2mm of B] {$h=2$};
+  \node[hlabel, above=2mm of C] {$h=2$};
+  \node[hlabel, below=2mm of G] {$h=0$};
+
+  % Edges
+  \draw[opt]  (S) -- node[above left, font=\footnotesize\sffamily, text=tealDark] {$2$} (A);
+  \draw[edge] (S) -- node[below left, font=\footnotesize\sffamily, text=navy] {$5$} (B);
+  \draw[opt]  (A) -- node[above, font=\footnotesize\sffamily, text=tealDark] {$3$} (C);
+  \draw[edge] (A) -- node[right, font=\footnotesize\sffamily, text=navy] {$4$} (B);
+  \draw[opt]  (C) -- node[above right, font=\footnotesize\sffamily, text=tealDark] {$2$} (G);
+  \draw[edge] (B) -- node[below right, font=\footnotesize\sffamily, text=navy] {$3$} (G);
+
+  % Legend box cleanly below node B's h=2 label
+  \node[anchor=west, font=\footnotesize\sffamily, text=slate] at (0, -2.95)
+    {注：粗青色实线为最优路径 $S\!\to\!A\!\to\!C\!\to\!G$（总代价 $C^*=7$）；次优路径 $S\!\to\!B\!\to\!G$ 总代价为 $8$。};
+\end{tikzpicture}
+\caption{5 节点带权有向图上的 A* 手工追踪示例（各节点旁橙字标注一致启发值 $h$，边旁数字为实际代价 $c$）}\label{fig:astar-5node}
+\end{figure}
+
+对图~\ref{fig:astar-5node} 逐轮追踪最小堆 \texttt{Open}（节点以 $n\,(g{+}h{=}f)$ 记，相同 $f$ 值优先弹出 $h$ 较小者）：
+\begin{enumerate}
+  \item \textbf{初始化}：$\texttt{Open} = \{ S\,(0{+}6{=}6) \}$，$\texttt{Closed} = \varnothing$。
+  \item \textbf{第 1 步}：弹出 $S\,(6)$，加入 $\texttt{Closed}=\{S\}$；生成后继 $A\,(2{+}4{=}6)$、$B\,(5{+}2{=}7)$。此时 $\texttt{Open} = \{ A\,(6),\, B\,(7) \}$。
+  \item \textbf{第 2 步}：优先弹出 $A\,(6)$，加入 $\texttt{Closed}=\{S, A\}$；生成后继 $C\,(2{+}3{+}2{=}7)$，而经 $A\to B$ 到达 $B$ 的路径代价 $g'=2+4=6 > 5$，不优于已有路径故舍弃。此时 $\texttt{Open} = \{ C\,(5{+}2{=}7),\, B\,(5{+}2{=}7) \}$。
+  \item \textbf{第 3 步}：弹出 $C\,(7)$ 并加入 $\texttt{Closed}=\{S, A, C\}$，生成目标 $G\,(5{+}2{+}0{=}7)$ 入队；队列更新为 $\texttt{Open} = \{ G\,(7{+}0{=}7),\allowbreak\, B\,(5{+}2{=}7) \}$。
+  \item \textbf{第 4 步}：由于 $G$ 的 $h=0 < h(B)=2$，优先弹出 $G\,(7)$ 并命中目标判定，返回最优路径 $S\to A\to C\to G$（总代价 $C^*=7$），次优分支 $B$ 根本无需展开！
+\end{enumerate}
+
+反过来想一想：如果刚才我们把 $h(A)$ 错误地高估成了 $h(A)=6 > h^*(A)=5$，会发生什么？第 1 步入队后有 $f(A)=2+6=8 > f(B)=5+2=7$，A* 会抢先展开 $B$ 并生成次优目标 $G\,(g{=}8, f{=}8)$，从而可能错失最优解！这一正一反的对比直指 A* 最优性的第一条黄金法则：\textbf{启发函数绝不能高估真实剩余代价，而必须始终保持“乐观下界”——这就是可采纳性（Admissibility）！}
+
+\subsection{定理一：可采纳性与树搜索 A* 最优性证明}
+
+\begin{defBox}
+\begin{definition}[可采纳启发函数（Admissible Heuristic）]\label{def:admissible}
+若对状态空间中的任意状态 $n \in S$，启发函数 $h$ 满足
+\begin{equation}\label{eq:admissible}
+  0 \le h(n) \le h^*(n),
+\end{equation}
+其中 $h^*(n)$ 为从 $n$ 到达最近目标状态的真实最小代价（特别地，对任意目标状态 $G\in\mathcal{G}$ 必有 $h^*(G)=0$，从而 $h(G)=0$），则称 $h$ 是\textbf{可采纳的（Admissible）}。通俗地说，可采纳启发式永远是“乐观的”，从不高估到达目标的剩余代价。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[树搜索 A* 的完备性与最优性]\label{thm:astar-tree}
+若状态空间的分支因子 $b < \infty$、所有步代价满足 $c(s,a,s')\ge \varepsilon > 0$，且启发函数 $h$ 是\textbf{可采纳的}，则当解存在时，\textbf{树搜索版 A*}（在节点出队时检验目标）必在有限步内终止，并返回一条代价为 $C^*$ 的\textbf{最优解}。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+我们分两步严格证明：先证\textbf{最优性}（绝不会先弹出次优目标），再证\textbf{完备性}（有限步内必能弹出最优目标）。
+
+\textbf{第一步（最优性，反证法）}。假设存在一个次优目标节点 $G_2$ 满足 $g(G_2) > C^*$，且树搜索 A* 在弹出任何最优目标之前先弹出了 $G_2$。由于 $G_2$ 是目标状态且 $h$ 可采纳，有 $h(G_2) = 0$，故其评价值为
+\[
+  f(G_2) = g(G_2) + h(G_2) = g(G_2) > C^*.
+\]
+另一方面，任取一条从起点 $s_0$ 通往某个最优目标 $G^*$ 的最优路径 $P^* = (s_0 = n_0 \to n_1 \to \dots \to n_k = G^*)$，其总代价为 $g^*(G^*) = C^*$。考察在 $G_2$ 即将被弹出的那一瞬间，路径 $P^*$ 上的节点状态：根节点 $n_0=s_0$ 早已在初始时入队并展开，而终点 $n_k=G^*$ 尚未被展开。因此，沿着路径 $P^*$ 必存在第一个尚未被展开的节点 $n_j$（$0 \le j \le k$），它的父节点 $n_{j-1}$ 已经被展开（若 $j=0$ 则 $s_0$ 自身仍在队中），从而节点 $n_j$（沿着 $P^*$ 的最优前缀到达，故 $g(n_j) = g^*(n_j)$）\textbf{此刻正位于边缘集合 \texttt{Open} 中}。
+
+由 $h$ 的可采纳性 $h(n_j) \le h^*(n_j)$ 以及最优子结构性质 $g^*(n_j) + h^*(n_j) = C^*$，立得
+\begin{equation}\label{eq:astar-proof-key}
+  f(n_j) = g(n_j) + h(n_j) = g^*(n_j) + h(n_j) \le g^*(n_j) + h^*(n_j) = C^* < g(G_2) = f(G_2).
+\end{equation}
+这就导出矛盾：既然 \texttt{Open} 中同时躺着 $n_j$ 与 $G_2$ 且严格满足 $f(n_j) < f(G_2)$，按最小 $f$ 值出队的 A* 绝不可能先弹出 $G_2$！因此，任何次优目标都不可能被弹出。
+
+\textbf{第二步（完备性）}。只要 $G^*$ 尚未被弹出，由第一步可知，当前队列中始终存在至少一个节点 $n_j$ 满足 $f(n_j) \le C^*$，因而 A* 每次弹出的节点 $u$ 必然满足 $f(u) \le C^*$。又因 $h(u)\ge 0$ 且每步代价至少为 $\varepsilon > 0$，任意满足 $g(u) \le f(u) \le C^*$ 的搜索树节点，其深度不可能超过 $\lfloor C^*/\varepsilon \rfloor$。由于分支因子 $b$ 有限，深度不超过 $\lfloor C^*/\varepsilon \rfloor$ 的树节点总数是有限的，故算法必在有限次出队后弹出最优目标 $G^*$。
+\end{proof}
+
+\subsection{反例警示：为什么可采纳性不足以保证图搜索 A* 最优？}
+
+在工程实践中，我们几乎总是使用带 \texttt{Closed} 集合的\textbf{图搜索 A*} 以避免重复展开相同状态。一个极其容易踩中的误区是以为“只要 $h$ 可采纳，把树搜索加上 \texttt{Closed} 集合就依然最优”。下面的 4 节点反例将彻底击碎这一直觉。
+
+\begin{failBox}{可采纳却不一致：朴素图搜索 A* 返回次优解的 4 节点反例}
+考察下图所示的 4 节点有向图，起点 $S$，目标 $G$。容易手算各节点的真实最短剩余代价：
+\[
+  h^*(G)=0,\quad h^*(B)=3,\quad h^*(A)=4,\quad h^*(S)=5\quad (\text{最优路径 } S\to A\to B\to G,\; C^*=5).
+\]
+现在取启发函数 $h(G)=0,\; h(B)=0,\; h(A)=4,\; h(S)=4$。逐一检验可知，\textbf{所有节点均满足 $0 \le h(n) \le h^*(n)$，故 $h$ 完全可采纳！}
+
+然而，运行\textbf{不允许重开闭集节点}的朴素图搜索 A*，会发生什么？
+\begin{enumerate}
+  \item 弹出 $S\,(g{=}0, f{=}4)$，标记 $S\in\texttt{Closed}$；将后继 $A\,(g{=}1, h{=}4, f{=}5)$ 与 $B\,(g{=}3, h{=}0, f{=}3)$ 入队。
+  \item 比较队内键值：$f(B)=3 < f(A)=5$，于是\textbf{先弹出 $B\,(g{=}3)$}，将其锁进 $\texttt{Closed}=\{S, B\}$！并生成 $G\,(g{=}3{+}3{=}6, h{=}0, f{=}6)$ 入队。
+  \item 弹出 $A\,(g{=}1, f{=}5)$，发现经由 $A\to B$ 到达 $B$ 的路径代价仅为 $g'=1+1=2 < 3$。\textbf{但 $B$ 已经在 \texttt{Closed} 中}，朴素图搜索直接忽略之！
+  \item 最终弹出 $G\,(g{=}6, f{=}6)$，返回了总代价为 $6$ 的\textbf{次优路径} $S\to B\to G$，错失代价为 $5$ 的真正最优解！
+\end{enumerate}
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=16mm and 24mm,
+  st/.style={circle, draw=navy, thick, fill=white, minimum size=9.5mm, font=\sffamily\bfseries\small, text=ink},
+  gl/.style={circle, draw=ochre, very thick, double, fill=ochreLight, minimum size=9.5mm, font=\sffamily\bfseries\small, text=ochre},
+  ar/.style={-{Stealth[length=2.2mm]}, thick, navy},
+  bad/.style={-{Stealth[length=2.2mm]}, very thick, ochre, dashed}
+]
+  \node[st] (S) at (0, 0) {$S$};
+  \node[st] (A) at (2.8, 1.15) {$A$};
+  \node[st] (B) at (5.6, 0) {$B$};
+  \node[gl] (G) at (8.6, 0) {$G$};
+
+  \node[below=1.5mm of S, font=\scriptsize\sffamily, text=ochre] {$h=4\;(h^*=5)$};
+  \node[above=1.5mm of A, font=\scriptsize\sffamily, text=ochre] {$h=4\;(h^*=4)$};
+  \node[below=1.5mm of B, font=\scriptsize\sffamily, text=ochre] {$h=0\;(h^*=3)$};
+  \node[below=1.5mm of G, font=\scriptsize\sffamily, text=ochre] {$h=0$};
+
+  \draw[ar]  (S) -- node[above left, font=\scriptsize\sffamily] {$1$} (A);
+  \draw[ar]  (A) -- node[above right, font=\scriptsize\sffamily] {$1$} (B);
+  \draw[bad] (S) -- node[below, font=\scriptsize\sffamily, text=ochre] {$3$（先锁死 $B$）} (B);
+  \draw[ar]  (B) -- node[above, font=\scriptsize\sffamily] {$3$} (G);
+\end{tikzpicture}\par\smallskip
+{\footnotesize\sffamily\color{slate}（4 节点反例示意：边 $A\to B$ 违反三角不等式 $h(A)=4 > c(A,B)+h(B)=1+0=1$）}
+\end{center}
+\textbf{病根在哪？}回头看定理~\ref{thm:astar-tree} 的证明：我们用到“$n_j$ 沿最优前缀到达，故 $g(n_j)=g^*(n_j)$”。在图搜索中，一旦某节点 $B$ 被次优路径抢先弹出并锁死进 \texttt{Closed}，最优路径就被拦腰斩断。而 $B$ 之所以会被提前弹出，恰恰是因为经过边 $A\to B$ 时，\textbf{估价值 $f$ 居然倒退下降了}：$f(A)=5 > f(B\text{ via }A)=2+0=2$！
+\end{failBox}
+
+\subsection{定理二：一致性（单调性）与图搜索 A* 最优性证明}
+
+要杜绝上述 4 节点反例中的“$f$ 值倒退与抢先锁死”现象，只需对启发函数加上一个天然的几何要求——\textbf{三角不等式}。
+
+\begin{defBox}
+\begin{definition}[一致性启发函数（Consistent / Monotonic Heuristic）]\label{def:consistent}
+若启发函数 $h$ 满足 $h(G)=0$（对所有目标状态 $G\in\mathcal{G}$），且对状态图中的每一条有向边 $(n, a, n')$（代价 $c(n,a,n')$）均满足\textbf{三角不等式}：
+\begin{equation}\label{eq:consistency}
+  h(n) \le c(n, a, n') + h(n'),
+\end{equation}
+则称 $h$ 是\textbf{一致的（Consistent）}或\textbf{单调的（Monotonic）}。其直观含义极为朴素：从 $n$ 估计到终点的距离，不应大于“先走一步到 $n'$ 的实际花费，再加上从 $n'$ 估计到终点的距离”。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[一致性的三大推论与图搜索 A* 最优性]\label{thm:astar-graph}
+若启发函数 $h$ 是一致的，则以下三条性质依次成立：
+\begin{enumerate}
+  \item \textbf{（一致性蕴含可采纳性）}对任意状态 $n$，有 $h(n) \le h^*(n)$；
+  \item \textbf{（沿路径 $f$ 值单调非减）}对任意边 $(n, a, n')$，若 $n'$ 作为 $n$ 的后继生成，则 $f(n') \ge f(n)$；
+  \item \textbf{（首次出队即最优）}在图搜索 A* 中，每当任意节点 $n$ 首次从 \texttt{Open} 弹出时，其路径代价已经达到真实最优代价，即 $g(n) = g^*(n)$。从而无需重开闭集节点，图搜索 A* 首次弹出目标时必返回最优解。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+我们依次严格证明三条结论：
+
+\textbf{证明 1（一致性 $\implies$ 可采纳性）}。任取状态 $n$ 及一条从 $n$ 到最近目标 $G^*$ 的最优路径 $n = v_0 \to v_1 \to \dots \to v_k = G^*$。对路径长度 $k$ 施归纳（或直接将各边三角不等式累加）：
+\[
+  h(v_0) \le c(v_0, v_1) + h(v_1) \le c(v_0, v_1) + c(v_1, v_2) + h(v_2) \le \dots \le \sum_{i=0}^{k-1} c(v_i, v_{i+1}) + h(v_k) = h^*(n) + 0 = h^*(n).
+\]
+
+\textbf{证明 2（$f$ 值单调非减）}。由 $g(n') = g(n) + c(n, a, n')$ 及一致性条件~\eqref{eq:consistency}，直接计算得
+\begin{equation}\label{eq:f-monotone}
+  f(n') = g(n') + h(n') = g(n) + c(n, a, n') + h(n') \ge g(n) + h(n) = f(n).
+\end{equation}
+进一步推知，图搜索 A* 依次弹出的节点序列，其 $f$ 值构成单调非减序列（呈现逐层扩张的 $f$-等高线，犹如变形的 Dijkstra 水波）。
+
+\textbf{证明 3（图搜索首次出队即最优，反证法）}。假设存在节点在首次从 \texttt{Open} 弹出时携带次优代价，取其中\textbf{第一个}出现该情况的弹出节点，记为 $n$，满足 $g(n) > g^*(n)$。
+
+考虑一条从 $s_0$ 到 $n$ 的真实最优路径 $P^* = (s_0 = u_0 \to u_1 \to \dots \to u_m = n)$。在 $n$ 即将被弹出的时刻，$u_0=s_0$ 已被弹出，而 $u_m=n$ 尚未被弹出。设 $u_j$ 为路径 $P^*$ 上第一个尚未被弹出（即尚未进入 \texttt{Closed}）的节点。则 $u_j$ 的前驱 $u_{j-1}$ 已经在更早时刻被弹出，并且按 $n$ 是“首个次优弹出节点”的选取方式，前驱 $u_{j-1}$ 弹出时必然满足 $g(u_{j-1}) = g^*(u_{j-1})$。
+
+在 $u_{j-1}$ 展开时，后继 $u_j$ 必然已被松弛入队，因此此刻 \texttt{Open} 中存在 $u_j$ 的记录且其代价满足 $g(u_j) \le g^*(u_{j-1}) + c(u_{j-1}, u_j) = g^*(u_j)$，从而必有 $g(u_j) = g^*(u_j)$。接下来，沿着最优路径后缀 $u_j \to u_{j+1} \to \dots \to u_m = n$ 反复应用性质 2（不等式~\eqref{eq:f-monotone}），得到
+\begin{equation}\label{eq:graph-proof-key}
+  f(u_j) = g^*(u_j) + h(u_j) \le g^*(u_{j+1}) + h(u_{j+1}) \le \dots \le g^*(n) + h(n) < g(n) + h(n) = f(n).
+\end{equation}
+这说明 \texttt{Open} 中存在节点 $u_j$ 严格满足 $f(u_j) < f(n)$，与 A* 优先弹出 $n$ 矛盾！故每一个从 \texttt{Open} 弹出的节点都已取得最优代价 $g(n)=g^*(n)$。特别地，当目标节点 $G$ 首次出队时，$g(G)=g^*(G)=C^*$，算法严格最优。
+\end{proof}
+
+\begin{remark}[工程修复技巧]
+若某实际场景中得到的启发式仅可采纳但不一致，工程上仍可通过\textbf{允许重开闭集节点}（即发现 $g'(v) < g_{\text{best}}[v]$ 时重新松弛并将 $v$ 再次压入优先队列）恢复图搜索的最优性，但最坏情况下同一节点可能被反复重开导致指数级时间退化。因此，\textbf{设计天然一致的启发函数}始终是上策。
+\end{remark}
+
+% ======================================================================
+\section{启发式设计（松弛问题法）与支配关系（Dominance）}\label{sec:heuristics}
+% ======================================================================
+
+理论已经就绪，下一个核心工程问题是：\textbf{高质量、既可采纳又一致的启发函数从哪里来？}难道全靠拍脑袋猜吗？当然不是——人工智能拥有一套系统化的启发式制造机：\textbf{松弛问题法（Relaxed Problem Method）}。
+
+\subsection{松弛问题法：自动生成一致启发式}
+
+设原问题 $\mathcal{P}$ 的合法移动受若干物理约束限制。如果我们\textbf{删去其中一条或多条约束}（等价于在状态图上\textbf{添加新边}，扩大动作集合 $A_{\text{rel}}(s) \supseteq A(s)$），就得到一个更容易求解的\textbf{松弛问题} $\mathcal{P}_{\text{rel}}$。
+
+\begin{thmBox}
+\begin{proposition}[松弛问题最优代价的天然一致性]\label{prop:relaxed-consistent}
+若启发函数 $h(n)$ 定义为松弛问题 $\mathcal{P}_{\text{rel}}$ 中从 $n$ 到目标的\textbf{精确最优代价} $h^*_{\text{rel}}(n)$，则 $h$ 自动对原问题 $\mathcal{P}$ \textbf{既一致又可采纳}。
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+对原问题中的任意合法边 $(n, a, n')$，由于松弛问题保留了原问题的所有动作，该边在 $\mathcal{P}_{\text{rel}}$ 中同样合法且代价仍为 $c(n,a,n')$。在 $\mathcal{P}_{\text{rel}}$ 中，从 $n$ 出发先走该边到 $n'$ 再沿 $\mathcal{P}_{\text{rel}}$ 的最优路径走到目标，是一条合法路径，其代价不可能小于从 $n$ 出发的松弛最优代价：
+\[
+  h(n) = h^*_{\text{rel}}(n) \le c(n,a,n') + h^*_{\text{rel}}(n') = c(n,a,n') + h(n').
+\]
+且对任意目标 $G$ 有 $h^*_{\text{rel}}(G)=0$。故 $h$ 严格满足一致性，进而由定理~\ref{thm:astar-graph} 自动满足可采纳性。
+\end{proof}
+
+这一命题立刻让经典教科书中的所有常见启发式都变得有章可循：
+\begin{itemize}
+  \item \textbf{8 数码问题}：原规则要求“滑块 $k$ 可从格子 $A$ 移到格子 $B$，当且仅当 $A$ 与 $B$ 相邻 \emph{且} $B$ 是空格”。
+  \begin{enumerate}
+    \item 同时删去“相邻”与“$B$ 是空格”两条约束（滑块可瞬间传送到任意格）：精确最优解即\textbf{错位滑块数} $h_1(n)$；
+    \item 只删去“$B$ 是空格”约束（滑块可互相穿过，但每次仍只能移向相邻格）：精确最优解即所有滑块到目标位置的\textbf{曼哈顿距离之和} $h_2(n) = \sum_{k=1}^{8} (|r_k - r_k^*| + |c_k - c_k^*|)$。
+  \end{enumerate}
+  \item \textbf{四连通障碍物网格（如机器人导航）}：
+  \begin{enumerate}
+    \item 删去全部障碍物墙体，保留四方向移动规则：精确最优解为\textbf{曼哈顿距离} $h_{\text{Man}}(r,c) = |r-r_G| + |c-c_G|$；
+    \item 进一步删去“只能沿坐标轴移动”的约束，允许沿任意角度在平面上直线飞行：精确最优解为\textbf{欧几里得距离} $h_{\text{Euc}}(r,c) = \sqrt{(r-r_G)^2 + (c-c_G)^2}$。
+  \end{enumerate}
+\end{itemize}
+此外，如果手里有多个可采纳（或一致）启发函数 $h_1, h_2, \dots, h_m$，取它们的逐点最大值
+\begin{equation}\label{eq:max-heuristic}
+  h_{\max}(n) = \max\bigl(h_1(n),\, h_2(n),\, \dots,\, h_m(n)\bigr)
+\end{equation}
+\textbf{依然保持可采纳性与一致性}（证明留作习题 1.5），并且同时吸收了各启发式的全部优势！
+
+\subsection{支配关系（Dominance）与展开节点数定理}
+
+面对四连通网格上的曼哈顿距离 $h_{\text{Man}}$ 与欧几里得距离 $h_{\text{Euc}}$，二者皆一致，由基本不等式可知对一切网格点恒有
+\[
+  h_{\text{Euc}}(n) = \sqrt{\Delta r^2 + \Delta c^2} \le |\Delta r| + |\Delta c| = h_{\text{Man}}(n) \le h^*(n).
+\]
+直观上，$h_{\text{Man}}$ 更贴近真实代价 $h^*$，信息量更强。下面的定理精确刻画了“更紧的启发函数”如何直接减少搜索工作量。
+
+\begin{thmBox}
+\begin{theorem}[启发式支配定理（Dominance Theorem）]\label{thm:dominance}
+设 $h_1, h_2$ 均为一致启发函数，若对任意状态 $n$ 均有 $h_2(n) \ge h_1(n)$，称 $h_2$ \textbf{支配（Dominates）}$h_1$。在不考虑 $f(n)=C^*$ 边界上的平局打破差异时，\textbf{A* 使用 $h_2$ 展开的每一个满足 $f_2(n) < C^*$ 的节点，也必然会被使用 $h_1$ 的 A* 展开}。特别地，A*（配任意非负一致启发式）展开的严格内部节点集合始终是 UCS（$h\equiv 0$）的子集。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+因 $h_1, h_2$ 均一致，由定理~\ref{thm:astar-graph} 知图搜索 A* 首次弹出节点 $n$ 时必有 $g(n) = g^*(n)$。
+\begin{itemize}
+  \item 若某节点 $n$ 被 $h_2$ 的 A* 展开且满足 $f_2(n) < C^*$，即 $g^*(n) + h_2(n) < C^*$；
+  \item 由支配假设 $h_1(n) \le h_2(n)$，立得 $f_1(n) = g^*(n) + h_1(n) \le g^*(n) + h_2(n) < C^*$；
+  \item 而在 $h_1$ 的 A* 中，目标节点 $G^*$ 出队时的键值恰为 $f_1(G^*) = C^*$。由 $f$ 值出队单调性，一切满足 $f_1(n) < C^*$ 的可达节点都必然在 $G^*$ 之前被弹出展开！
+\end{itemize}
+反之，对满足 $g^*(n) + h_1(n) < C^* < g^*(n) + h_2(n)$ 的节点，$h_1$ 会将其无谓展开，而 $h_2$ 则将其精准挡在 $C^*$ 边界之外。
+\end{proof}
+
+需要提醒一点工程权衡：虽然 $h$ 越接近 $h^*$ 展开节点越少，但\textbf{单次计算 $h(n)$ 的耗时本身也在总时间里}。如果花 10 毫秒算一个超级复杂的启发式才省下 5 个节点，反而不如花 10 纳秒算曼哈顿距离快。好的启发式追求的是\textbf{紧致度与计算开销的帕累托前沿}。
+
+\subsection{真实实验：$25\times 25$ U 型陷阱迷宫上的五算法量化对比}
+
+为让上述理论落地，我们在配套实验脚本 \texttt{code/vol3\_experiments.py} 中构建了一张 $25\times 25$ 的四连通障碍物网格：起点在 $(12, 4)$，终点在 $(12, 22)$，中间设置了一道开口朝左的 \textbf{U 型陷阱墙}（第 12 列第 6--19 行与第 6、19 行第 6--12 列）以及右侧一道纵向隔断墙（第 18 列第 2--13 行）。U 型陷阱专门用来检验搜索算法面对“近在咫尺却被墙挡死”时的鲁棒性。
+
+表~\ref{tab:maze-exp} 与图~\ref{fig:maze-exp} 展示了五种搜索算法的真实运行指标（所有数据均由脚本实测生成）。
+
+\begin{table}[htbp]
+\centering
+\caption{$25\times 25$ U 型陷阱迷宫上五种搜索算法的实测路径代价与展开节点数（脚本 \texttt{vol3\_experiments.py}）}\label{tab:maze-exp}
+\small
+\begin{tabularx}{\linewidth}{@{}lcccX@{}}
+\toprule
+\textbf{搜索算法} & \textbf{解代价} & \textbf{是否最优} & \textbf{展开节点数} & \textbf{相对 UCS 节点降幅与行为解读} \\
+\midrule
+BFS & $34$ & 是 & $560$ & 基准（等权图下与 UCS 等价，向四周无差别扩散） \\
+UCS ($h\equiv 0$) & $34$ & 是 & $560$ & 基准（几乎填满整张 $25\times 25$ 可通行区域） \\
+A*（欧氏距离） & $34$ & 是 & $395$ & 减少 $\mathbf{29.5\%}$；被曼哈顿启发式严格支配 \\
+A*（曼哈顿距离） & $34$ & 是 & $\mathbf{233}$ & \textbf{减少 $\mathbf{58.4\%}$}；保证最优且显著收窄探索走廊 \\
+Greedy Best-First & $\textcolor{ochre}{\mathbf{36}}$ & \textcolor{ochre}{\textbf{否}} & $163$ & 虽仅展开 $163$ 节点，但一头扎进 U 型陷阱后绕出次优弯路 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[c]{0.47\linewidth}
+\centering
+\begin{tikzpicture}[scale=0.225]
+  % Grid background
+  \fill[tealLight!45] (0,0) rectangle (25,25);
+  \draw[tealLine!60, step=1, very thin] (0,0) grid (25,25);
+  \draw[tealDark, thick] (0,0) rectangle (25,25);
+
+  % Flip y so row 0 is at top, row 24 at bottom: y_tikz = 24 - r
+  % U-shaped trap walls: grid[6:20, 12]=1, grid[6, 6:13]=1, grid[19, 6:13]=1
+  \fill[ink!85] (12,5) rectangle (13,19);
+  \fill[ink!85] (6,18) rectangle (13,19);
+  \fill[ink!85] (6,5) rectangle (13,6);
+  % Secondary wall: grid[2:14, 18]=1 -> r=2..13 -> y=11..23
+  \fill[ink!85] (18,11) rectangle (19,23);
+
+  % Optimal path (length 34): (12,4) -> down to (20,4) -> right to (20,22) -> up to (12,22)
+  % Check length: (12,4)->(20,4) is 8, (20,4)->(20,22) is 18, (20,22)->(12,22) is 8 => 8+18+8=34!
+  \draw[teal, line width=1.8pt, rounded corners=1.5pt]
+    (4.5,12.5) -- (4.5,4.5) -- (22.5,4.5) -- (22.5,12.5);
+
+  % Greedy detour illustration (enters U-trap, bounces out via bottom/top)
+  \draw[ochre, line width=1.2pt, dashed, rounded corners=1.5pt]
+    (4.5,12.5) -- (11.5,12.5) -- (11.5,6.5) -- (5.5,6.5) -- (5.5,4.1) -- (22.9,4.1) -- (22.9,12.5);
+
+  % Start & Goal markers
+  \fill[navy] (4.5,12.5) circle (13pt);
+  \node[font=\tiny\sffamily\bfseries, text=white] at (4.5,12.5) {S};
+  \fill[ochre] (22.5,12.5) circle (13pt);
+  \node[font=\tiny\sffamily\bfseries, text=white] at (22.5,12.5) {G};
+
+  % Clean bottom caption legend
+  \node[anchor=north, font=\scriptsize\sffamily, text=ink] at (12.5,-0.9)
+    {\textcolor{teal}{\rule[2pt]{10pt}{1.5pt}} A* 最优解 ($34$)\quad
+     \textcolor{ochre}{\rule[2pt]{4pt}{1.1pt}\,\rule[2pt]{4pt}{1.1pt}} 贪心受诱路径 ($36$)};
+\end{tikzpicture}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.50\linewidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  bar shift=0pt,
+  clip=false,
+  width=\linewidth,
+  height=5.9cm,
+  bar width=16pt,
+  ymin=0, ymax=650,
+  ylabel={\footnotesize 展开节点数（越少越高效）},
+  symbolic x coords={BFS, UCS, A*-Euc, A*-Man, Greedy},
+  xtick={BFS, UCS, A*-Euc, A*-Man, Greedy},
+  x tick label style={font=\scriptsize\sffamily, rotate=14, anchor=east},
+  y tick label style={font=\scriptsize},
+  ymajorgrids=true,
+  grid style={tealLine!50, dashed},
+  nodes near coords,
+  every node near coord/.append style={font=\scriptsize\sffamily\bfseries, yshift=1.5pt},
+  axis lines*=left,
+  enlarge x limits=0.16
+]
+  \addplot[fill=navy!55, draw=navy] coordinates {(BFS,560) (UCS,560)};
+  \addplot[fill=teal!65, draw=tealDark] coordinates {(A*-Euc,395) (A*-Man,233)};
+  \addplot[fill=ochre!65, draw=ochre] coordinates {(Greedy,163)};
+  \node[font=\scriptsize\sffamily\bfseries, text=ochre, anchor=south] at (axis cs:Greedy, 255) {次优 ($36 > 34$)};
+\end{axis}
+\end{tikzpicture}
+\end{minipage}
+\caption{左：$25\times 25$ U 型陷阱迷宫几何与路径示意（起点 $(12,4)$，终点 $(12,22)$）；右：五种搜索算法实测展开节点数对比（曼哈顿 A* 较 UCS 减少 $58.4\%$ 展开量）}\label{fig:maze-exp}
+\end{figure}
+
+从图~\ref{fig:maze-exp} 可以直观读出两条教科书级洞察：第一，\textbf{启发式支配定理的威力立竿见影}——仅仅将欧氏距离替换为四连通网格上更紧致的曼哈顿距离，展开节点数就从 $395$ 骤降至 $233$，省去了超过四成的无效扩展；第二，\textbf{放弃 $g(n)$ 的代价是丧失最优性保障}——贪心搜索虽然只展开了 $163$ 个节点，但被 U 型腔体内的低 $h$ 值诱骗后偏离了最优走廊，返回了代价 $36$ 的次优路径。
+
+\subsection{可直接运行的 Python A* 实现与平局打破技巧}
+
+代码~\ref{lst:astar} 给出了与上述实验完全一致、结构清晰且可直接运行的 A* 实现。请特别留意第 13 行优先队列元组中的\textbf{平局打破键（Tie-Breaking）}：当多个节点拥有完全相同的 $f = g + h$ 时（这在等权网格的矩形空旷区域极其常见！），优先弹出\textbf{较小 $h$（等价于较大 $g$）}的节点，能够把探索能量集中推向离终点更近的细长走廊，大幅减少 $f=C^*$ 等高线上的冗余展开。
+
+\begin{lstlisting}[caption={带一致平局打破键的图搜索 A* Python 实现（对应 \texttt{code/vol3\_experiments.py}）},label={lst:astar}]
+import heapq
+
+def astar_grid(grid, start, goal):
+    """Four-connected grid A* with Manhattan heuristic and (f, h) tie-breaking."""
+    H, W = len(grid), len(grid[0])
+    h_fn = lambda r, c: abs(r - goal[0]) + abs(c - goal[1])
+
+    # Heap item: (f, h_tie, g, node) -> prefer smaller h (larger g) on f-ties
+    pq = [(h_fn(*start), h_fn(*start), 0, start)]
+    g_best = {start: 0}
+    parent = {start: None}
+    closed = set()
+    expanded = 0
+
+    while pq:
+        f, h_val, g, u = heapq.heappop(pq)
+        if u in closed:
+            continue                  # Lazy deletion of stale heap entries
+        closed.add(u)
+        expanded += 1
+        if u == goal:                 # Goal test MUST occur at pop time!
+            path = []
+            while u is not None:
+                path.append(u); u = parent[u]
+            return g, expanded, path[::-1]
+
+        r, c = u
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < H and 0 <= nc < W and grid[nr][nc] == 0:
+                v, ng = (nr, nc), g + 1
+                if ng < g_best.get(v, float("inf")):
+                    g_best[v] = ng
+                    parent[v] = u
+                    hv = h_fn(nr, nc)
+                    heapq.heappush(pq, (ng + hv, hv, ng, v))
+    return float("inf"), expanded, []
+\end{lstlisting}
+
+\begin{insightBox}{从 A* 到现代推理搜索与神经网络启发式}
+A* 并非只属于扫地机器人和游戏寻路。在现代人工智能中，每当你看到\textbf{大模型推理时的最佳优先树搜索（Best-First Search）}、自动定理证明器（如 Lean 证明搜索）或神经符号程序合成时，其核心骨架依然是 $f(n) = g(n) + h_\theta(n)$：只是把手工设计的曼哈顿距离换成了由神经网络学习出的价值评估函数 $h_\theta(n)$！下一章我们将把这种“评估驱动的树搜索”推进到存在理性对手的对抗博弈世界。
+\end{insightBox}
+
+\begin{extBox}{加权 A*（Weighted A*）与迭代加深 A*（IDA*）}
+在超大规模规划中，标准 A* 有时会面临两类现实压力：
+\begin{enumerate}
+  \item \textbf{牺牲微弱最优性换取数量级提速——Weighted A*}：取 $f_w(n) = g(n) + w\cdot h(n)$（权重 $w > 1$）。可以仿照定理~\ref{thm:astar-tree} 轻松证明：只要 $h$ 可采纳，Weighted A* 返回的解代价至多为 $w \cdot C^*$（称为 \textbf{$w$-有界次优性}），却常常能将展开节点数降低 $10\sim 100$ 倍！
+  \item \textbf{突破内存天花板——IDA*}：如同 IDS 用深度阈值拯救了 BFS 的内存爆炸，Korf（1985）提出的 \textbf{IDA*} 以 $f$-代价阈值 $\tau$ 反复执行深度优先剪枝（凡 $f(n)>\tau$ 即截断，并记录本轮越界的最小 $f$ 值作为下轮新阈值），以线性空间 $O(bd)$ 攻克了 15 数码与魔方的最优求解难题。
+\end{enumerate}
+\end{extBox}
+
+% ======================================================================
+\section{本章习题}\label{sec:ch1-ex}
+% ======================================================================
+
+\exTier{A 组}{基础概念与复杂度核对}
+
+\textbf{1.1} \quad 设某状态空间搜索树的均匀分支因子 $b=4$，最浅目标位于深度 $d=6$，所有动作代价均为 $1$，且状态图存在环路。请分别回答：（1）树搜索版 BFS、DFS、IDS、UCS 中哪些保证完备且最优？（2）利用式~\eqref{eq:ids-nodes} 估算 IDS 相比 BFS 多生成的节点比例约为多少？
+\exHint{利用级数极限 $\frac{b}{b-1}$ 快速估算，并注意区分“树搜索 DFS”在含环图中的行为。}
+
+\textbf{1.2} \quad 判断以下四个陈述的正误，并对每个错误陈述给出简短反例或理由：（a）若所有步代价均严格大于 $0$，则 BFS 总能找到代价最小的最优解；（b）在 UCS 中，只要目标状态第一次被生成加入优先队列即可立刻终止返回；（c）启发函数 $h(n)\equiv 0$ 既是可采纳的，也是一致的；（d）若 $h_1, h_2$ 均为可采纳启发式，则 $h(n) = h_1(n) + h_2(n)$ 一定也是可采纳的。
+\exHint{回看 1.1 节的 \texttt{failBox} 以及可采纳性定义 $0 \le h(n) \le h^*(n)$。}
+
+\exTier{B 组}{手工推演与搜索追踪}
+
+\textbf{1.3} \quad 考虑如下 5 节点有向带权图，起点 $S$，终点 $G$：边为 $S\xrightarrow{1} A$、$S\xrightarrow{4} B$、$A\xrightarrow{2} B$、$A\xrightarrow{5} C$、$B\xrightarrow{1} C$、$C\xrightarrow{3} G$、$B\xrightarrow{6} G$；各节点启发值为 $h(S)=6,\, h(A)=5,\, h(B)=3,\, h(C)=2,\, h(G)=0$。（1）检验该启发函数是否一致；（2）列出图搜索 A* 每一步弹出的节点、当前 $g$ 值与 $f$ 值，以及最终返回的最优路径与总代价（$f$ 相同时按字母序弹出）。
+\exHint{逐边验证 $h(u)\le c(u,v)+h(v)$；注意第 2 步弹出 $A$ 后会对 $B$ 进行松弛更新。}
+
+\textbf{1.4} \quad 在 $3\times 3$ 的 8 数码拼图中，目标状态按行排列为 $\begin{bmatrix}1&2&3\\4&5&6\\7&8&\square\end{bmatrix}$，当前状态为 $\begin{bmatrix}1&5&2\\4&3&6\\7&8&\square\end{bmatrix}$。（1）分别计算该状态的错位滑块数 $h_1$（不含空格）与曼哈顿距离之和 $h_2$；（2）给出一条从当前状态到目标状态的最短移动序列，求真实步数 $h^*$，并验证严格不等式 $h_1 < h_2 < h^*$。
+\exHint{曼哈顿距离只累加数字 $1\text{--}8$，不要把空格 $\square$ 算入，否则会违反可采纳性；注意空格需先向上绕行才能解开 $(2,5,3)$ 轮换。}
+
+\exTier{C 组}{理论证明与反例构造}
+
+\textbf{1.5} \quad （1）证明：若 $h_1, h_2$ 均是一致启发函数，则逐点最大值 $h_{\max}(n) = \max\{h_1(n), h_2(n)\}$ 也是一致的；（2）证明：若 $h$ 是可采纳启发函数，则加权 A*（键值 $f_w(n) = g(n) + w h(n),\; w \ge 1$）在树搜索中返回的目标代价 $C$ 必满足 $C \le w C^*$。
+\exHint{第（2）问仿照定理~\ref{thm:astar-tree}，考察最优路径上留在队列中的节点 $n_j$，放缩 $f_w(n_j) = g^*(n_j) + w h(n_j) \le w(g^*(n_j) + h^*(n_j))$。}
+
+\textbf{1.6} \quad 有人提出：“既然可采纳性允许 $h(n) \le h^*(n)$，那么在 4 节点图上，能否构造一个\textbf{非负、可采纳且满足 $h(G)=0$} 的启发式，使得即使在\textbf{允许重开闭集节点}的图搜索 A* 中，同一个节点也被迫被弹出展开至少 2 次？”请构造出这样一个具体有向图与启发函数，并写出完整的入队/出队追踪表。
+\exHint{直接改造 1.2 节 \texttt{failBox} 中的 4 节点图即可：观察节点 $B$ 被抢先弹出后，若允许重开，它会被弹出几次？}
+
+\exTier{D 组}{代码实现与实验自检}
+
+\textbf{1.7} \quad \textbf{【代码实验：重现 $25\times 25$ 迷宫并测试 Weighted A*】}基于代码~\ref{lst:astar}（或调用配套脚本 \texttt{code/\allowbreak vol3\_experiments.py} 中的 $25\times 25$ U 型陷阱网格），实现权重 $w \in \{1.0, 1.5, 2.0, 3.0\}$ 的加权 A*（曼哈顿启发式，平局键优先较小 $h$），记录每个 $w$ 对应的路径代价与展开节点数。
+\textbf{【数值自检基准】}当 $w=1.0$ 时，程序必须精确复现\textbf{路径代价 $= 34$、展开节点数 $= 233$}；当 $w=2.0$ 与 $w=3.0$ 时，展开节点数应显著低于 $233$，且返回代价严格满足理论界 $C \le 34 w$。
+\exHint{将优先队列键值改为 \texttt{(g + w * h, h, g, v)}，且在重开策略上保持 \texttt{ng < g\_best.get(v, inf)}。}
+
+\textbf{1.8} \quad \textbf{【代码实验：8 数码 A* 求解器与启发式支配实测】}编写一个 8 数码问题的图搜索 A* 求解器，支持切换三种启发式：$h_0 \equiv 0$（UCS）、$h_1$（错位滑块数）与 $h_2$（曼哈顿距离之和）。在起始棋盘 \texttt{(8, 6, 7, 2, 5, 4, 3, 0, 1)}（其中 \texttt{0} 表示空格，目标是 \texttt{(1, 2, 3, 4, 5, 6, 7, 8, 0)}，这是已知最难的 8 数码状态之一）上对比三者的展开节点数与运行时间。
+\textbf{【数值自检基准】}三种算法找到的最优步数必须完全一致，精确等于 $\mathbf{31}$ 步；展开节点数应严格满足 $N(h_2) \ll N(h_1) \ll N(h_0)$，其中 $h_2$（曼哈顿距离）展开的节点数应控制在 $10^4$ 以内（采用 \texttt{(f, h)} 平局打破时约为 $\mathbf{6{,}844}$ 个节点），而 $h_0$（UCS）则超过 $1.8\times 10^5$ 个节点。
+\exHint{用不可变元组 \texttt{tuple} 作为状态哈希键存入 \texttt{g\_best} 和 \texttt{closed}；可先用较浅的 5 步打乱状态验证状态转移与目标判定无误。}

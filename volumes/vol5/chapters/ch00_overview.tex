@@ -1,0 +1,75 @@
+\chapter*{序章：深层表征的崛起与八校考点对照}
+\addcontentsline{toc}{chapter}{序章：深层表征的崛起与八校考点对照}
+\markboth{序章\quad 本卷坐标与八校考点对照}{}
+
+\chapEpigraph{你不必相信上帝，但你应当相信“天书”的存在。}{Paul Erdős（保罗·埃尔德什，谈论记录最美证明的 \emph{THE BOOK}）}
+
+\begin{chapIntro}{本章定位与从第 4 卷的跨越}
+在前四卷中，特征向量 $x \in \R^d$ 往往由人工设计，我们只在其上学习浅层决策边界或核映射。从本卷（第 5 卷）开始，我们进入现代深度学习的核心革命：\textbf{让模型通过端到端反向传播，自动从原始数据中学习多层次的内部表征（representation）}。
+
+本卷拒绝“调包黑箱”，坚持将每一个标志性架构——从 60 行手写自动微分、Kaiming 方差守恒、ResNet 残差高速公路、因果自注意力迷你 GPT，到对比学习 InfoNCE 与 DDPM 扩散去噪——都拆解到第一性原理的数学推导与可在笔记本电脑上秒级复现的实测代码。
+\end{chapIntro}
+
+\section*{0.1\quad 从经典机器学习迈入深度学习的四个认知跃迁}
+\addcontentsline{toc}{section}{0.1\quad 从经典机器学习迈入深度学习的四个认知跃迁}
+
+\begin{enumerate}
+  \item \textbf{从手工求导到计算图自动微分（第 1 章）}：面对千万乃至百亿参数，解析推导每个偏导既不现实也易出错；反向模式自动微分（VJP）以一次前向加一次反向的 $O(1)$ 倍常数开销，精确给出标量损失对全部参数的梯度。
+  \item \textbf{从凸函数收敛到非凸训练动力学（第 2--3 章）}：深度网络损失面高度非凸，训练能否成功首先取决于信号与梯度能否稳定穿透数十层——这催生了 Kaiming 初始化、LayerNorm/RMSNorm、AdamW 以及改变深度学习历史的 ResNet 残差跳跃连接。
+  \item \textbf{从局部归纳偏置到全局内容寻址（第 4--5 章）}：卷积利用平移等变、循环网络利用时间递推，而 Transformer 用自注意力让任意两个 token 以 $O(1)$ 路径长度直接交互，并与自监督预训练和缩放定律共同铸就了当代基础模型范式。
+  \item \textbf{从判别分类到深度概率生成（第 6 章）}：将第 4 卷 EM 算法的 ELBO 下界与神经网络结合，便诞生了变分自编码器（VAE）；再将“一步隐变量映射”拆解为渐进加噪与反向去噪，便通向当今图像与视频生成的核心引擎——扩散模型（DDPM）与流匹配（Flow Matching）。
+\end{enumerate}
+
+\section*{0.2\quad 第 5 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.2\quad 第 5 卷八校核心考点覆盖对照表}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{34mm}p{35mm}p{15mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+MLP、计算图、VJP 与手写反向模式自动微分 & CMU 10-414 / Stanford CS231n & 第 1 章 & 彻底理解 PyTorch \texttt{autograd} 与自定义算子梯度 \\
+梯度消失/爆炸、Kaiming 初始化、BN/LN 与 AdamW & CS231n / Berkeley CS182 & 第 2 章 & 深层网络稳定训练与大模型优化器配置诊断 \\
+2D 卷积、\texttt{im2col}、ResNet 与 RNN/LSTM & CS231n / 南大深度学习 & 第 3 章 & 视觉骨干理解、残差流直觉与序列长程依赖建模 \\
+缩放点积注意力、多头、RoPE、Transformer 与 KV Cache & Stanford CS224n / CS336 & 第 4 章 & 现代 LLM 架构核心、第 6 卷大模型后训练与推理优化 \\
+BPE、BERT/GPT、InfoNCE 对比学习与缩放定律 & CS224n / CS336 / 智班 & 第 5 章 & 多模态对齐（CLIP）、算力配比与预训练范式理解 \\
+VAE（ELBO+重参数化）、DDPM 扩散与流匹配 & CS231n / MIT 6.S184 & 第 6 章 & 现代视觉/音频/分子生成模型的统一数学框架 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.3\quad 第 5 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.3\quad 第 5 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white, line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\MLP 与反向模式\\自动微分（VJP）};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\训练动力学：初始化\\归一化与 AdamW};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\卷积、ResNet 残差\\与循环网络};
+
+  \node[ch, below=11mm of c1] (c4) {\textbf{第 4 章}\\注意力、Transformer\\与手写迷你 GPT};
+  \node[ch, below=11mm of c2] (c5) {\textbf{第 5 章}\\自监督预训练、\\InfoNCE 与缩放律};
+  \node[goal, below=11mm of c3] (c6) {\textbf{\color{ochre}第 6 章（承接第 4 卷 EM）}\\深度生成：VAE、\\DDPM 与流匹配};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] ([xshift=-9mm]c2.south) -- (c4.north);
+  \draw[arr] ([xshift=-9mm]c3.south) -- ([xshift=9mm]c4.north);
+  \draw[arr] (c4) -- (c5);
+  \draw[arr] ([xshift=9mm]c2.south) -- ([xshift=-9mm]c6.north);
+  \draw[arr] (c4.south) -- ++(0,-4.8mm) -| (c6.south);
+\end{tikzpicture}}
+\end{center}

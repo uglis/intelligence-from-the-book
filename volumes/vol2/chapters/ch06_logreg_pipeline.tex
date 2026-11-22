@@ -1,0 +1,751 @@
+\chapter[纯 NumPy 回归/分类端到端闭环]{底座大合流实战：纯 NumPy 线性回归与逻辑/Softmax 回归全闭环}
+\label{ch:ch6-logreg-pipeline}
+
+\chapEpigraph{凡我不能亲手创造之物，我便尚未真正理解。}{理查德·费曼（Richard Feynman），加州理工学院黑板遗言（1988）}
+
+\begin{chapIntro}{本章定位：第一阶段（第 1--2 卷）数理与工程底座的终极合流}
+走到这里，你已经完成了本科人工智能数理底座的全部核心拼图：第 1 卷装备了 \textbf{NumPy 向量化、正交投影最小二乘、实对称谱定理/PSD、矩阵微分与梯度下降/有限差分校验}；第 2 卷前五章装备了 \textbf{Bayes 推断、高斯/Bernoulli/Categorical 分布、交叉熵/KL 散度、MLE/MAP 与 Bootstrap 置信区间}。本章不引入任何深度学习框架（不用 PyTorch，不用 scikit-learn），将两卷工具彻底合流：
+\begin{itemize}
+  \item 从概率建模出发，一举统一\textbf{最小二乘、$L_2$ 岭回归与 $L_1$ Lasso}；
+  \item 用严格反例与导数证明揭示\textbf{线性回归}与 \textbf{Sigmoid + MSE} 在二分类上的双重失效；
+  \item 完整推导\textbf{逻辑回归与 Softmax 回归}的交叉熵梯度、全局严格凸性、权重发散定理与 \textbf{Log-Sum-Exp} 数值稳定写法；
+  \item 亲手实测\textbf{纯噪声数据泄漏灾难}、构建不平衡分类评测体系，并交付一套纯 NumPy 端到端训练、扫参与 Bootstrap 置信区间闭环！
+\end{itemize}
+\end{chapIntro}
+
+% ====================================================================
+\section{线性回归的概率统一：MLE $\equiv$ 最小二乘，MAP $\equiv$ 岭回归 / Lasso}
+\label{sec:ch6-linreg-prob}
+
+在第 1 卷第 2 章中，我们从几何正交投影出发，把线性回归写成最小化平方残差和 $\frac{1}{2}\sum_{i=1}^n (y_i - w^T x_i - b)^2$，又为了挽救病态矩阵 $X^T X$ 而“人为”加上了岭回归惩罚项 $\frac{\lambda}{2}\norm{w}_2^2$。当时留下的悬念——\textbf{为什么偏偏是平方误差、为什么 $L_2$ 惩罚对应权重缩小、$\lambda$ 的物理含义究竟是什么}——现在用第 5 章的 MLE 与 MAP 工具只需十行推导即可彻底揭晓！
+
+考虑如下\textbf{生成式概率回归模型}：给定 $n$ 条独立观测 $\{(x_i, y_i)\}_{i=1}^n$（$x_i \in \R^d,\; y_i \in \R$），假设目标值由线性信号叠加独立同分布零均值高斯噪声产生：
+\begin{equation}
+  y_i = w^T x_i + b + \varepsilon_i,
+  \qquad
+  \varepsilon_i \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, \sigma^2)
+  \;\;\Longleftrightarrow\;\;
+  y_i \mid x_i;\, w, b \;\sim\; \mathcal{N}(w^T x_i + b,\; \sigma^2),
+  \label{eq:ch6-gauss-noise}
+\end{equation}
+其中噪声方差 $\sigma^2 > 0$ 为固定常数。
+
+\begin{thmBox}
+\begin{theorem}[线性回归的三重概率等价性：OLS、Ridge 与 Lasso]
+\label{thm:ch6-linreg-prob}
+在高斯噪声模型~\eqref{eq:ch6-gauss-noise} 下（偏置 $b$ 取无信息平坦先验，不加惩罚）：
+\begin{enumerate}
+  \item \textbf{高斯 MLE $\equiv$ 普通最小二乘（OLS）}：最大化条件对数似然 $\sum_{i=1}^n \ln p(y_i \mid x_i; w, b)$ 完全等价于
+  \[
+    (\hat{w}_{\text{MLE}}, \hat{b}_{\text{MLE}})
+    = \argmin_{w, b}\; \frac{1}{2}\sum_{i=1}^n \big(y_i - w^T x_i - b\big)^2.
+  \]
+  \item \textbf{各向同性高斯先验 MAP $\equiv$ $L_2$ 岭回归（Ridge）}：若对权重赋予先验 $w \sim \mathcal{N}(0, \tau^2 I_d)$（$\tau > 0$），则最大后验估计严格等价于
+  \begin{equation}
+    (\hat{w}_{\text{MAP}}, \hat{b}_{\text{MAP}})
+    = \argmin_{w, b}\; \frac{1}{2}\sum_{i=1}^n \big(y_i - w^T x_i - b\big)^2 + \frac{\lambda}{2}\norm{w}_2^2,
+    \qquad
+    \lambda = \frac{\sigma^2}{\tau^2}.
+    \label{eq:ch6-map-ridge}
+  \end{equation}
+  \item \textbf{独立拉普拉斯先验 MAP $\equiv$ $L_1$ Lasso 回归}：若各权重分量独立服从零均值拉普拉斯先验 $p(w_j) = \frac{1}{2b_0}\exp\!\left(-\frac{|w_j|}{b_0}\right)$（尺度参数 $b_0 > 0$），则最大后验估计严格等价于
+  \begin{equation}
+    (\hat{w}_{\text{MAP}}, \hat{b}_{\text{MAP}})
+    = \argmin_{w, b}\; \frac{1}{2}\sum_{i=1}^n \big(y_i - w^T x_i - b\big)^2 + \lambda_1 \norm{w}_1,
+    \qquad
+    \lambda_1 = \frac{\sigma^2}{b_0}.
+    \label{eq:ch6-map-lasso}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由条件独立性，写出高斯对数似然：
+\[
+  \ell(w, b)
+  = \sum_{i=1}^n \ln \left[\frac{1}{\sqrt{2\pi\sigma^2}}\exp\!\left(-\frac{(y_i - w^T x_i - b)^2}{2\sigma^2}\right)\right]
+  = -\frac{n}{2}\ln(2\pi\sigma^2) - \frac{1}{2\sigma^2}\sum_{i=1}^n (y_i - w^T x_i - b)^2.
+\]
+由于第一项为常数且 $\sigma^2 > 0$，最大化 $\ell(w,b)$ 等价于最小化 $-\sigma^2\ell(w,b)$（去掉常数），立得结论 1（注意最优 $(\hat{w}_{\text{MLE}}, \hat{b}_{\text{MLE}})$ 竟不依赖于未知噪声方差 $\sigma^2$！）。
+
+对于结论 2，高斯先验 $p(w) = (2\pi\tau^2)^{-d/2}\exp\!\left(-\frac{1}{2\tau^2}\norm{w}_2^2\right)$ 给出对数后验：
+\[
+  \ln p(w, b \mid \mathcal{D})
+  = -\frac{1}{2\sigma^2}\sum_{i=1}^n (y_i - w^T x_i - b)^2 - \frac{1}{2\tau^2}\norm{w}_2^2 + \text{const}.
+\]
+两边同乘 $-\sigma^2$（正数不改变极值点方向）并最大化转最小化，直接得到式~\eqref{eq:ch6-map-ridge}，且正则化强度精确等于 $\lambda = \sigma^2 / \tau^2$。
+
+对于结论 3，独立拉普拉斯先验给出 $\ln p(w) = \sum_{j=1}^d \ln p(w_j) = -d\ln(2b_0) - \frac{1}{b_0}\sum_{j=1}^d |w_j| = -\frac{1}{b_0}\norm{w}_1 + \text{const}$。同样对 $\ell(w,b) + \ln p(w)$ 同乘 $-\sigma^2$ 转为最小化，即得式~\eqref{eq:ch6-map-lasso} 且 $\lambda_1 = \sigma^2 / b_0$。
+\end{proof}
+
+\begin{insightBox}{读懂 $\lambda = \sigma^2 / \tau^2$ 与“为何不惩罚偏置 $b$”}
+\begin{enumerate}
+  \item \textbf{信噪比倒数定律}：$\lambda = \sigma^2/\tau^2$ 正是\textbf{观测噪声方差与先验信号方差之比}！数据越嘈杂（$\sigma^2$ 大），或我们越相信真实权重应当很小（$\tau^2$ 小），$\lambda$ 就越大，模型越不敢大起大落地去拟合噪声；反之当噪声极小时，$\lambda \to 0$，退化回无偏 OLS。
+  \item \textbf{为何拉普拉斯先验偏爱稀疏解（$w_j = 0$）}：相比高斯密度在 $0$ 处的圆滑抛物线顶，拉普拉斯密度 $\propto e^{-|w_j|/b_0}$ 在 $w_j = 0$ 处有一个\textbf{尖锐的不可微峰尖}，把更多概率质量压向精确的零点，从而在第 4 卷的 Lasso 特征选择中能自动将无关噪声特征的权重清零！
+  \item \textbf{为何绝不惩罚偏置 $b$}：如果把所有房价标签统一加上 $100$ 万元，真正应该平移的只是截距 $b$，特征权重 $w$ 丝毫不该改变。若对 $b$ 也加 $\frac{\lambda}{2}b^2$ 惩罚，就会把预测整体强行拉向 $0$，破坏标签平移不变性。因此标准工程实现中，\textbf{正则化永远只作用于权重 $w$，不作用于偏置 $b$}！
+\end{enumerate}
+\end{insightBox}
+
+\begin{table}[htbp]
+\centering
+\caption{线性模型中噪声分布、权重先验与损失/正则化的对应词典}
+\label{tab:ch6-prob-dict}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{27mm}p{27mm}p{35mm}X@{}}
+\toprule
+\textbf{似然 / 噪声假设} & \textbf{权重先验 $p(w)$} & \textbf{等价优化目标} & \textbf{模型名称与行为特征} \\
+\midrule
+高斯 $\mathcal{N}(w^Tx+b, \sigma^2)$ & 无（均匀先验） & $\frac{1}{2}\norm{Xw+b\mathbf{1}-y}_2^2$ & 普通最小二乘（OLS），高维小样本易过拟合 \\
+高斯 $\mathcal{N}(w^Tx+b, \sigma^2)$ & 高斯 $\mathcal{N}(0, \tau^2 I)$ & $\frac{1}{2}\norm{Xw+b\mathbf{1}-y}_2^2 + \frac{\sigma^2}{2\tau^2}\norm{w}_2^2$ & $L_2$ 岭回归（Ridge），平滑压缩权重、改善条件数 \\
+高斯 $\mathcal{N}(w^Tx+b, \sigma^2)$ & 拉普拉斯 $\mathrm{Lap}(0, b_0)$ & $\frac{1}{2}\norm{Xw+b\mathbf{1}-y}_2^2 + \frac{\sigma^2}{b_0}\norm{w}_1$ & $L_1$ Lasso 回归，诱导稀疏权重、自动特征筛选 \\
+Bernoulli($\sigma(w^Tx+b)$) & 高斯 $\mathcal{N}(0, \tau^2 I)$ & $\mathrm{BCE}(w,b) + \frac{\lambda}{2}\norm{w}_2^2$ & $L_2$ 逻辑回归（本章第 6.3 节主角！） \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ====================================================================
+\section{二分类困境：为何线性回归与 Sigmoid + MSE 都会失效}
+\label{sec:ch6-binary-traps}
+
+既然线性回归已经有了如此优雅的闭式解与梯度下降，面对\textbf{二分类问题}（标签 $y_i \in \{0, 1\}$，例如垃圾邮件识别、肿瘤良恶性判断），初学者的第一反应通常是以下两种偷懒方案：
+\begin{itemize}
+  \item \textbf{方案一}：直接把 $0/1$ 当成实数跑线性回归 $\hat{y} = w^T x + b$，以 $0.5$ 为阈值判别正负类；
+  \item \textbf{方案二}：套一个 Sigmoid 函数 $\sigma(z) = \frac{1}{1+e^{-z}} \in (0, 1)$ 把输出压到 $(0,1)$ 内，再沿用熟悉的均方误差（MSE）$\frac{1}{2}(\sigma(z) - y)^2$ 做梯度下降。
+\end{itemize}
+让我们用两个硬核反例彻底击碎这两个直觉陷阱——它们不仅解释了为何必须改用交叉熵，更为第 5 卷深度神经网络的梯度消失问题打下伏笔！
+
+\subsection{陷阱一：远方“铁定正确”的正样本把线性回归决策边界拖歪！}
+\label{subsec:ch6-linreg-fail}
+
+线性回归用于分类的第一个表面缺陷是输出 $\hat{y} = w^T x + b \in (-\infty, +\infty)$，根本无法解释为概率。但更致命的是\textbf{平方损失会重罚“太正确”的样本}！看一个可以手算验算的 1 维反例：
+
+\begin{example}[加一条毫无争议的远方正样本，线性回归竟然翻车！]
+\label{ex:ch6-ols-drag}
+考虑 6 个完全线性可分的一维分类点：负类（$y=0$）位于 $x \in \{-2, -1, 0\}$，正类（$y=1$）位于 $x \in \{1, 2, 3\}$。
+\begin{enumerate}
+  \item \textbf{加入远点前（6 个点）}：由最小二乘法精确解得回归直线
+  \[
+    \hat{y}_0(x) = \frac{9}{35}x + \frac{13}{35} \approx 0.2571x + 0.3714.
+  \]
+  令 $\hat{y}_0(x) = 0.5$，决策边界正好落在正负类正中央 $x_0^* = \mathbf{0.5000}$，分类准确率 $100\%$！
+  \item \textbf{仅增加 1 个极易分辨的远方正样本 $(30, 1)$（共 7 个点）}：如果按原直线，在 $x=30$ 处的预测值高达 $\hat{y}_0(30) \approx 8.09$，远远超过标签 $1$，产生巨大的无谓平方残差 $(8.09 - 1)^2 \approx 50.2$！为了拼命压平右端直线以讨好 $(30, 1)$，最小二乘被迫把整条直线放倒为
+  \[
+    \hat{y}_1(x) = \frac{15}{668}x + \frac{311}{668} \approx 0.0225x + 0.4656.
+  \]
+  此时 $0.5$ 阈值决策边界被狠狠向右拖拽到
+  \[
+    x_1^* = \frac{0.5 - 311/668}{15/668} = \frac{23}{15} \approx \mathbf{1.5333} > 1!
+  \]
+  结果原本清晰无比的正类样本 $(1, 1)$ 的预测值跌至 $\hat{y}_1(1) = \frac{163}{334} \approx 0.4880 < 0.5$，直接被\textbf{错判为负类}！
+\end{enumerate}
+\end{example}
+
+\subsection{陷阱二：Sigmoid + MSE 的非凸性与梯度消失严格证明}
+\label{subsec:ch6-sigmse-fail}
+
+既然线性回归是因为输出无界而被远点拖歪，那么加上值域在 $(0,1)$ 之间的 Sigmoid 函数 $\sigma(z) = \frac{1}{1+e^{-z}}$（满足导数恒等式 $\sigma'(z) = \sigma(z)(1-\sigma(z))$），然后继续用 MSE 损失行不行？绝对不行！
+
+\begin{failBox}{Sigmoid + MSE 的两大死穴：非凸陷阱 + 错得越离谱梯度越趋近于 0！}
+固定一个正类样本 $y = 1$，令 $p \triangleq \sigma(z) \in (0, 1)$，考察单样本 Sigmoid + MSE 损失 $\ell_{\text{MSE}}(z) = \frac{1}{2}(p - 1)^2$。利用链式法则与 $\frac{\mathrm{d}p}{\mathrm{d}z} = p(1 - p)$，逐阶求导：
+\begin{align}
+  \ell'_{\text{MSE}}(z)
+  &= (p - 1)\cdot \frac{\mathrm{d}p}{\mathrm{d}z}
+  = -p(1 - p)^2, \label{eq:ch6-sigmse-d1} \\
+  \ell''_{\text{MSE}}(z)
+  &= \frac{\mathrm{d}}{\mathrm{d}p}\!\big[-p(1 - p)^2\big]\cdot p(1 - p)
+  = -\big[(1 - p)^2 - 2p(1 - p)\big]\cdot p(1 - p)
+  = p(1 - p)^2(3p - 1). \label{eq:ch6-sigmse-d2}
+\end{align}
+式~\eqref{eq:ch6-sigmse-d1}--\eqref{eq:ch6-sigmse-d2} 立刻暴露出两个致命病症（图~\ref{fig:ch6-mse-vs-bce} 可视化了完整对比）：
+\begin{enumerate}
+  \item \textbf{破坏凸性（Non-Convexity）}：由式~\eqref{eq:ch6-sigmse-d2}，只要 $p < \frac{1}{3}$（即 $z < -\ln 2 \approx -0.693$），就有 $\ell''_{\text{MSE}}(z) < 0$，损失函数\textbf{严格凹}！例如在 $z = -2$（$p \approx 0.1192$）处，二阶导数
+  \[
+    \ell''_{\text{MSE}}(-2) \approx \mathbf{-0.0594} < 0.
+  \]
+  非凸损失意味着梯度下降极易陷入平坦高原或糟糕的局部极小值！
+  \item \textbf{自信犯错时的梯度消失（Gradient Vanishing）}：当真实标签是 $y=1$，但模型却极度自信地判错，输出 $z = -6$（预测概率仅 $p \approx 0.002473$）时，我们最需要一个巨大的梯度把它拉回正轨；然而式~\eqref{eq:ch6-sigmse-d1} 中额外乘上的饱和因子 $p = \sigma(-6)$ 把梯度活活压死到了
+  \[
+    \abs{\ell'_{\text{MSE}}(-6)} \approx \mathbf{0.00246} \qquad \text{vs.} \qquad \abs{\ell'_{\text{BCE}}(-6)} = 1 - p \approx \mathbf{0.99753}!
+  \]
+  在最该猛烈纠错的时刻，MSE 的梯度竟然比交叉熵（BCE）微弱了整整 \textbf{405 倍}！
+\end{enumerate}
+\end{failBox}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left subplot: Loss curves for y=1
+  \begin{axis}[
+    name=leftplot,
+    width=0.47\linewidth,
+    height=5.6cm,
+    xmin=-6.1, xmax=4.1,
+    ymin=-0.05, ymax=6.3,
+    xlabel={线性得分 $z = w^T x + b$（真实标签 $y=1$）},
+    ylabel={单样本损失值 $\ell(z)$},
+    xlabel style={font=\footnotesize\sffamily},
+    ylabel style={font=\footnotesize\sffamily},
+    tick label style={font=\scriptsize},
+    grid=major,
+    grid style={dashed, gray!25},
+    legend pos=north east,
+    legend style={font=\scriptsize\sffamily, fill=white, fill opacity=0.92, draw=tealLine},
+    axis lines=left
+  ]
+    % BCE: ln(1 + exp(-z))
+    \addplot[teal, ultra thick, domain=-6:4, samples=120] {ln(1 + exp(-x))};
+    \addlegendentry{交叉熵 $\ell_{\text{BCE}}(z)$（严格凸）}
+
+    % MSE: 0.5*(1/(1+exp(-z)) - 1)^2
+    \addplot[ochre, very thick, dashed, domain=-6:4, samples=120] {0.5*(1/(1+exp(-x)) - 1)^2};
+    \addlegendentry{Sigmoid+MSE $\ell_{\text{MSE}}(z)$}
+
+    % Highlight non-convex region z < -ln(2)
+    \draw[ochre!70, dotted, thick] (axis cs:-0.693, 0) -- (axis cs:-0.693, 2.3);
+    \node[font=\scriptsize\sffamily, color=ochre, align=center] at (axis cs:-3.3, 1.35) {非凸平坦区\\$z < -\ln 2\approx -0.693$\\($\ell''_{\text{MSE}}(-2)\approx -0.059$)};
+    \draw[-{Stealth[length=1.6mm]}, thin, ochre] (axis cs:-2.5, 0.85) -- (axis cs:-2.0, 0.44);
+  \end{axis}
+
+  % Right subplot: Gradient magnitude |ell'(z)|
+  \begin{axis}[
+    at={(leftplot.east)}, anchor=west, xshift=13mm,
+    width=0.47\linewidth,
+    height=5.6cm,
+    xmin=-6.1, xmax=4.1,
+    ymin=-0.03, ymax=1.16,
+    xlabel={线性得分 $z = w^T x + b$（真实标签 $y=1$）},
+    ylabel={梯度幅值 $\abs{\ell'(z)}$},
+    xlabel style={font=\footnotesize\sffamily},
+    ylabel style={font=\footnotesize\sffamily},
+    tick label style={font=\scriptsize},
+    grid=major,
+    grid style={dashed, gray!25},
+    legend pos=north east,
+    legend style={font=\scriptsize\sffamily, fill=white, fill opacity=0.92, draw=tealLine},
+    axis lines=left
+  ]
+    % |ell'_BCE| = 1 - sigma(z) = 1/(1 + exp(z))
+    \addplot[teal, ultra thick, domain=-6:4, samples=120] {1/(1 + exp(x))};
+    \addlegendentry{$\abs{\ell'_{\text{BCE}}} = 1 - p$}
+
+    % |ell'_MSE| = p*(1-p)^2
+    \addplot[ochre, very thick, dashed, domain=-6:4, samples=120] {(1/(1+exp(-x)))*(1/(1+exp(x)))^2};
+    \addlegendentry{$\abs{\ell'_{\text{MSE}}} = p(1-p)^2$}
+
+    % Annotate z=-6 gradient gap
+    \fill[teal] (axis cs:-6, 0.9975) circle (2pt);
+    \fill[ochre] (axis cs:-6, 0.0025) circle (2pt);
+    \draw[{Stealth[length=1.5mm]}-{Stealth[length=1.5mm]}, thick, navy] (axis cs:-5.85, 0.04) -- (axis cs:-5.85, 0.96);
+    \node[font=\scriptsize\sffamily\bfseries, color=navy, align=left, anchor=west] at (axis cs:-5.65, 0.56) {在 $z=-6$ 处：\\BCE $= 0.9975$\\MSE $= 0.00246$\\（相差 \textbf{405 倍}！）};
+  \end{axis}
+\end{tikzpicture}
+\caption{当 $y=1$ 时，交叉熵损失 $\ell_{\text{BCE}}(z)$ 与 Sigmoid+MSE 损失 $\ell_{\text{MSE}}(z)$ 的损失曲线（左）与梯度幅值（右）对比：交叉熵全局严格凸且在严重错判时保持满额纠错梯度，而 Sigmoid+MSE 在 $z < -\ln 2$ 处失去凸性且梯度崩溃消失。}
+\label{fig:ch6-mse-vs-bce}
+\end{figure}
+
+% ====================================================================
+\section{逻辑回归与 Softmax 回归：交叉熵、凸性证明与 Log-Sum-Exp}
+\label{sec:ch6-logreg-softmax}
+
+既然拍脑袋凑损失会撞上非凸与梯度消失，那就回到最根本的第一性原理——\textbf{按第 2、4、5 章的概率与信息论体系自然推导二分类与多分类模型}！
+
+\subsection{对数几率、二元交叉熵（BCE）的双重推导与梯度抵消奇迹}
+\label{subsec:ch6-bce}
+
+二分类中条件分布 $y \mid x$ 天然服从 $\mathrm{Bernoulli}(p)$。为了把实数线性打分 $z = w^T x + b \in (-\infty, +\infty)$ 无缝映射到概率 $p \in (0, 1)$，我们假设\textbf{对数几率（Log-Odds / Logit）}是特征的线性函数：
+\[
+  \ln\frac{p}{1 - p} = w^T x + b = z
+  \;\;\Longleftrightarrow\;\;
+  \frac{p}{1 - p} = e^z
+  \;\;\Longleftrightarrow\;\;
+  p = \sigma(z) \triangleq \frac{1}{1 + e^{-z}}.
+\]
+这就是\textbf{逻辑回归（Logistic Regression）}（名字里虽然带“回归”，但它是地道的概率二分类模型！）。它满足两条极其好用的恒等式：$\sigma(-z) = 1 - \sigma(z)$ 与 $\sigma'(z) = \sigma(z)(1 - \sigma(z))$。
+
+给定训练集 $\{(x_i, y_i)\}_{i=1}^N$（$y_i \in \{0, 1\}$），记 $z_i = w^T x_i + b$、$\hat{p}_i = \sigma(z_i)$。我们从\textbf{两条殊途同归的路径}导出它的目标函数：
+\begin{enumerate}
+  \item \textbf{路径一（第 5 章 Bernoulli MLE + 高斯先验 MAP）}：单个样本的 Bernoulli 似然为 $\hat{p}_i^{y_i}(1 - \hat{p}_i)^{1 - y_i}$。对平均负对数似然加上权重高斯先验 $-\ln p(w)$（缩放后记为 $\frac{\lambda}{2}\norm{w}_2^2$，$\lambda \ge 0$，偏置 $b$ 不加惩罚），得
+  \begin{equation}
+    \mathcal{L}(w, b)
+    = -\frac{1}{N}\sum_{i=1}^N \Big[y_i\ln \hat{p}_i + (1 - y_i)\ln(1 - \hat{p}_i)\Big] + \frac{\lambda}{2}\norm{w}_2^2.
+    \label{eq:ch6-bce}
+  \end{equation}
+  利用 $\ln \hat{p}_i = -\ln(1+e^{-z_i})$ 与 $\ln(1-\hat{p}_i) = -\ln(1+e^{z_i})$ 以及 $\ln(1+e^{-z_i}) = \ln(1+e^{z_i}) - z_i$，可将其化简为不含对数除法的\textbf{直接 Logit 形式}：
+  \begin{equation}
+    \mathcal{L}(w, b)
+    = \frac{1}{N}\sum_{i=1}^N \Big[\ln\big(1 + e^{z_i}\big) - y_i z_i\Big] + \frac{\lambda}{2}\norm{w}_2^2.
+    \label{eq:ch6-bce-logit}
+  \end{equation}
+  \item \textbf{路径二（第 4 章交叉熵与 KL 散度）}：对每条样本，真实标签 $y_i \in \{0,1\}$ 对应退化分布 $P_i = \mathrm{Bernoulli}(y_i)$（其熵 $H(P_i) = 0$），模型预测为 $Q_i = \mathrm{Bernoulli}(\hat{p}_i)$，则第 $i$ 项损失恰好等于
+  \[
+    \ell_i = -\big[y_i\ln\hat{p}_i + (1 - y_i)\ln(1 - \hat{p}_i)\big] = H(P_i, Q_i) = \DKL(P_i \| Q_i)!
+  \]
+  因此最小化\textbf{二元交叉熵（Binary Cross-Entropy, BCE）}就是让模型预测概率分布与真实标签分布之间的平均 KL 散度最小！
+\end{enumerate}
+
+现在计算单样本损失 $\ell_i(z_i) = \ln(1 + e^{z_i}) - y_i z_i$ 对 $z_i$ 的导数——见证\textbf{梯度抵消奇迹}：
+\[
+  \frac{\partial \ell_i}{\partial z_i}
+  = \frac{e^{z_i}}{1 + e^{z_i}} - y_i
+  = \frac{1}{1 + e^{-z_i}} - y_i
+  = \hat{p}_i - y_i!
+\]
+（如果你从原式~\eqref{eq:ch6-bce} 求导，$\frac{\partial\ell_i}{\partial \hat{p}_i} = \frac{\hat{p}_i - y_i}{\hat{p}_i(1-\hat{p}_i)}$ 的分母 $\hat{p}_i(1-\hat{p}_i)$ 恰好与 Sigmoid 导数 $\sigma'(z_i) = \hat{p}_i(1-\hat{p}_i)$ 完美约分！）那个在 MSE 里把梯度扼杀 405 倍的饱和因子彻底消失了！由第 1 卷第 5 章链式法则，矩阵化批量梯度简洁得令人惊叹：
+\begin{equation}
+  \nabla_w \mathcal{L}(w, b) = \frac{1}{N} X^T (\hat{p} - y) + \lambda w,
+  \qquad
+  \frac{\partial \mathcal{L}(w, b)}{\partial b} = \frac{1}{N}\sum_{i=1}^N (\hat{p}_i - y_i),
+  \label{eq:ch6-bce-grad}
+\end{equation}
+其中 $X \in \R^{N\times d}$ 为特征矩阵，$\hat{p} = \sigma(Xw + b\mathbf{1}) \in \R^N$，$y \in \{0,1\}^N$。你会发现它和线性回归的梯度 $\frac{1}{N}X^T(\hat{y} - y) + \lambda w$ 具有\textbf{完全相同的“误差乘特征”结构}！
+
+\subsection{全局严格凸性与线性可分权重发散定理}
+\label{subsec:ch6-convex-diverge}
+
+与 Sigmoid + MSE 坑洼遍地的非凸地形截然不同，逻辑回归的交叉熵损失具有整个优化理论梦寐以求的\textbf{全局严格凸性}。
+
+\begin{thmBox}
+\begin{theorem}[带 $L_2$ 正则化逻辑回归的全局严格凸性]
+\label{thm:ch6-logreg-convex}
+对任意样本矩阵 $X \in \R^{N\times d}$ 与标签 $y \in \{0,1\}^N$，二元交叉熵目标函数 $\mathcal{L}(w, b)$ 关于权重 $w$ 的 Hessian 矩阵为
+\begin{equation}
+  H_w(w, b) \triangleq \nabla_w^2 \mathcal{L}(w, b) = \frac{1}{N} X^T D X + \lambda I_d,
+  \qquad
+  D = \diag\big(\hat{p}_1(1-\hat{p}_1), \dots, \hat{p}_N(1-\hat{p}_N)\big).
+  \label{eq:ch6-logreg-hessian}
+\end{equation}
+当 $\lambda = 0$ 时，$H_w \succeq 0$（全局凸）；当 $\lambda > 0$ 时，$H_w \succ 0$ 处处成立，进而联合 Hessian $\nabla_{(w,b)}^2 \mathcal{L} \succ 0$，故 $\mathcal{L}(w, b)$ 是\textbf{全局严格凸函数}，存在\textbf{唯一全局极小值点}，绝无任何局部极小值陷阱！
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对式~\eqref{eq:ch6-bce-grad} 的第 $j$ 个分量再次对 $w_k$ 求偏导，注意到 $\frac{\partial \hat{p}_i}{\partial w_k} = \hat{p}_i(1-\hat{p}_i) x_{ik}$：
+\[
+  \frac{\partial^2 \mathcal{L}}{\partial w_j \partial w_k}
+  = \frac{1}{N}\sum_{i=1}^N x_{ij}\, \hat{p}_i(1-\hat{p}_i)\, x_{ik} + \lambda\,\delta_{jk},
+\]
+写成矩阵形式恰好是式~\eqref{eq:ch6-logreg-hessian}。为检验正定性（第 1 卷第 3 章二次型判据），任取非零向量 $v \in \R^d$：
+\[
+  v^T H_w v
+  = \frac{1}{N}\sum_{i=1}^N \underbrace{\hat{p}_i(1-\hat{p}_i)}_{>\,0}(x_i^T v)^2 + \lambda\norm{v}_2^2
+  \ge \lambda\norm{v}_2^2.
+\]
+因为对任意有限 $z_i \in \R$ 均有 $\hat{p}_i \in (0,1)$，故每个权重因子 $d_i = \hat{p}_i(1-\hat{p}_i) > 0$。当 $\lambda = 0$ 时 $v^T H_w v \ge 0$，即 $H_w \succeq 0$；当 $\lambda > 0$ 时 $v^T H_w v \ge \lambda\norm{v}_2^2 > 0$，即 $H_w \succ 0$。进一步对增广向量 $(v, c) \in \R^{d+1} \setminus \{0\}$，令 $\tilde{x}_i = (x_i, 1)^T$，联合二次型为 $\frac{1}{N}\sum_{i=1}^N d_i (x_i^T v + c)^2 + \lambda\norm{v}_2^2$：若 $v \neq 0$ 则第二项严格为正；若 $v = 0$ 且 $c \neq 0$ 则第一项等于 $\frac{c^2}{N}\sum_i d_i > 0$。故联合 Hessian 处处严格正定，全局严格凸性得证。
+\end{proof}
+
+不过请千万留神：当 $\lambda = 0$（无正则化）且数据\textbf{完全线性可分}时，虽然损失函数仍是凸的，但\textbf{有限的最优权重根本不存在}！
+
+\begin{thmBox}
+\begin{proposition}[线性可分数据上无正则逻辑回归的权重发散定理]
+\label{prop:ch6-weight-diverge}
+设 $\lambda = 0$，且训练集线性可分：存在 $(w_0, b_0)$ 与间隔 $\gamma > 0$ 使得对所有样本 $i = 1, \dots, N$ 均有
+\[
+  s_i (w_0^T x_i + b_0) \ge \gamma > 0, \qquad \text{其中 } s_i \triangleq 2y_i - 1 \in \{-1, +1\}.
+\]
+则沿射线 $(t w_0, t b_0)$（$t > 0$），随着 $t \to +\infty$，无正则损失严格单调趋近于 $0$：
+\[
+  \lim_{t \to +\infty} \mathcal{L}(t w_0, t b_0) = 0,
+\]
+而对任意有限 $(w, b)$ 恒有 $\mathcal{L}(w, b) > 0$。因此极小值在有限参数空间中\textbf{不可达}，梯度下降会驱使权重范数 $\norm{w}_2 \to +\infty$！
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+利用 $s_i = 2y_i - 1 \in \{-1, +1\}$ 容易验证单样本 BCE 损失可统一写作 $\ell_i(z_i) = \ln\!\big(1 + e^{-s_i z_i}\big) > 0$（当 $y_i=1$ 时为 $\ln(1+e^{-z_i})$，当 $y_i=0$ 时为 $\ln(1+e^{z_i})$）。将 $(tw_0, tb_0)$ 代入得
+\[
+  0 < \mathcal{L}(t w_0, t b_0)
+  = \frac{1}{N}\sum_{i=1}^N \ln\!\Big(1 + e^{-t\,s_i(w_0^T x_i + b_0)}\Big)
+  \le \frac{1}{N}\sum_{i=1}^N \ln\!\big(1 + e^{-t\gamma}\big)
+  = \ln\!\big(1 + e^{-t\gamma}\big).
+\]
+令 $t \to +\infty$，因 $\gamma > 0$ 故 $e^{-t\gamma} \to 0$，右边 $\ln(1 + e^{-t\gamma}) \to \ln 1 = 0$。由夹逼准则即得 $\lim_{t\to+\infty}\mathcal{L}(t w_0, t b_0) = 0$，而任何有限 $(w, b)$ 的损失皆严格大于 $0$，因此最优解必在无穷远处发散！
+\end{proof}
+
+这解释了我们在第 6.5 节实测中将会亲眼看到的惊人现象：在 30 维高维噪声数据上，如果不加 $L_2$ 正则化（$\lambda = 0$），梯度下降不断把权重 $\norm{w}_2$ 推爆到 $5.825$ 以上，把训练集硬生生拟合到极端自信，验证集交叉熵损失却一路飙升！而只要加上哪怕很小的 $\lambda > 0$（高斯先验 MAP），二次惩罚项 $\frac{\lambda}{2}t^2\norm{w_0}_2^2 \to +\infty$ 瞬间锁死权重边界，恢复唯一有限最优解！
+
+\subsection{多分类 Softmax 回归与 Log-Sum-Exp 数值稳定化}
+\label{subsec:ch6-softmax-lse}
+
+当类别数从 $2$ 类推广到 $K \ge 3$ 类（如手写数字 $0$--$9$、ImageNet 千类分类、大模型词表预测）时，样本 $x_i \in \R^d$ 经权重矩阵 $W \in \R^{K\times d}$ 与偏置 $b \in \R^K$ 算出 $K$ 维打分向量（logits）$z_i = W x_i + b \in \R^K$，再用第 2 章的 \textbf{Softmax 函数}转为合法 Categorical 概率分布：
+\[
+  \hat{p}_{ik} = \mathrm{softmax}(z_i)_k \triangleq \frac{e^{z_{ik}}}{\sum_{c=1}^K e^{z_{ic}}},
+  \qquad k = 1, \dots, K.
+\]
+记真实类别 $c_i \in \{1,\dots,K\}$ 的 one-hot 向量为 $y_i \in \{0,1\}^K$（仅第 $c_i$ 位为 $1$）。由 Categorical 分布极大似然（同样等价于最小化真实 one-hot 分布与预测分布的交叉熵 / KL 散度），单样本\textbf{多分类交叉熵损失}为
+\begin{equation}
+  \ell_i(z_i, y_i)
+  = -\sum_{k=1}^K y_{ik}\ln \hat{p}_{ik}
+  = -\ln \hat{p}_{i, c_i}
+  = \ln\!\left(\sum_{c=1}^K e^{z_{ic}}\right) - z_{i, c_i}.
+  \label{eq:ch6-softmax-loss}
+\end{equation}
+直接对式~\eqref{eq:ch6-softmax-loss} 关于任意分量 $z_{ik}$ 求偏导（详细展开见习题 6.5）：
+\[
+  \frac{\partial \ell_i}{\partial z_{ik}}
+  = \frac{e^{z_{ik}}}{\sum_{c=1}^K e^{z_{ic}}} - y_{ik}
+  = \hat{p}_{ik} - y_{ik}.
+\]
+仍然是完美简洁的“\textbf{预测概率减去真实标签}”！对整批样本 $X \in \R^{N\times d}$、one-hot 标签矩阵 $Y \in \{0,1\}^{N\times K}$、概率矩阵 $\hat{P} \in \R^{N\times K}$，加上 $L_2$ 正则项 $\frac{\lambda}{2}\norm{W}_F^2$ 后的矩阵梯度为
+\[
+  \nabla_W \mathcal{L} = \frac{1}{N}(\hat{P} - Y)^T X + \lambda W,
+  \qquad
+  \nabla_b \mathcal{L} = \frac{1}{N}\sum_{i=1}^N (\hat{p}_i - y_i).
+\]
+
+\begin{failBox}{浮点溢出红线与 Log-Sum-Exp 数值稳定恒等式}
+如果你天真地按课本公式直接写 \texttt{np.exp(z) / np.sum(np.exp(z))} 或 \texttt{-np.log(p)}，训练几步就可能爆出满屏 \texttt{nan}：
+\begin{itemize}
+  \item 在 IEEE 754 \texttt{float64} 中，$e^{710} > 1.797 \times 10^{308}$，直接上溢为 \texttt{inf}，进而 \texttt{inf / inf = nan}；
+  \item 当 $z = -800$ 时 $e^{z}$ 下溢为 \texttt{0.0}，随后 \texttt{np.log(0.0) = -inf}，损失立刻炸毁！
+\end{itemize}
+\textbf{工业界标准解法——Log-Sum-Exp（LSE）平移不变技巧}：记 $m = \max_{1\le c\le K} z_c$，在指数内部统一减去最大值 $m$：
+\begin{equation}
+  \operatorname{LSE}(z) \triangleq \ln\sum_{c=1}^K e^{z_c} = m + \ln\sum_{c=1}^K e^{z_c - m},
+  \qquad
+  \mathrm{softmax}(z)_k = \frac{e^{z_k - m}}{\sum_{c=1}^K e^{z_c - m}}.
+  \label{eq:ch6-lse}
+\end{equation}
+因为每一项 $z_c - m \le 0$，故 $e^{z_c - m} \in (0, 1]$ 绝不会上溢；同时至少有一项 $z_{c^*} - m = 0$ 使 $e^0 = 1$，故求和结果必 $\ge 1$，绝不会下溢成 $0$！对于二元交叉熵式~\eqref{eq:ch6-bce-logit}，NumPy 已经内置了专门的两数 Log-Sum-Exp 原语 \texttt{np.logaddexp(0.0, z)} 精确计算 $\ln(1 + e^z)$——哪怕传入 $z = +1000$ 或 $z = -1000$，也能给出分毫不差的有限浮点数！
+\end{failBox}
+
+% ====================================================================
+\section{实验工程红线：数据泄漏实测与分类评测体系}
+\label{sec:ch6-leakage-metrics}
+
+数学公式无懈可击，并不等于模型实验就可靠。无数初学者在竞赛、论文甚至工业项目里栽在两大工程暗礁上：\textbf{数据泄漏（Data Leakage）}与\textbf{不平衡准确率陷阱（Imbalanced Accuracy Trap）}。
+
+\subsection{红线一：纯噪声也能跑出 80\% 测试准确率？数据泄漏实测！}
+\label{subsec:ch6-leakage}
+
+机器学习评估的最高铁律只有一句话：\textbf{验证集/测试集在最终评估之前必须完全“隐身”}！一切依赖数据统计量的预处理——无论是 Z-score 标准化（均值 $\mu$、标准差 $\sigma$）、缺失值填充、PCA 降维，还是特征筛选——都\textbf{只能仅在训练集上 \texttt{fit}}，然后把训练集学到的参数死板地 \texttt{transform} 到验证/测试集上。
+
+如果你觉得“先对整个数据集挑一挑最相关的特征再划分训练测试集，能有多大影响？”请看配套脚本 \texttt{code/vol2\_experiments.py} 中 \texttt{exp6\_leakage\_and\_logreg} 的震撼实测：
+\begin{itemize}
+  \item \textbf{实验设定}：生成 $N=60$ 条样本、$D=500$ 维\textbf{纯随机标准正态白噪声特征} $X_{ij} \sim \mathcal{N}(0,1)$，以及与 $X$ 完全独立的随机 $0/1$ 标签 $y_i \sim \mathrm{Bernoulli}(0.5)$。由于特征与标签毫无任何真实关系，理论上\textbf{全宇宙最强的贝叶斯最优分类器准确率也只能是 $50.00\%$}！
+  \item \textbf{对比两种流水线（重复 50 次独立实验，40 训练 / 20 测试）}：
+  \begin{enumerate}
+    \item \textbf{泄漏流水线（错误）}：先在全部 60 条样本上计算每个特征与 $y$ 的相关性，挑出相关性最高的 10 个特征，再切分前 40 条训练、后 20 条测试；
+    \item \textbf{干净流水线（正确）}：先切分 40 训练 / 20 测试，严格只在 40 条训练集上挑前 10 相关特征，再在 20 条测试集上评估。
+  \end{enumerate}
+\end{itemize}
+
+\begin{failBox}{纯噪声数据泄漏实测结果：凭空造出 $+30.4\%$ 虚假幻觉！}
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{实验流水线（$N=60, D=500$ 纯随机白噪声，50 次平均）} & \textbf{实测测试准确率} & \textbf{理论真实准确率} & \textbf{虚假虚高幅度} \\
+\midrule
+泄漏版：先全量挑 Top-10 特征，再分 40/20 & \textbf{\color{ochre}80.40\%} & 50.00\% & \textbf{\color{ochre}+30.40\%} \\
+干净版：先分 40/20，仅在 40 条训练集挑特征 & \textbf{\color{teal}49.50\%} & 50.00\% & $-0.50\%$（诚实！） \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{原理解剖}：在 $500$ 维纯噪声中，仅凭巧合就必然存在十几个在全部 60 条样本上与标签高度相关的“伪黄金特征”——它们之所以在后 20 条测试集上表现好，仅仅是因为你在挑特征时已经偷看过后 20 条测试集的标签！一旦上线面对第 61 条真正的新样本，这个号称 80.40\% 准确率的模型会瞬间跌回 50\% 瞎猜！
+\end{failBox}
+
+\subsection{红线二：混淆矩阵、96\% 负类准确率陷阱与精确评测体系}
+\label{subsec:ch6-metrics}
+
+哪怕杜绝了数据泄漏，如果选错了评估指标，依然会被表象骗得团团转。假设你开发一套信用卡欺诈检测（或罕见癌筛查）系统，真实数据中 \textbf{96\% 是正常负类（$y=0$）}，仅有 \textbf{4\% 是欺诈正类（$y=1$）}。此时一个什么都不学的“偷懒模型”只需写一行 \texttt{return 0}（永远预测正常），就能轻松拿到 \textbf{96.0\% 的准确率（Accuracy）}——听起来极其惊艳，可它抓住了几笔欺诈？\textbf{0 笔！}
+
+要真正看清二分类器在正负两类上的功过得失，必须先拆解 \textbf{$2\times 2$ 混淆矩阵（Confusion Matrix）}（表~\ref{tab:ch6-cm}）：
+
+\begin{table}[htbp]
+\centering
+\caption{二分类 $2\times 2$ 混淆矩阵（TP / FP / FN / TN）}
+\label{tab:ch6-cm}
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & \textbf{预测为正类（$\hat{y} = 1$）} & \textbf{预测为负类（$\hat{y} = 0$）} \\
+\midrule
+\textbf{真实为正类（$y = 1$）} & \textbf{TP}（真正例，抓对了） & \textbf{FN}（假负例，漏报了） \\
+\textbf{真实为负类（$y = 0$）} & \textbf{FP}（假正例，误报了） & \textbf{TN}（真负例，放对了） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+基于混淆矩阵的四个计数，现代分类工程构建了四把核心尺子：
+\begin{enumerate}
+  \item \textbf{精确率（Precision，“报正的里有多少真阳”）}：
+  \[
+    \mathrm{Precision} = \frac{\mathrm{TP}}{\mathrm{TP} + \mathrm{FP}}.
+  \]
+  垃圾邮件过滤、推荐拦截等“怕误杀好人”的场景极度看重 Precision。
+  \item \textbf{召回率（Recall / TPR，“真阳里抓住了多少”）}：
+  \[
+    \mathrm{Recall} = \mathrm{TPR} = \frac{\mathrm{TP}}{\mathrm{TP} + \mathrm{FN}}.
+  \]
+  恶性肿瘤初筛、金融反欺诈、自动驾驶障碍物检测等“绝不能漏报”的场景极度看重 Recall。
+  \item \textbf{$F_1$ 分数（Precision 与 Recall 的调和平均）}：
+  \[
+    F_1 = \frac{2\cdot \mathrm{Precision}\cdot \mathrm{Recall}}{\mathrm{Precision} + \mathrm{Recall}} = \frac{2\mathrm{TP}}{2\mathrm{TP} + \mathrm{FP} + \mathrm{FN}}.
+  \]
+  为何用调和平均而非算术平均？因为调和平均\textbf{严惩偏科}——在刚才 96\% 负类的偷懒模型上，$\mathrm{Recall} = 0$，算术平均或许还能糊弄出一个 $0.5$，而 $F_1$ 直接给出诚实的 $0.000$！
+  \item \textbf{阈值无关曲线：ROC-AUC 与 PR-AUC}：
+  逻辑回归输出的是连续概率 $\hat{p} \in (0, 1)$，改变判别阈值 $\tau \in [0, 1]$（$\hat{p} \ge \tau \Rightarrow \hat{y}=1$）会得到一整条权衡曲线：
+  \begin{itemize}
+    \item \textbf{ROC 曲线与 ROC-AUC}：以假正率 $\mathrm{FPR} = \frac{\mathrm{FP}}{\mathrm{FP}+\mathrm{TN}}$ 为横轴、真正率 $\mathrm{TPR} = \mathrm{Recall}$ 为纵轴绘制曲线，其曲线下面积即 ROC-AUC（随机瞎猜为 $0.5$，完美排序为 $1.0$）。它有一个极其优美的概率含义：\textbf{随机抽一条正样本和一条负样本，模型给正样本打分高于负样本的概率}！
+    \item \textbf{PR 曲线与 PR-AUC}：以 Recall 为横轴、Precision 为纵轴。在正负极度失衡（如 $1:99$）时，庞大的 TN 会把 $\mathrm{FPR} = \frac{\mathrm{FP}}{\mathrm{FP}+\mathrm{TN}}$ 稀释得很小，使 ROC-AUC 看起来虚高；而 Precision 不含 TN，因此\textbf{极度不平衡任务中必须优先盯紧 PR-AUC 与 $F_1$}！
+  \end{itemize}
+\end{enumerate}
+
+% ====================================================================
+\section{端到端纯 NumPy 实战项目、实测 $L_2$ 扫参与置信区间}
+\label{sec:ch6-capstone}
+
+现在我们把两卷全部知识拧成一股绳，在真实运行的纯 NumPy 工程闭环中完成阶段一的毕业实战（完全对应 \texttt{code/vol2\_experiments.py} 中的 \texttt{exp6\_leakage\_and\_logreg}）：
+\begin{itemize}
+  \item \textbf{任务设定（高维多尺度噪声干扰分类）}：共 $N=300$ 条样本（正负类各 $150$ 条），特征维度 $D=30$，其中仅前 $2$ 维是携带类别信息的二维相关高斯信号，其余 $28$ 维全是尺度在 $[0.05, 80.0]$ 之间剧烈跨越的纯随机噪声！
+  \item \textbf{无泄漏切分与标准化}：随机打乱后划分为 $120$ 条训练集与 $180$ 条验证集，构建 \texttt{StandardScaler} 严格仅在 $120$ 条训练集上拟合 $(\mu, \sigma)$ 再变换验证集。
+  \item \textbf{梯度校验 + 全批量梯度下降训练 + $L_2$ 正则化扫参}：训练前先用第 1 卷第 6 章的中心有限差分 \texttt{check\_gradient} 校验解析梯度（实测相对误差 $\mathbf{2.20 \times 10^{-11}}$，彻底杜绝求导 Bug！），随后以学习率 $\eta = 0.25$ 训练 $800$ 轮，系统扫描 $\lambda \in \{0.00, 0.01, 0.10, 0.50, 2.00, 5.00\}$。
+\end{itemize}
+
+\subsection{模块化纯 NumPy 完整代码实现}
+\label{subsec:ch6-code}
+
+代码~\ref{lst:ch6-pipeline} 展示了高内聚、零框架依赖的面向对象实现：包含防泄漏标准化器、Log-Sum-Exp 稳定 $L_2$ 逻辑回归类、完整分类评测函数，以及第 1 卷有限差分梯度校验钩子。
+
+\begin{lstlisting}[caption={纯 NumPy 端到端防泄漏逻辑回归流水线与有限差分梯度校验}, label={lst:ch6-pipeline}]
+import numpy as np
+
+class StandardScaler:
+    """防泄漏 Z-score 标准化器：严格仅在训练集上 fit，再 transform 验证/测试集。"""
+    def fit(self, X: np.ndarray):
+        self.mu_ = X.mean(axis=0)
+        self.sd_ = np.where(X.std(axis=0) > 1e-12, X.std(axis=0), 1.0)
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return (X - self.mu_) / self.sd_
+
+class LogisticRegressionL2:
+    """带 L2 正则化（高斯先验 MAP）与数值稳定 logaddexp 的纯 NumPy 逻辑回归。"""
+    def __init__(self, lam: float = 0.10, lr: float = 0.25, epochs: int = 800):
+        self.lam, self.lr, self.epochs = lam, lr, epochs
+
+    @staticmethod
+    def sigmoid(z: np.ndarray) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-np.clip(z, -500.0, 500.0)))
+
+    def loss_and_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray, b: float):
+        z = X @ w + b
+        # 数值稳定 BCE: mean(ln(1 + exp(z)) - y*z) + 0.5 * lam * ||w||^2 (偏置 b 不加惩罚)
+        loss = float(np.mean(np.logaddexp(0.0, z) - y * z) + 0.5 * self.lam * np.dot(w, w))
+        err = self.sigmoid(z) - y
+        gw = (X.T @ err) / len(y) + self.lam * w
+        gb = float(np.mean(err))
+        return loss, gw, gb
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        self.w = np.zeros(X.shape[1], dtype=np.float64)
+        self.b = 0.0
+        for _ in range(self.epochs):
+            _, gw, gb = self.loss_and_grad(X, y, self.w, self.b)
+            self.w -= self.lr * gw
+            self.b -= self.lr * gb
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self.sigmoid(X @ self.w + self.b)
+
+    def predict(self, X: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+        return (self.predict_proba(X) >= threshold).astype(np.float64)
+
+def classification_metrics(y_true: np.ndarray, y_pred: np.ndarray):
+    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
+    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
+    tn = int(np.sum((y_pred == 0) & (y_true == 0)))
+    acc = (tp + tn) / len(y_true) * 100.0
+    prec = tp / max(tp + fp, 1)
+    rec = tp / max(tp + fn, 1)
+    f1 = 2 * tp / max(2 * tp + fp + fn, 1)
+    return {"Acc": acc, "P": prec, "R": rec, "F1": f1, "CM": (tp, fp, fn, tn)}
+
+def verify_logreg_gradient(lam: float = 0.10, eps: float = 1e-5) -> float:
+    """衔接第 1 卷第 6 章中心有限差分梯度校验：正式训练前必跑单元测试！"""
+    rng = np.random.default_rng(7)
+    Xm, ym = rng.normal(size=(20, 6)), rng.integers(0, 2, size=20).astype(np.float64)
+    theta = rng.normal(scale=0.5, size=7)
+    model = LogisticRegressionL2(lam=lam)
+    _, gw, gb = model.loss_and_grad(Xm, ym, theta[:-1], float(theta[-1]))
+    g_ana = np.append(gw, gb)
+    g_num = np.zeros_like(theta)
+    for i in range(len(theta)):
+        tp, tm = theta.copy(), theta.copy()
+        tp[i] += eps; tm[i] -= eps
+        lp = model.loss_and_grad(Xm, ym, tp[:-1], float(tp[-1]))[0]
+        lm = model.loss_and_grad(Xm, ym, tm[:-1], float(tm[-1]))[0]
+        g_num[i] = (lp - lm) / (2.0 * eps)
+    rel_err = float(np.linalg.norm(g_ana - g_num) / max(np.linalg.norm(g_ana) + np.linalg.norm(g_num), 1e-12))
+    assert rel_err < 1e-9, f"Gradient check failed: {rel_err:.2e}"
+    return rel_err  # 实测 rel_err = 2.20e-11
+\end{lstlisting}
+
+\subsection{实测 $L_2$ 扫参结果、U 形过拟合曲线与 Bootstrap 闭环}
+\label{subsec:ch6-results}
+
+在 $120$ 训练 / $180$ 验证、$30$ 维多尺度噪声数据集上运行 \texttt{code/vol2\_experiments.py}，完整扫参实测结果汇于表~\ref{tab:ch6-l2-sweep}，而无正则（$\lambda=0.00$）与最优正则（$\lambda=0.10$）的训练/验证交叉熵演化轨迹由真实生成的 \texttt{data/logreg\_curve.csv} 绘制于图~\ref{fig:ch6-logreg-curve}。
+
+\begin{table}[htbp]
+\centering
+\caption{30 维多尺度噪声分类任务（120 训练 / 180 验证）的 $L_2$ 正则化扫参实测总表}
+\label{tab:ch6-l2-sweep}
+\footnotesize
+\begin{tabular}{@{}ccccccc@{}}
+\toprule
+\textbf{$\lambda$（MAP 强度）} & \textbf{$\norm{w}_2$} & \textbf{训练准确率} & \textbf{验证准确率} & \textbf{验证 BCE 损失} & \textbf{混淆矩阵 (TP, FP, FN, TN)} & \textbf{验证 $F_1$} \\
+\midrule
+$0.00$（裸 MLE） & $5.825$ & $95.83\%$ & $78.89\%$ & $0.7219$ & $(66,\; 13,\; 25,\; 76)$ & $0.7765$ \\
+$0.01$ & $3.226$ & $93.33\%$ & $81.67\%$ & $0.4576$ & $(69,\; 11,\; 22,\; 78)$ & $0.8070$ \\
+\textbf{\color{teal}0.10（最优）} & \textbf{\color{teal}1.309} & \textbf{\color{teal}91.67\%} & \textbf{\color{teal}85.00\%} & \textbf{\color{teal}0.4060} & \textbf{\color{teal}(73, 9, 18, 80)} & \textbf{\color{teal}0.8439} \\
+$0.50$ & $0.568$ & $89.17\%$ & $84.44\%$ & $0.5108$ & $(74,\; 11,\; 17,\; 78)$ & $0.8409$ \\
+$2.00$ & $0.208$ & $86.67\%$ & $83.33\%$ & $0.6144$ & $(71,\; 10,\; 20,\; 79)$ & $0.8256$ \\
+$5.00$（过强欠拟合） & $0.093$ & $85.83\%$ & $81.67\%$ & $0.6563$ & $(66,\; 8,\; 25,\; 81)$ & $0.8000$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.86\linewidth,
+  height=6.5cm,
+  xmin=0, xmax=790,
+  ymin=0.10, ymax=0.91,
+  xlabel={梯度下降迭代轮数（Epoch）},
+  ylabel={未加惩罚的平均二元交叉熵（BCE Loss）},
+  xlabel style={font=\small\sffamily},
+  ylabel style={font=\small\sffamily},
+  tick label style={font=\footnotesize},
+  grid=major,
+  grid style={dashed, gray!25},
+  legend pos=north east,
+  legend style={font=\footnotesize\sffamily, fill=white, fill opacity=0.92, draw=tealLine, legend columns=2},
+  axis lines=left
+]
+  % lambda=0.00 Train & Val (real CSV!)
+  \addplot[ochre, thick, dashed, mark=none] table[x=epoch, y=tr0, col sep=comma] {data/logreg_curve.csv};
+  \addlegendentry{$\lambda=0.00$ 训练集}
+
+  \addplot[ochre, ultra thick, mark=none] table[x=epoch, y=va0, col sep=comma] {data/logreg_curve.csv};
+  \addlegendentry{$\lambda=0.00$ 验证集（U 形过拟合！）}
+
+  % lambda=0.10 Train & Val (real CSV!)
+  \addplot[teal, thick, dashed, mark=none] table[x=epoch, y=tr01, col sep=comma] {data/logreg_curve.csv};
+  \addlegendentry{$\lambda=0.10$ 训练集}
+
+  \addplot[teal, ultra thick, mark=none] table[x=epoch, y=va01, col sep=comma] {data/logreg_curve.csv};
+  \addlegendentry{$\lambda=0.10$ 验证集（平稳最优）}
+
+  % Annotate U-shape trough and overfitting divergence
+  \fill[ochre] (axis cs:40, 0.38219) circle (2.2pt);
+  \node[font=\scriptsize\sffamily\bfseries, color=ochre, align=center] at (axis cs:170, 0.56) {约 40--60 轮触底\\随后记忆 28 维噪声\\验证损失反升至 $0.715$！};
+  \draw[-{Stealth[length=1.7mm]}, thin, ochre] (axis cs:95, 0.50) -- (axis cs:46, 0.395);
+
+  \node[font=\scriptsize\sffamily\bfseries, color=tealDark, align=center] at (axis cs:597, 0.500) {$\lambda=0.10$（MAP 高斯先验）\\验证 BCE 稳稳锁定 $0.4060$\\验证准确率 $85.00\%,\; F_1=0.8439$};
+  \draw[-{Stealth[length=1.7mm]}, thin, tealDark] (axis cs:597, 0.445) -- (axis cs:597, 0.412);
+
+  \node[font=\scriptsize\sffamily, color=ochre!90!black] at (axis cs:620, 0.205) {$\lambda=0$ 训练损失一路跌至 $0.149$（死记硬背）};
+\end{axis}
+\end{tikzpicture}
+\caption{实测训练与验证交叉熵曲线（数据源：\texttt{data/logreg\_curve.csv}）：裸 MLE（$\lambda=0.00$）在训练 60 轮后呈现教科书级 U 形过拟合，验证 BCE 恶化至 $0.7219$；加入高斯先验 MAP（$\lambda=0.10$）后，验证损失平稳收敛在 $0.4060$。}
+\label{fig:ch6-logreg-curve}
+\end{figure}
+
+请停下来细细品味表~\ref{tab:ch6-l2-sweep} 与图~\ref{fig:ch6-logreg-curve} 中三幕完整的统计学剧情——它把第 5 章与第 6 章的每一块理论都变成了眼见为实的数字：
+\begin{enumerate}
+  \item \textbf{裸 MLE 过拟合（$\lambda = 0.00$）}：虽然训练集准确率高达 $95.83\%$、训练损失一路俯冲到 $0.149$，但模型拼命放大了 28 维噪声特征的权重（$\norm{w}_2$ 膨胀至 $5.825$，呼应命题~\ref{prop:ch6-weight-diverge}！），导致验证集准确率暴跌至 $78.89\%$，验证 BCE 更是走出刺眼的\textbf{U 形反弹曲线}恶化至 $0.7219$！
+  \item \textbf{最优偏差-方差甜点（$\lambda = 0.10$）}：高斯先验 MAP 把权重范数温和压制在 $1.309$，虽然训练准确率略降到 $91.67\%$（主动接受微小偏差），却把验证准确率一口气拉升 $+6.11\%$ 至 $\mathbf{85.00\%}$（180 条样本答对 $73 + 80 = 153$ 条！），验证 BCE 骤降至 $\mathbf{0.4060}$，$F_1 = \mathbf{0.8439}$（实测 ROC-AUC $= \mathbf{0.9160}$）！更重要的是，把这 $153/180$ 条验证命中记录接回第 5 章第 5.4 节的 Bootstrap 流水线，我们不仅报出点估计 $85.00\%$，还能诚实报告其 \textbf{95\% Bootstrap 置信区间 $[80.00\%,\; 90.00\%]$}（$\widehat{\mathrm{SE}} = 2.63\%$）！
+  \item \textbf{过强惩罚欠拟合（$\lambda = 5.00$）}：把 $\lambda$ 拧到 $5.00$ 时，先验把权重强行捏扁到 $\norm{w}_2 = 0.093$，连前 2 维真实信号也被过度压缩，验证准确率回落至 $81.67\%$、验证 BCE 升回 $0.6563$——这就是高偏差导致的\textbf{欠拟合（Underfitting）}！
+\end{enumerate}
+
+\subsection{全卷收束与第 3 卷预告}
+\label{subsec:ch6-wrapup}
+
+恭喜你！至此你已经完整通关《本科人工智能七卷本自学讲义》的\textbf{第一阶段（第 1 卷 + 第 2 卷）数理与工程底座}：
+\begin{itemize}
+  \item 你不再把损失函数当成黑盒魔法——你知道最小二乘是高斯 MLE、岭回归与 Lasso 是高斯/拉普拉斯 MAP、二元与多分类交叉熵是 Bernoulli/Categorical MLE 与最小 KL 散度；
+  \item 你不再怕高维矩阵求导与数值爆炸——你会用迹技巧推梯度、用 \texttt{check\_gradient} 把梯度 Bug 扼杀在 $10^{-11}$ 精度下、用 Log-Sum-Exp 护航指数运算；
+  \item 你拥有了严苛的实验科学素养——你识破了数据泄漏的 80\% 纯噪声骗局、看穿了 96\% 负类的准确率陷阱，并会用 Bootstrap 置信区间克制地解读每一次实验涨落。
+\end{itemize}
+
+\begin{insightBox}{迈向第 3 卷：《经典人工智能：搜索、博弈、概率图与序列决策》}
+手握第 1--2 卷的硬核数学武器，接下来第 3 卷将带你正式踏入人工智能的核心推理与决策殿堂（对标 Berkeley CS188 / Stanford CS221）：
+\begin{enumerate}
+  \item \textbf{启发式搜索与对抗博弈}：从 BFS/Dijkstra 跃升到 $A^*$ 启发式可采纳性证明、Alpha-Beta 剪枝与蒙特卡洛树搜索（MCTS，直接动用第 2 卷第 3 章的 Hoeffding 界构造 UCB 公式！）；
+  \item \textbf{概率图模型（PGM）}：将第 2 卷第 1 章的\textbf{条件独立、d-分离与 Explaining Away} 扩展为完整的贝叶斯网络、变量消元精确推断与吉布斯/重要性采样近似推断；
+  \item \textbf{马尔可夫决策过程（MDP）与强化学习底座}：用动态规划（值迭代、策略迭代）与时序差分学习解决序贯决策，为你后续攀登第 4 卷经典机器学习、第 5 卷深度学习与第 6 卷大模型/强化学习前沿铺设坚不可摧的阶梯！
+\end{enumerate}
+\end{insightBox}
+
+% ====================================================================
+\section{本章习题}
+\label{sec:ch6-exercises}
+
+\exTier{A. 概念辨析与反例查错}{严防正则化、凸优化与评测工程的高频失误}
+\begin{enumerate}[label=\textbf{6.\arabic*}]
+  \item \textbf{判断正误并纠错}：请判断以下三句话的真假，并分别用本章定理或具体反例说明原因：
+  (a) “在做带 $L_2$ 正则化的线性回归或逻辑回归时，应该把偏置项 $b$ 也放进 $\frac{\lambda}{2}(\norm{w}_2^2 + b^2)$ 一起惩罚，正则化效果更彻底。”
+  (b) “只要训练数据完全线性可分，不加正则化的逻辑回归经梯度下降充分训练后一定会收敛到唯一的有限全局最优权重 $w^*$。”
+  (c) “在仅有 1\% 欺诈交易的金融反欺诈任务上，某分类器在测试集上取得了 99.0\% 的准确率，说明它已经达到极高商用水平。”
+
+  \item \textbf{Softmax 数值溢出与数据泄漏双排查}：某同学编写了一套多分类流水线，代码包含如下两段实现：
+  \begin{enumerate}[label=(\roman*)]
+    \item 前向与损失：\texttt{P = np.exp(Z) /} \texttt{np.sum(np.exp(Z),} \texttt{axis=1,} \texttt{keepdims=True)}，随后计算损失 \texttt{loss =} \texttt{-np.mean(}\allowbreak\texttt{np.log(}\allowbreak\texttt{P[np.arange(n), y]))}；
+    \item 预处理与划分：先在全量数据 \texttt{X\_all} 上执行 \texttt{X\_all =} \texttt{(X\_all - X\_all.mean(0))} \texttt{/ X\_all.std(0)} 并挑选与 \texttt{y\_all} 相关性最高的 20 维特征，再切分为 70\% 训练集与 30\% 测试集。
+  \end{enumerate}
+  请分别指出两段代码会在什么具体场景下崩盘或产生严重幻觉，并写出修复后的正确 NumPy 写法。
+\end{enumerate}
+
+\exTier{B. 具体小例手算}{算通逻辑回归单步更新、线性边界偏移与混淆矩阵}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{逻辑回归一步梯度更新与远点拖拽验算}：
+  (a) 设单条二维样本 $x = (1, -2)^T$，标签 $y = 1$，当前参数 $w_0 = (0, 0)^T$、$b_0 = 0$，$L_2$ 系数 $\lambda = 0.2$，学习率 $\eta = 0.5$。手算初始 logit $z_0$、预测概率 $\hat{p}_0$、带正则项的 BCE 损失值 $\mathcal{L}(w_0, b_0)$、梯度 $(\nabla_w \mathcal{L}, \partial\mathcal{L}/\partial b)$，以及一步梯度下降后的 $(w_1, b_1)$ 与新预测概率 $\hat{p}_1$；
+  (b) 验算例~\ref{ex:ch6-ols-drag}：给定 7 个点 $(-2,0), (-1,0), (0,0), (1,1), (2,1), (3,1), (30,1)$，手算样本均值 $\bar{x}, \bar{y}$、离差和 $\sum (x_i - \bar{x})^2$ 与 $\sum (x_i-\bar{x})(y_i-\bar{y})$，验证最小二乘斜率 $w = 15/668$、截距 $b = 311/668$，且 $0.5$ 阈值边界确为 $x_1^* = 23/15$。
+
+  \item \textbf{不平衡混淆矩阵指标手算与阈值权衡}：某罕见病筛查模型在 $N=200$ 名受检者（其中 20 名真实患病）上测得混淆矩阵：$\mathrm{TP}=16,\; \mathrm{FP}=4,\; \mathrm{FN}=4,\; \mathrm{TN}=176$。
+  (a) 手算 Accuracy、Precision、Recall、FPR 与 $F_1$ 分数；
+  (b) 与始终预测健康的“偷懒基线”（$\hat{y}\equiv 0$）对比 Accuracy 与 $F_1$；
+  (c) 若将分类阈值调低使混淆矩阵变为 $\mathrm{TP}=19,\; \mathrm{FP}=19,\; \mathrm{FN}=1,\; \mathrm{TN}=161$，重算 Precision、Recall 与 $F_1$，并分析在“癌症初筛”与“自动封号系统”两种场景下应如何抉择阈值。
+\end{enumerate}
+
+\exTier{C. AI 核心推演与实用证明}{夯实 Softmax 梯度推导与逻辑回归安全步长界}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{Softmax 平移不变性、交叉熵梯度与 $K=2$ 退化证明}：对 $K$ 分类样本，logits $z \in \R^K$，Softmax 概率 $\hat{p}_k = e^{z_k} / \sum_{c=1}^K e^{z_c}$，one-hot 标签 $y \in \{0,1\}^K$，交叉熵损失 $\ell(z, y) = -\sum_{k=1}^K y_k \ln \hat{p}_k$。
+  (a) 证明对任意常数 $c \in \R$ 恒有 $\mathrm{softmax}(z + c\mathbf{1}) = \mathrm{softmax}(z)$（即 Log-Sum-Exp 减最大值的代数依据）；
+  (b) 严格求导证明 $\frac{\partial \ell}{\partial z_j} = \hat{p}_j - y_j$（对任意 $j=1,\dots,K$）；
+  (c) 说明当 $K=2$ 时，将 Softmax 回归的两组参数 $(w_1, b_1), (w_2, b_2)$ 平移消去一组（令 $w_0' = 0, b_0' = 0$，记 $w = w_1 - w_0,\; b = b_1 - b_0$）即精确退化为二元逻辑回归。
+  \exHint{(b) 直接把 $\ell(z,y)$ 化简为 $\ln\big(\sum_{c=1}^K e^{z_c}\big) - \sum_{k=1}^K y_k z_k$ 再对 $z_j$ 求偏导，两行即可证明！}
+
+  \item \textbf{Sigmoid + MSE 非凸区间与逻辑回归 Hessian 安全学习率上界}：
+  (a) 完整验证式~\eqref{eq:ch6-sigmse-d2}：当 $y=1$、$p=\sigma(z)$ 时，$\ell_{\text{MSE}}(z) = \frac{1}{2}(p-1)^2$ 的二阶导数为 $\ell''_{\text{MSE}}(z) = p(1-p)^2(3p-1)$，并由此解出严格凹区间为 $z < -\ln 2$；
+  (b) 对带 $L_2$ 正则的无偏置二元逻辑回归 $\mathcal{L}(w) = \frac{1}{N}\sum_{i=1}^N [\ln(1+e^{x_i^T w}) - y_i x_i^T w] + \frac{\lambda}{2}\norm{w}_2^2$，利用基本不等式 $p(1-p) \le \frac{1}{4}$ 证明其 Hessian 处处满足矩阵不等式
+  \[
+    \lambda I_d \;\preceq\; H(w) \;\preceq\; \left(\frac{1}{4N}\lambda_{\max}(X^T X) + \lambda\right) I_d,
+  \]
+  并结合第 1 卷第 6 章的平滑凸函数步长界，写出保证全批量梯度下降稳定收敛的安全学习率上界 $\eta_{\max}$。
+  \exHint{(b) 对任意单位向量 $v$，用 $0 < \hat{p}_i(1-\hat{p}_i) \le \frac{1}{4}$ 放缩二次型 $v^T H(w) v = \frac{1}{N}\sum_i \hat{p}_i(1-\hat{p}_i)(x_i^T v)^2 + \lambda$，再结合第 1 卷第 3 章 Rayleigh 商上界 $v^T(X^T X)v \le \lambda_{\max}(X^T X)$！}
+\end{enumerate}
+
+\exTier{D. 可自检编程实验}{动手交付多分类 Softmax 回归、数据泄漏复现与 ROC-AUC}
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{纯 NumPy 多分类 Softmax 回归 + Log-Sum-Exp + 有限差分梯度校验}：固定随机种子 \texttt{2026}，生成 $K=3$ 类二维高斯混合数据（每类 $100$ 条，均值分别为 $(-2,0), (2,0), (0, 2.5)$，协方差均为 $0.8 I_2$），按 $70\%/30\%$ 分层划分训练/验证集并严格仅在训练集上标准化。手写带 Log-Sum-Exp 稳定化与 $L_2$ 正则（$\lambda = 0.05$）的 \texttt{SoftmaxRegressionL2} 类。\\
+  \textbf{自检标准}：
+  (a) 在迷你张量上调用中心有限差分梯度校验（$\epsilon = 10^{-5}$），断言对 $(W, b)$ 的整体解析梯度相对误差 $< 10^{-9}$；
+  (b) 对极端 logits \texttt{z = np.array([1000.0, 1001.0, 999.0])} 调用你的 \texttt{softmax} 与 \texttt{logsumexp}，断言输出不含 \texttt{nan}/\texttt{inf} 且概率和与 $1.0$ 误差 $< 10^{-12}$；
+  (c) 在 $90$ 条验证集上分类准确率 $> 90\%$（参考值约 $92.22\%$）。
+  \exHint{将矩阵 $W$ 与偏置 $b$ 展平拼为一维向量 \texttt{theta =} \texttt{np.concatenate(}\allowbreak\texttt{[W.ravel(), b])}，传入第 1 卷的 \texttt{check\_gradient} 即可一键校验全部多分类参数梯度！}
+
+  \item \textbf{复现数据泄漏灾难并手写 ROC-AUC 阈值扫描}：
+  \begin{enumerate}[label=(\alph*)]
+    \item 复现第 6.4 节的纯噪声实验（$N=60, D=500$，独立重复 50 次，40 训练 / 20 测试，按相关性选 Top-10 特征），对比泄漏版与干净版的平均测试准确率；
+    \item 复用第 6.5 节的 30 维多尺度逻辑回归数据与最优模型（$\lambda = 0.10$），按预测概率从高到低排序，用纯 NumPy 手写梯形积分（\texttt{np.trapezoid} 或手动相邻差分累加）计算验证集上的精确 \textbf{ROC-AUC}，并打印阈值 $\tau \in \{0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8\}$ 下的 Precision、Recall 与 $F_1$ 权衡表。
+  \end{enumerate}
+  \textbf{自检标准}：(a) 断言泄漏版 50 次平均测试准确率 $> 75\%$（参考值 $80.40\%$），而干净版落在 $[45\%, 55\%]$ 内（参考值 $49.50\%$）；(b) 断言验证集 ROC-AUC 落在 $[0.90, 0.95]$ 之间（参考值 $0.9160$），且在 $\tau = 0.5$ 时准确率 $= 85.00\%$、$F_1 = 0.8439$。
+  \exHint{手算 ROC-AUC 最稳健的纯 NumPy 写法：按 \texttt{order = np.argsort(-scores)} 降序排列真实标签 \texttt{y\_s = y\_va[order]}，用 \texttt{np.cumsum} 一次算出所有阈值点的 \texttt{TPR} 与 \texttt{FPR}，首端拼 $0$ 后用梯形面积公式求和即可！}
+\end{enumerate}

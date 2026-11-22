@@ -1,0 +1,604 @@
+\chapter[科学实验设计与统计学严谨评测]{科学实验设计与统计学严谨评测\\（消除“刷榜幻觉”）}\label{ch:rigorous-eval}
+
+\chapEpigraph{首要原则是绝不能欺骗自己——而你自己正是最容易被骗的那个人。}{Richard P. Feynman（理查德·费曼，1974 年加州理工毕业演讲）}
+
+\begin{chapIntro}{本章核心问题与学习地图}
+在人工智能科研与工程实践中，最常见也最危险的句式莫过于：“我们在基准数据集上比最强基线提升了 $+1.5\%$，刷新了 SOTA。”然而，当你把同一个模型换三个随机种子重新训练，或者把超参数预算公平地分给基线模型时，那看似耀眼的 $+1.5\%$ 常常瞬间烟消云散。这并非算法失效，而是\textbf{统计学幻觉（Statistical Illusion）}在作祟。
+
+本章将把“跑通实验”升级为“科学证伪与统计推断”，围绕四个彼此扣合的支柱展开：
+\begin{enumerate}
+  \item \textbf{随机种子选择偏置（Best-of-$K$ Bias）}：严格证明为何在 $K$ 次独立运行中挑最好结果会凭空制造 $+5\%$ 的虚假收益，并用实测数据加以验证；
+  \item \textbf{配对重采样与假设检验}：推导非参数配对 Bootstrap 置信区间与 McNemar 精确检验，说明为何“只看分歧样本”能大幅削减题目难度方差；
+  \item \textbf{多重比较与测试集过拟合}：证明 Bonferroni 与 Holm--Bonferroni 校正，揭示反复窥探测试集如何将其退化为泄漏的验证集；
+  \item \textbf{受控消融与算力对齐}：对比单因素消融与析因交互设计，建立端到端的严谨实验评测流水线。
+\end{enumerate}
+\end{chapIntro}
+
+\section{为什么单种子准确率表格极具欺骗性：极值选择偏置}
+
+假设你提出了一个新模块，在包含 $N=200$ 条测试样本的基准上做评测。你的新模型与基线模型的\textbf{真实泛化准确率完全相同}，都是 $p = 80.0\%$，没有任何实质改进。但如果你用 $K=20$ 个不同的随机种子（或 $20$ 组微调超参、$20$ 个训练检查点）评估这个模型，然后只把最高的一次测试准确率写进论文主表，会发生什么？直觉可能会告诉你“不过多试了几次，能高多少？”——但概率论的极值理论给出了令人警醒的答案。
+
+\begin{recallBox}{二项抽样方差与次高斯尾部界（第 2 卷）}
+若随机变量 $Z_1,\dots,Z_N \stackrel{\text{i.i.d.}}{\sim} \operatorname{Bernoulli}(p)$ 表示测试集上每条样本是否预测正确，则经验准确率 $\hat{p} = \frac{1}{N}\sum_{i=1}^N Z_i$ 满足
+\[
+  \E[\hat{p}] = p, \qquad \Var(\hat{p}) = \frac{p(1-p)}{N}, \qquad \sigma := \sqrt{\frac{p(1-p)}{N}}.
+\]
+由中心极限定理（第 2 卷第 4 章），当 $Np(1-p)$ 足够大时，$\hat{p} \approx \mathcal{N}(p, \sigma^2)$。进一步地，由 Hoeffding 引理，任意取值于 $[0,1]$ 的随机变量都是 $\frac{1}{2}$-次高斯的，故 $\hat{p} - p$ 满足 $\E[e^{t(\hat{p}-p)}] \le \exp\!\big(\frac{t^2}{8N}\big)$；在正态近似下，中心化误差 $X_k = \hat{p}_k - p$ 满足 $\sigma$-次高斯矩母函数界 $\E[e^{tX_k}] \le \exp\!\big(\frac{\sigma^2 t^2}{2}\big)$。
+\end{recallBox}
+
+下面我们严格定量刻画“从 $K$ 次独立评测中择优（Best-of-$K$）”到底会制造多大的乐观偏置（Optimism Bias）。
+
+\begin{thmBox}
+\begin{theorem}[Best-of-$K$ 极值选择偏置定理]\label{thm:best-of-k}
+设 $X_1,\dots,X_K$ 为均值为 $0$ 的随机变量，且每个 $X_k$ 满足 $\sigma$-次高斯条件 $\E[e^{t X_k}] \le \exp(\sigma^2 t^2 / 2)$（对所有 $t > 0$；不必假设独立）。则其最大值的期望满足严格上界：
+\begin{equation}\label{eq:subgaussian-max}
+  \E\!\left[\max_{1\le k\le K} X_k\right] \le \sigma\sqrt{2\ln K}.
+\end{equation}
+进一步地，若 $X_1,\dots,X_K \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, \sigma^2)$，则：
+\begin{enumerate}
+  \item 当 $K=2$ 时，精确期望为 $\E[\max(X_1, X_2)] = \dfrac{\sigma}{\sqrt{\pi}} \approx 0.5642\,\sigma$；
+  \item 当 $K \to \infty$ 时，最大值的期望渐近满足
+  \begin{equation}\label{eq:gaussian-max-asymp}
+    \E\!\left[\max_{1\le k\le K} X_k\right] = \sigma\sqrt{2\ln K}\,\Big(1 - o(1)\Big).
+  \end{equation}
+\end{enumerate}
+将 $X_k = \hat{p}_k - p$、$\sigma = \sqrt{p(1-p)/N}$ 代入，即得“从 $K$ 次相同真实水平 $p$ 的评估中挑最好成绩”的期望虚高：
+\begin{equation}\label{eq:seed-inflation}
+  \E\!\left[\max_{1\le k\le K} \hat{p}_k\right] \approx p + \sqrt{\frac{2p(1-p)\ln K}{N}} > p.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一步：证明通用次高斯上界 \eqref{eq:subgaussian-max}。}
+对任意参数 $t > 0$，由于指数函数 $u \mapsto e^{tu}$ 严格凸，由 Jensen 不等式有
+\[
+  \exp\!\left(t\,\E\!\left[\max_{1\le k\le K} X_k\right]\right)
+  \le \E\!\left[\exp\!\left(t \max_{1\le k\le K} X_k\right)\right]
+  = \E\!\left[\max_{1\le k\le K} e^{t X_k}\right].
+\]
+因为每一项 $e^{t X_k} > 0$，最大值不超过全体之和，再由期望的线性性与次高斯假设可得
+\[
+  \E\!\left[\max_{1\le k\le K} e^{t X_k}\right]
+  \le \sum_{k=1}^K \E\!\left[e^{t X_k}\right]
+  \le K \exp\!\left(\frac{\sigma^2 t^2}{2}\right).
+\]
+两边同时取自然对数并除以 $t > 0$：
+\[
+  \E\!\left[\max_{1\le k\le K} X_k\right] \le \frac{\ln K}{t} + \frac{\sigma^2 t}{2}.
+\]
+对右端关于 $t > 0$ 求极小值，令导数 $-\frac{\ln K}{t^2} + \frac{\sigma^2}{2} = 0$，解得最优点 $t^* = \frac{\sqrt{2\ln K}}{\sigma}$。代回上式立即得到
+\[
+  \E\!\left[\max_{1\le k\le K} X_k\right] \le \frac{\sigma\ln K}{\sqrt{2\ln K}} + \frac{\sigma\sqrt{2\ln K}}{2} = \sigma\sqrt{2\ln K}.
+\]
+注意：该上界甚至不要求 $X_1,\dots,X_K$ 彼此独立，即便多种子共享同一测试集而存在相关性，上界依然严格成立。
+
+\textbf{第二步：证明 $K=2$ 高斯精确公式。}
+利用恒等式 $\max(a,b) = \frac{a+b+|a-b|}{2}$，且 $X_1 - X_2 \sim \mathcal{N}(0, 2\sigma^2)$。由于标准正态变量 $Z \sim \mathcal{N}(0,1)$ 满足 $\E[|Z|] = 2\int_0^\infty z\frac{1}{\sqrt{2\pi}}e^{-z^2/2}\,\mathrm{d}z = \sqrt{\frac{2}{\pi}}$，于是
+\[
+  \E[\max(X_1, X_2)] = \frac{1}{2}\E[X_1+X_2] + \frac{1}{2}\E[|X_1-X_2|]
+  = 0 + \frac{1}{2}\cdot\sqrt{2}\sigma\cdot\sqrt{\frac{2}{\pi}} = \frac{\sigma}{\sqrt{\pi}}.
+\]
+
+\textbf{第三步：证明高斯极大值的渐近下界（说明 $\sqrt{2\ln K}$ 阶无法缩减）。}
+不失一般性设 $\sigma = 1$，$Z_1,\dots,Z_K \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0,1)$，记 $M_K = \max_{1\le k\le K} Z_k$。对任意阈值 $u > 0$，独立性给出
+\[
+  \Prob(M_K \le u) = \big(1 - \bar{\Phi}(u)\big)^K \le \exp\!\big(-K\bar{\Phi}(u)\big),
+\]
+其中 $\bar{\Phi}(u) = \Prob(Z_1 > u)$ 满足标准磨光下界（Mills 比率）：
+\[
+  \bar{\Phi}(u) \ge \frac{u}{u^2+1}\cdot\frac{1}{\sqrt{2\pi}} e^{-u^2/2} \qquad (\forall u > 0).
+\]
+对任意固定的 $\delta \in (0,1)$，选取 $u_K = \sqrt{2(1-\delta)\ln K}$。当 $K$ 充分大时，
+\[
+  K\bar{\Phi}(u_K) \ge \frac{u_K}{\sqrt{2\pi}(u_K^2+1)}\, K^{\delta} \longrightarrow +\infty \qquad (K \to \infty),
+\]
+从而 $\Prob(M_K > u_K) = 1 - \Prob(M_K \le u_K) \to 1$。再由 $M_K \ge u_K \mathbf{1}_{\{M_K > u_K\}} + Z_1 \mathbf{1}_{\{M_K \le u_K\}}$ 取期望（且 $\E[|Z_1|\mathbf{1}_{\{M_K\le u_K\}}] \to 0$），可得 $\liminf_{K\to\infty}\frac{\E[M_K]}{\sqrt{2\ln K}} \ge \sqrt{1-\delta}$。令 $\delta \downarrow 0$ 并结合第一步的上界，即得 $\E[M_K] = \sqrt{2\ln K}(1-o(1))$，式 \eqref{eq:gaussian-max-asymp} 证毕。
+\end{proof}
+
+\begin{example}[手算估算：$N=200$ 时从 20 个随机种子中择优]\label{ex:seed-calc}
+设某分类器的真实准确率恒为 $p = 0.80$，测试集规模为 $N = 200$。单次独立抽样的标准差为
+\[
+  \sigma = \sqrt{\frac{0.80 \times 0.20}{200}} = \sqrt{0.0008} \approx 0.02828 \quad (\text{即 } 2.83\text{ 个百分点}).
+\]
+\begin{itemize}
+  \item 当 $K = 2$ 时，利用定理 \ref{thm:best-of-k} 的精确公式，仅“跑两次取高的”就会使期望成绩上升 $\frac{2.83\%}{\sqrt{\pi}} \approx +1.60\%$，达到约 $81.6\%$；
+  \item 当 $K = 20$ 时，次高斯理论上限为 $p + \sigma\sqrt{2\ln 20} \approx 80.0\% + 2.83\% \times 2.448 = 86.92\%$。由于有限 $K$ 下 $\E[M_K]$ 略低于渐近上界（$K=20$ 时标准正态最大值期望约为 $1.867$），精确理论期望约为 $80.0\% + 1.867 \times 2.83\% \approx 85.28\%$——也就是说，\textbf{哪怕模型纹丝未动，单靠多试 20 次取最大值，就能凭空制造超过 $+5\%$ 的刷榜幻觉！}
+\end{itemize}
+\end{example}
+
+\subsection{实测验证：完全相同的 80\% 分类器如何“刷”出 85.11\%}
+
+为了验证上述理论预测，配套脚本 \texttt{code/vol7\_experiments.py} 中的 \texttt{exp1\_seed\_cherrypick\_and\_mcnemar} 对一个真实准确率严格固定为 $80.0\%$ 的分类器（$N=200$）执行了 $3000$ 次蒙特卡洛模拟，记录在不同候选数量 $K \in \{1,2,3,5,8,12,16,20\}$ 下择优（Best-of-$K$）的均值与第 95 百分位数。实测结果保存于 \texttt{data/seed\_inflation.csv}，如图 \ref{fig:seed-inflation} 与表 \ref{tab:seed-inflation} 所示。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.84\linewidth,
+      height=6.2cm,
+      xlabel={候选运行次数（随机种子数 $K$）},
+      ylabel={择优报告准确率（\%）},
+      xmin=0.5, xmax=20.8,
+      ymin=78.5, ymax=89.0,
+      xtick={1,2,3,5,8,12,16,20},
+      ytick={80,82,84,86,88},
+      grid=major,
+      grid style={dashed, tealLine!70},
+      legend style={at={(0.97,0.17)}, anchor=south east, font=\footnotesize, fill=white, draw=tealLine},
+      label style={font=\small\sffamily, color=ink},
+      tick label style={font=\footnotesize, color=slate},
+      axis line style={color=slate}
+    ]
+      \addplot[color=ochre, very thick, mark=*, mark size=2.1pt]
+        table[x=k_seeds, y=p95_max_acc, col sep=comma]{data/seed_inflation.csv};
+      \addlegendentry{第 95 百分位（极易中奖的“幸运论文”）}
+
+      \addplot[color=teal, very thick, mark=square*, mark size=2.0pt]
+        table[x=k_seeds, y=mean_max_acc, col sep=comma]{data/seed_inflation.csv};
+      \addlegendentry{Best-of-$K$ 平均报告准确率 $\E[\max_k \hat{p}_k]$}
+
+      \addplot[color=navy, thick, dashed]
+        table[x=k_seeds, y=true_acc, col sep=comma]{data/seed_inflation.csv};
+      \addlegendentry{模型真实准确率（恒为 $80.0\%$）}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Best-of-$K$ 随机种子择优制造的“刷榜幻觉”（数据来源：\texttt{data/seed\_inflation.csv}，$N=200$，$3000$ 次模拟）。所有 $K$ 次运行的真实准确率均为 $80.0\%$，但当 $K=20$ 时，择优均值虚高至 $85.11\%$，第 95 百分位更高达 $87.50\%$。}
+  \label{fig:seed-inflation}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{实测 Best-of-$K$ 选择偏置汇总（真实准确率 $p=80.0\%$，$N=200$，$3000$ 次模拟）}
+  \label{tab:seed-inflation}
+  \small
+  \begin{tabular}{@{}ccccc@{}}
+    \toprule
+    候选次数 $K$ & 真实准确率 & 择优均值 $\E[\max_k \hat{p}_k]$ & 虚高增量 $\Delta$ & 第 95 百分位 \\
+    \midrule
+    $K=1$  & $80.0\%$ & $79.96\%$ & $-0.04\%$ & $84.50\%$ \\
+    $K=2$  & $80.0\%$ & $81.50\%$ & $+1.50\%$ & $85.00\%$ \\
+    $K=5$  & $80.0\%$ & $83.26\%$ & $+3.26\%$ & $86.50\%$ \\
+    $K=12$ & $80.0\%$ & $84.48\%$ & $+4.48\%$ & $87.00\%$ \\
+    $K=20$ & $80.0\%$ & $85.11\%$ & $+5.11\%$ & $87.50\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+从表 \ref{tab:seed-inflation} 可以清晰看到：当 $K=1$ 时无偏估计为 $79.96\%$（与真实值 $80.0\%$ 吻合）；只要变成 $K=5$，平均报告成绩就跳升到 $83.26\%$（$+3.26\%$）；到 $K=20$ 时，均值高达 $85.11\%$（$+5.11\%$），且有 $5\%$ 的实验室会“幸运”地刷出 $87.50\%$ 以上的成绩！注意，我们的模拟甚至还没计入深度神经网络训练本身的随机性（初始化、小批量顺序、Dropout 掩码）。在真实深度学习实验中，训练随机性与有限测试集抽样叠加，单种子刷榜的泡沫只会更大。
+
+\begin{insightBox}{为何“在测试集上挑最优 checkpoint”与“调随机种子”本质等价？}
+许多初学者并未更换随机种子，却在每个训练 epoch 结束后都在测试集上算一次分数，最后汇报“训练过程中的最高测试准确率”。假设共训练 $50$ 个 epoch 且后 $20$ 个 epoch 模型已进入平台振荡期，从这 $20$ 个检查点里挑测试分数最高的一个，在统计学上与 Best-of-$20$ 完全同构！正确做法是：\textbf{一切早停（Early Stopping）与模型选择只能在独立验证集上完成；测试集在全部超参锁定后，严格只允许评估一次。}
+\end{insightBox}
+
+\section{非参数 Bootstrap 置信区间与配对重采样原理}
+
+既然单个点估计 $\hat{p}$ 带有不可忽略的抽样不确定性，严谨的科研汇报必须同时给出\textbf{置信区间（Confidence Interval, CI）}。在深度学习中，评测指标往往不止于简单的准确率，还可能是 F1、BLEU、ROUGE、AUROC、ECE 或平均交并比（mIoU），它们的抽样分布没有简单的闭式解析公式。此时，Bradley Efron 于 1979 年提出的\textbf{非参数自助法（Non-Parametric Bootstrap）}成为最具普适性的武器。
+
+\subsection{经验分布插入原理与百分位 Bootstrap 区间}
+
+设测试样本 $\mathcal{D}_{\text{test}} = \{z_1,\dots,z_N\}$ 独立同分布地采自未知总体分布 $F$，我们关心的总体统计量是泛函 $\theta = T(F)$（例如模型 $B$ 与模型 $A$ 的真实准确率之差），其样本估计为 $\hat{\theta} = T(\hat{F}_N)$，其中\textbf{经验分布（Empirical Distribution）}定义为
+\[
+  \hat{F}_N(z) = \frac{1}{N} \sum_{i=1}^N \delta_{z_i}(z),
+\]
+即给测试集中的每条观测样本赋予相等权重 $1/N$。Bootstrap 的核心思想极其优雅——\textbf{插入原理（Plug-in Principle）}：既然我们不知道真实总体 $F$，就用经验分布 $\hat{F}_N$ 作为 $F$ 的最佳非参数替代，通过从 $\hat{F}_N$ 中\textbf{有放回地抽取}规模仍为 $N$ 的重采样样本 $\mathcal{D}^{*(b)} = \{z_{i_1},\dots,z_{i_N}\}$（其中索引 $i_1,\dots,i_N \stackrel{\text{i.i.d.}}{\sim} \operatorname{Unif}\{1,\dots,N\}$），重复 $B$ 次（通常 $B \in [1000, 10000]$），得到自助分布 $\{\hat{\theta}^{*(1)}, \dots, \hat{\theta}^{*(B)}\}$。
+
+据此，最常用的\textbf{百分位 Bootstrap 置信区间（Percentile Bootstrap CI）}（置信水平 $1-\alpha$，常取 $\alpha=0.05$）直接取这 $B$ 个重采样统计量的经验分位数：
+\begin{equation}\label{eq:bootstrap-ci}
+  \mathrm{CI}_{1-\alpha}^{\text{pct}} = \Big[\, \hat{\theta}^{*}_{(\alpha/2)},\;\; \hat{\theta}^{*}_{(1-\alpha/2)} \,\Big],
+\end{equation}
+而\textbf{枢轴（Basic/Pivotal）Bootstrap 区间}则利用 $\hat{\theta}^* - \hat{\theta}$ 近似 $\hat{\theta} - \theta$ 的分布，给出 $[2\hat{\theta} - \hat{\theta}^{*}_{(1-\alpha/2)},\, 2\hat{\theta} - \hat{\theta}^{*}_{(\alpha/2)}]$。当分布近似对称时两者几乎重合；存在轻微偏态时，可进一步使用偏差校正加速区间（BCa）。
+
+\subsection{为什么必须做“配对”重采样：方差缩减定理}
+
+在比较两个模型 $A$ 与 $B$ 时，一个极为普遍的错误是分别计算 $A$ 的 95\% 置信区间和 $B$ 的 95\% 置信区间，然后肉眼观察“两个区间有没有重叠”。这种做法\textbf{完全丢弃了两个模型在同一批测试题上的强正相关性}！事实上，难题往往两个模型都做错，简单题往往两个模型都做对。只有采用\textbf{配对 Bootstrap（Paired Bootstrap）}——在每一次重采样 $b$ 中，用\textbf{完全相同的随机样本索引} $(i_1^{(b)},\dots,i_N^{(b)})$ 同时评估 $A$ 与 $B$ 并计算差值 $\hat{\Delta}^{*(b)} = \hat{p}_B^{*(b)} - \hat{p}_A^{*(b)}$——才能消除题目难度本身的共同方差。
+
+\begin{thmBox}
+\begin{theorem}[配对评测的方差缩减定理]\label{thm:paired-var}
+设在独立同分布测试样本 $(X_i, Y_i)$（$i=1,\dots,N$）上，模型 $A$ 与 $B$ 的逐样本正确指示变量为 $a_i, b_i \in \{0,1\}$。记联合概率 $p_{uv} = \Prob(a_i = u, b_i = v)$（$u,v \in \{0,1\}$），边缘准确率 $p_A = p_{11} + p_{10}$，$p_B = p_{11} + p_{01}$，以及经验准确率 $\hat{p}_A = \frac{1}{N}\sum_{i=1}^N a_i$、$\hat{p}_B = \frac{1}{N}\sum_{i=1}^N b_i$。则配对准确率之差 $\hat{\Delta} = \hat{p}_B - \hat{p}_A$ 的精确方差为
+\begin{equation}\label{eq:paired-var}
+  \Var(\hat{p}_B - \hat{p}_A)
+  = \Var(\hat{p}_B) + \Var(\hat{p}_A) - 2\operatorname{Cov}(\hat{p}_A, \hat{p}_B)
+  = \frac{p_{01} + p_{10} - (p_{01} - p_{10})^2}{N}.
+\end{equation}
+当两模型呈正相关（即 $\operatorname{Cov}(a_i, b_i) = p_{11} - p_A p_B > 0$，这在真实机器学习评测中几乎必然成立）时，配对评测的方差严格小于独立非配对评测方差 $\Var(\hat{p}_B) + \Var(\hat{p}_A)$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记第 $i$ 条样本上的逐题差值为 $d_i = b_i - a_i \in \{-1, 0, +1\}$。由分布定义，
+\[
+  \Prob(d_i = +1) = p_{01}, \qquad \Prob(d_i = -1) = p_{10}, \qquad \Prob(d_i = 0) = p_{11} + p_{00}.
+\]
+因此单个样本差值的一阶矩与二阶矩分别为
+\[
+  \E[d_i] = (+1)\cdot p_{01} + (-1)\cdot p_{10} = p_{01} - p_{10}, \qquad
+  \E[d_i^2] = (+1)^2 p_{01} + (-1)^2 p_{10} = p_{01} + p_{10}.
+\]
+由于各测试样本独立同分布，样本均值 $\hat{\Delta} = \frac{1}{N}\sum_{i=1}^N d_i$ 的方差为
+\[
+  \Var(\hat{\Delta}) = \frac{1}{N}\Var(d_i) = \frac{\E[d_i^2] - (\E[d_i])^2}{N} = \frac{p_{01} + p_{10} - (p_{01} - p_{10})^2}{N}.
+\]
+另一方面，按双线性展开 $\Var(\hat{p}_B - \hat{p}_A) = \Var(\hat{p}_B) + \Var(\hat{p}_A) - 2\operatorname{Cov}(\hat{p}_A, \hat{p}_B)$，且由独立性有
+\[
+  \operatorname{Cov}(\hat{p}_A, \hat{p}_B)
+  = \frac{1}{N}\operatorname{Cov}(a_i, b_i)
+  = \frac{\E[a_i b_i] - \E[a_i]\E[b_i]}{N}
+  = \frac{p_{11} - p_A p_B}{N}.
+\]
+当模型 $A$ 与 $B$ 在同一题目上表现正相关（$p_{11} > p_A p_B$）时，$-2\operatorname{Cov}(\hat{p}_A,\hat{p}_B) < 0$，从而配对评测严格消减了题目固有难度带来的噪声方差。
+\end{proof}
+
+\begin{example}[非配对误差棒为何会误杀真实提升？]\label{ex:paired-vs-unpaired}
+考虑配套实验 \texttt{exp1} 中的配对测试结果（$N=400$）：两模型同时答对 $n_{11}=318$ 题，同时答错 $n_{00}=48$ 题；$B$ 对 $A$ 错 $n_{01}=24$ 题，$A$ 对 $B$ 错 $n_{10}=10$ 题。由此可得：
+\[
+  \hat{p}_A = \frac{318 + 10}{400} = 82.00\%, \qquad
+  \hat{p}_B = \frac{318 + 24}{400} = 85.50\%, \qquad
+  \hat{\Delta} = +3.50\%.
+\]
+\begin{itemize}
+  \item \textbf{错误的非配对估算}：若忽略协方差，误以为 $\hat{p}_A$ 与 $\hat{p}_B$ 独立，则差值标准误为
+  \[
+    \mathrm{SE}_{\text{unpaired}} = \sqrt{\frac{0.82\times 0.18 + 0.855\times 0.145}{400}} = \sqrt{\frac{0.271575}{400}} \approx 2.61\%,
+  \]
+  对应 $95\%$ 置信区间为 $3.50\% \pm 1.96 \times 2.61\% = [-1.61\%,\, +8.61\%]$，\textbf{包含 $0$}，让你误以为提升不显著！
+  \item \textbf{正确的配对估算}：代入式 \eqref{eq:paired-var}（$\hat{p}_{01}=0.060, \hat{p}_{10}=0.025$），配对标准误立刻锐减近一半：
+  \[
+    \mathrm{SE}_{\text{paired}} = \sqrt{\frac{0.060 + 0.025 - (0.035)^2}{400}} = \sqrt{\frac{0.083775}{400}} \approx 1.45\%,
+  \]
+  渐近 $95\%$ 置信区间为 $[+0.66\%,\, +6.34\%]$；而在 \texttt{exp1} 中用 $2000$ 次配对 Bootstrap 实测得到的 $95\%$ 百分位置信区间为 \textbf{$[+0.75\%,\, +6.50\%]$}，整个区间严格位于 $0$ 的右侧，清晰证实模型 $B$ 显著优于模型 $A$！
+\end{itemize}
+\end{example}
+
+\section{McNemar 配对假设检验：只看分歧样本的精确逻辑}
+
+除了构造差值的置信区间，顶会审稿人还常要求给出配对假设检验的 $p$ 值。当两个二分类（或多分类 Top-1 正确/错误）模型在\textbf{同一份测试集}上比较时，最经典且统计功效最高的非参数检验是 \textbf{McNemar 检验}。
+
+将两个模型在 $N$ 条测试样本上的逐条结果整理为 $2\times 2$ 列联表（表 \ref{tab:mcnemar-table}）。
+
+\begin{table}[htbp]
+  \centering
+  \caption{模型 $A$ 与模型 $B$ 在同一测试集上的 $2\times 2$ 配对列联表（以 \texttt{exp1} 中 $N=400$ 为例）}
+  \label{tab:mcnemar-table}
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    & 模型 $B$ 正确（$b_i=1$） & 模型 $B$ 错误（$b_i=0$） & 行合计 \\
+    \midrule
+    模型 $A$ 正确（$a_i=1$） & $n_{11} = 318$（一致正确） & $n_{10} = 10$（$A$ 胜 $B$） & $328$（$82.00\%$） \\
+    模型 $A$ 错误（$a_i=0$） & $n_{01} = 24$（$B$ 胜 $A$） & $n_{00} = 48$（一致错误） & $72$ \\
+    \midrule
+    列合计 & $342$（$85.50\%$） & $58$ & $N = 400$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+初看表 \ref{tab:mcnemar-table}，很多同学会疑惑：为什么 McNemar 检验根本不看 $n_{11}=318$ 和 $n_{00}=48$，而只盯着分歧样本（Discordant Pairs）$n_{01}$ 与 $n_{10}$？下面我们从多项分布的条件似然给出严格证明。
+
+\begin{thmBox}
+\begin{theorem}[McNemar 配对检验的精确条件分布与 $\chi^2$ 统计量]\label{thm:mcnemar}
+设 $(n_{11}, n_{10}, n_{01}, n_{00}) \sim \operatorname{Multinomial}(N;\, p_{11}, p_{10}, p_{01}, p_{00})$。检验边缘同质性零假设
+\[
+  H_0 : p_A = p_B \quad\Longleftrightarrow\quad p_{10} = p_{01}.
+\]
+记分歧样本总数为 $m = n_{01} + n_{10}$。则在零假设 $H_0$ 成立且给定 $m$ 的条件下，一致样本数 $(n_{11}, n_{00})$ 不携带任何关于 $H_0$ 的额外信息，且 $n_{01}$ 严格服从对称二项分布：
+\begin{equation}\label{eq:mcnemar-binom}
+  n_{01} \mid (n_{01} + n_{10} = m) \;\sim\; \operatorname{Binomial}\!\left(m,\; \frac{1}{2}\right).
+\end{equation}
+由此得到：
+\begin{enumerate}
+  \item \textbf{精确双侧 $p$ 值}（适用于任意 $m$，尤其当 $m < 25$ 时必须使用）：
+  \[
+    p_{\text{exact}} = 2 \sum_{k=\max(n_{01}, n_{10})}^{m} \binom{m}{k} \left(\frac{1}{2}\right)^m \quad (\text{若 } n_{01}=n_{10}\text{ 则为 } 1).
+  \]
+  \item \textbf{大样本连续性校正卡方统计量}（Edwards 校正，适用于 $m \ge 25$）：
+  \begin{equation}\label{eq:mcnemar-chi2}
+    \chi^2_{\mathrm{McNemar}} = \frac{\big(|n_{01} - n_{10}| - 1\big)^2}{n_{01} + n_{10}} \;\xrightarrow{\,d\,}\; \chi^2_1 \qquad (H_0\text{ 下}).
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+首先将 $n_{01} + n_{10} = m$ 视为事件，记分歧总概率为 $q = p_{01} + p_{10}$。由多项分布的合并性质，$(n_{11}, m, n_{00}) \sim \operatorname{Multinomial}(N;\, p_{11}, q, p_{00})$。因此联合概率可精确分解为
+\begin{align*}
+  \Prob(n_{11}, n_{10}, n_{01}, n_{00})
+  &= \frac{N!}{n_{11}!\, n_{10}!\, n_{01}!\, n_{00}!}\, p_{11}^{n_{11}} p_{10}^{n_{10}} p_{01}^{n_{01}} p_{00}^{n_{00}} \\
+  &= \underbrace{\frac{N!}{n_{11}!\, m!\, n_{00}!}\, p_{11}^{n_{11}} q^m p_{00}^{n_{00}}}_{\Prob(n_{11},\, m,\, n_{00})}
+     \cdot \underbrace{\binom{m}{n_{01}} \left(\frac{p_{01}}{q}\right)^{n_{01}} \left(\frac{p_{10}}{q}\right)^{m-n_{01}}}_{\Prob(n_{01} \mid n_{11},\, m,\, n_{00})}.
+\end{align*}
+令 $\theta := p_{01} / (p_{01} + p_{10})$。注意到零假设 $H_0: p_{01} = p_{10}$ 等价于 $\theta = 1/2$（在 $q>0$ 时），而前面一项只依赖冗余参数 $(p_{11}, q, p_{00})$。因此在给定 $(n_{11}, m, n_{00})$ 后，关于 $\theta$ 的条件分布仅取决于 $m$：
+\[
+  n_{01} \mid (m = n_{01}+n_{10}) \sim \operatorname{Binomial}(m, \theta),
+\]
+在 $H_0: \theta = 1/2$ 下立刻化简为式 \eqref{eq:mcnemar-binom}。
+
+在 $H_0$ 下，$n_{01}$ 的条件期望为 $\mu = m/2$，条件方差为 $v = m/4$。由中心极限定理，未校正的标准化统计量
+\[
+  Z = \frac{n_{01} - m/2}{\sqrt{m/4}} = \frac{2n_{01} - (n_{01} + n_{10})}{\sqrt{n_{01} + n_{10}}} = \frac{n_{01} - n_{10}}{\sqrt{n_{01} + n_{10}}} \;\xrightarrow{\,d\,}\; \mathcal{N}(0,1),
+\]
+从而 $Z^2 \xrightarrow{d} \chi^2_1$。为了用连续正态分布更准确地逼近离散整数变量 $n_{01}$ 的尾概率 $\Prob(n_{01} \ge k)$，将积分下界向均值方向回调半个整数单位（$|n_{01} - m/2| \mapsto |n_{01} - m/2| - \frac{1}{2}$）。由于 $2|n_{01} - m/2| = |n_{01} - n_{10}|$，回调 $\frac{1}{2}$ 乘以 $2$ 正好对应分子中的减 $1$：
+\[
+  \left(\frac{|n_{01} - m/2| - 1/2}{\sqrt{m/4}}\right)^2
+  = \frac{\big(|n_{01} - n_{10}| - 1\big)^2}{n_{01} + n_{10}} = \chi^2_{\mathrm{McNemar}}.
+\]
+\end{proof}
+
+\begin{example}[手算验证 \texttt{exp1} 的 McNemar 检验]\label{ex:mcnemar-calc}
+沿用表 \ref{tab:mcnemar-table} 的数据：$N=400$，Model A 准确率 $82.00\%$，Model B 准确率 $85.50\%$，分歧计数 $n_{01} = 24$、$n_{10} = 10$，分歧总数 $m = 34 \ge 25$。
+\begin{enumerate}
+  \item \textbf{连续性校正 $\chi^2$ 检验}：代入式 \eqref{eq:mcnemar-chi2}，
+  \[
+    \chi^2_{\mathrm{McNemar}} = \frac{(|24 - 10| - 1)^2}{24 + 10} = \frac{13^2}{34} = \frac{169}{34} \approx 4.971.
+  \]
+  查自由度为 $1$ 的卡方分布表：$\chi^2_{1,\,0.95} = 3.841$，且 $4.971 > 3.841$，对应的渐近双侧 $p$ 值为 $p = 2\big(1-\Phi(\sqrt{4.971})\big) \approx 0.0258 < 0.026$。
+  \item \textbf{精确二项检验核对}：直接计算 $2\sum_{k=24}^{34}\binom{34}{k}2^{-34} \approx 0.0243 < 0.05$。
+  \item \textbf{与配对 Bootstrap 交叉印证}：此前配对 Bootstrap 给出的 $95\%$ CI 为 $[+0.75\%,\, +6.50\%]$，两者得出完全一致的统计结论——在 $\alpha = 0.05$ 显著性水平下，拒绝 $H_0$，认为模型 $B$ 显著优于模型 $A$。
+\end{enumerate}
+\end{example}
+
+下面给出一段干净、可直接运行的 Python/NumPy 代码（节选自 \texttt{code/vol7\_experiments.py} 逻辑），展示如何在科研评测脚本中一行整合配对 Bootstrap 与 McNemar 检验：
+
+\begin{lstlisting}[caption={配对 Bootstrap 置信区间与 McNemar 精确/卡方检验（Python/NumPy）}]
+import math
+import numpy as np
+
+def paired_eval_stats(a_ok: np.ndarray, b_ok: np.ndarray, n_boot: int = 2000, seed: int = 2026):
+    """Compare two models on the exact same N test items."""
+    a_ok = np.asarray(a_ok, dtype=np.int64)
+    b_ok = np.asarray(b_ok, dtype=np.int64)
+    n = len(a_ok)
+    # 1. Contingency counts
+    n01 = int(((a_ok == 0) & (b_ok == 1)).sum())
+    n10 = int(((a_ok == 1) & (b_ok == 0)).sum())
+    m = n01 + n10
+    # Continuity-corrected McNemar chi-square
+    chi2 = ((max(0.0, abs(n01 - n10) - 1.0)) ** 2) / m if m > 0 else 0.0
+    # Exact two-sided binomial p-value
+    hi = max(n01, n10)
+    p_exact = 1.0 if n01 == n10 else min(1.0, 2.0 * sum(math.comb(m, k) for k in range(hi, m + 1)) / (2 ** m))
+    # 2. Paired bootstrap using IDENTICAL test indices for A and B
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_diffs = (b_ok[idx].mean(axis=1) - a_ok[idx].mean(axis=1)) * 100.0
+    ci_lo, ci_hi = np.percentile(boot_diffs, [2.5, 97.5])
+    return {
+        "acc_a": a_ok.mean() * 100.0, "acc_b": b_ok.mean() * 100.0,
+        "diff": (b_ok.mean() - a_ok.mean()) * 100.0,
+        "ci_95": (float(ci_lo), float(ci_hi)),
+        "n01": n01, "n10": n10, "chi2": chi2, "p_exact": p_exact,
+    }
+\end{lstlisting}
+
+\section{多重比较陷阱与测试集过拟合}
+
+即便单次假设检验严格执行了配对 McNemar 检验与 $\alpha = 0.05$ 阈值，科研中仍潜伏着第二类隐蔽陷阱：\textbf{多重假设检验（Multiple Hypothesis Testing）}。假设你在 $M = 20$ 个不同的基准子集（或 $20$ 个候选架构变体）上依次做显著性检验，且所有零假设都为真（没有任何真实提升），并且各次检验相互独立。那么至少出现一次“伪显著（$p < 0.05$）”的\textbf{族错误率（Family-Wise Error Rate, FWER）}高达：
+\[
+  \mathrm{FWER} = \Prob\!\left(\bigcup_{m=1}^M \{P_m \le \alpha\}\right) = 1 - (1 - 0.05)^{20} \approx 64.15\%!
+\]
+若尝试 $M = 50$ 个想法，出现至少一次“$p < 0.05$ 可发论文结果”的概率更是飙升至 $92.31\%$。为了控制族错误率不超过预设水平 $\alpha$，统计学提供了两条基石性校正方法。
+
+\begin{thmBox}
+\begin{theorem}[Bonferroni 校正与 Holm--Bonferroni 逐步下降校正]\label{thm:bonf-holm}
+设同时检验 $M$ 个假设 $H_1,\dots,H_M$，其对应的 $p$ 值为 $P_1,\dots,P_M$（对任意真零假设 $i \in \mathcal{H}_0$，满足有效 $p$ 值条件 $\Prob(P_i \le u) \le u$，$\forall u \in [0,1]$）。记真零假设的个数为 $M_0 = |\mathcal{H}_0| \le M$。在\textbf{不对各检验间相关性做任何假设}的前提下：
+\begin{enumerate}
+  \item \textbf{Bonferroni 校正}：仅当 $P_m \le \alpha / M$ 时拒绝 $H_m$，则
+  \[
+    \mathrm{FWER} = \Prob\!\left(\bigcup_{i\in\mathcal{H}_0} \left\{P_i \le \frac{\alpha}{M}\right\}\right) \le \alpha.
+  \]
+  \item \textbf{Holm--Bonferroni 逐步下降法（Step-Down）}：将所有 $p$ 值从小到大排序为 $P_{(1)} \le P_{(2)} \le \dots \le P_{(M)}$（对应假设 $H_{(1)},\dots,H_{(M)}$）。寻找最小的指标 $k \in \{1,\dots,M\}$ 使得
+  \begin{equation}\label{eq:holm-rule}
+    P_{(k)} > \frac{\alpha}{M - k + 1},
+  \end{equation}
+  然后拒绝 $H_{(1)},\dots,H_{(k-1)}$（若不存在这样的 $k$ 则全部拒绝）。该方法同样严格控制 $\mathrm{FWER} \le \alpha$，且其统计功效一致不劣于（通常严格高于）Bonferroni 校正。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{Bonferroni 部分}：直接利用概率的次可加性（并集界 / Boole 不等式），
+\[
+  \mathrm{FWER}
+  = \Prob\!\left(\bigcup_{i\in\mathcal{H}_0} \left\{P_i \le \frac{\alpha}{M}\right\}\right)
+  \le \sum_{i\in\mathcal{H}_0} \Prob\!\left(P_i \le \frac{\alpha}{M}\right)
+  \le \sum_{i\in\mathcal{H}_0} \frac{\alpha}{M}
+  = \frac{M_0}{M}\,\alpha \le \alpha.
+\]
+
+\textbf{Holm--Bonferroni 部分}：若 $M_0 = 0$ 则 $\mathrm{FWER} = 0 \le \alpha$，平凡成立。设 $M_0 \ge 1$，并假设发生了至少一次第一类错误（拒绝了至少一个真零假设）。记 $k^*$ 为排序后\textbf{第一个被拒绝的真零假设}的下标，即 $H_{(k^*)} \in \mathcal{H}_0$，而排在它之前的 $H_{(1)},\dots,H_{(k^*-1)}$ 全都是假零假设（不属于 $\mathcal{H}_0$）。
+
+由此立即得出一个关键计数不等式：全部 $M_0$ 个真零假设都必定位于下标集合 $\{k^*, k^*+1, \dots, M\}$ 中，因此该集合的元素个数至少为 $M_0$：
+\[
+  M - k^* + 1 \ge M_0 \quad\Longrightarrow\quad \frac{\alpha}{M - k^* + 1} \le \frac{\alpha}{M_0}.
+\]
+又因为 $H_{(k^*)}$ 按算法规则被拒绝，必然有 $P_{(k^*)} \le \frac{\alpha}{M - k^* + 1} \le \frac{\alpha}{M_0}$。也就是说，“至少发生一次第一类错误”这个事件必然蕴含“存在某个 $i \in \mathcal{H}_0$ 使得 $P_i \le \alpha / M_0$”！于是再次应用并集界：
+\[
+  \mathrm{FWER}
+  \le \Prob\!\left(\bigcup_{i\in\mathcal{H}_0} \left\{P_i \le \frac{\alpha}{M_0}\right\}\right)
+  \le \sum_{i\in\mathcal{H}_0} \Prob\!\left(P_i \le \frac{\alpha}{M_0}\right)
+  \le M_0 \cdot \frac{\alpha}{M_0} = \alpha.
+\]
+最后，因对所有 $k \ge 1$ 均有 $\frac{\alpha}{M-k+1} \ge \frac{\alpha}{M}$，凡被 Bonferroni 拒绝的假设必被 Holm--Bonferroni 拒绝，故后者功效一致占优。
+\end{proof}
+
+\begin{example}[Holm--Bonferroni 逐步下降手算对比]\label{ex:holm}
+设某消融研究同时比较 $M=4$ 个子基准，测得配对 $p$ 值排序为 $p_{(1)} = 0.008$、$p_{(2)} = 0.015$、$p_{(3)} = 0.021$、$p_{(4)} = 0.090$，总显著性水平 $\alpha = 0.05$。
+\begin{itemize}
+  \item \textbf{Bonferroni 校正}：统一阈值 $\alpha/4 = 0.0125$，只能拒绝 $H_{(1)}$（$0.008 \le 0.0125$），$H_{(2)}$ 与 $H_{(3)}$ 全部落选。
+  \item \textbf{Holm--Bonferroni 校正}：逐级比对：
+  \begin{enumerate}
+    \item $k=1$：阈值 $\alpha/4 = 0.0125$，$0.008 \le 0.0125 \implies$ 拒绝 $H_{(1)}$；
+    \item $k=2$：阈值 $\alpha/3 = 0.0167$，$0.015 \le 0.0167 \implies$ 拒绝 $H_{(2)}$；
+    \item $k=3$：阈值 $\alpha/2 = 0.0250$，$0.021 \le 0.0250 \implies$ 拒绝 $H_{(3)}$；
+    \item $k=4$：阈值 $\alpha/1 = 0.0500$，$0.090 > 0.0500 \implies$ 停止，保留 $H_{(4)}$。
+  \end{enumerate}
+\end{itemize}
+在同样严格保证 $\mathrm{FWER} \le 0.05$ 的前提下，Holm--Bonferroni 多挽救了两个真实信号，因此在实际科研中应当\textbf{无条件优先使用 Holm--Bonferroni 替代普通 Bonferroni}。
+\end{example}
+
+\subsection{自适应测试集窥探与排行榜过拟合}
+
+多重比较还有一种更隐蔽的动态变体——\textbf{自适应数据分析（Adaptive Data Analysis）}，也就是社区熟知的“刷榜过拟合（Leaderboard Overfitting）”。当研究者第 $t$ 次把新模型 $f_t$ 提交到测试集并观察得分 $s_t$，再根据 $s_1,\dots,s_t$ 的反馈决定下一次尝试什么架构 $f_{t+1}$ 时，模型 $f_{t+1}$ 与测试集 $\mathcal{D}_{\text{test}}$ 之间已经建立了统计依赖！此时标准 Hoeffding 界失效，因为 $f_{t+1}$ 不再是独立于 $\mathcal{D}_{\text{test}}$ 的固定函数。经过几十轮甚至上百轮自适应试错，整个研究社区实际上在用梯度无导数优化的方式\textbf{直接拟合测试集的有限样本噪声}——原本洁净的测试集就这样悄无声息地退化成了泄漏的验证集。
+
+工程上对抗测试集过拟合的三大铁律是：（1）\textbf{物理锁定测试集}（开发阶段只动验证集，定稿前仅运行一次最终测试）；（2）\textbf{时间滚动基准}（如 LiveBench、SWE-bench 动态更新样本，切断静态数据记忆）；（3）\textbf{预注册实验协议}（在看测试结果前先写明主指标、统计检验方法与消融清单）。
+
+\section{受控消融实验、算力对齐基线与严谨评测流水线}
+
+统计检验只能回答“差异是否大于抽样噪声”，而不能回答“差异是不是由你声称的那个创新点引起的”。为了建立真正的\textbf{因果归因（Causal Attribution）}，必须依靠严谨的\textbf{受控消融实验（Controlled Ablation Study）}与\textbf{算力/调参预算对齐的基线（Compute-Matched Baselines）}。
+
+\subsection{单因素消融（OFAT）与析因交互陷阱}
+
+设你的完整方案包含两个新组件 $A$（例如残差连接）和 $B$（例如层归一化 LayerNorm），记二元指示变量 $x_A, x_B \in \{0,1\}$。性能响应曲面可分解为主效应与交互效应：
+\[
+  y(x_A, x_B) = \mu_0 + \beta_A x_A + \beta_B x_B + \beta_{AB} x_A x_B.
+\]
+\begin{itemize}
+  \item \textbf{单因素法（One-Factor-at-a-Time, OFAT）}：只测试 $(1,1)$、$(0,1)$、$(1,0)$ 三个点，通过 $y(1,1)-y(0,1) = \beta_A + \beta_{AB}$ 评估 $A$，通过 $y(1,1)-y(1,0) = \beta_B + \beta_{AB}$ 评估 $B$。如果存在强烈的\textbf{正向协同交互（$\beta_{AB} \gg 0$）}，你把 $(1,1)$ 去掉 $A$ 会暴跌，但你若从基线 $(0,0)$ 单独加 $A$（测 $(1,0)$），却可能几乎看不到增益——于是误判“$A$ 没用”！
+  \item \textbf{全析因设计（$2^k$ Factorial Design）}：当核心模块数 $k \le 3$ 时（至多 $8$ 组配置），应当跑全组合表，从而精确分离主效应 $\beta_A, \beta_B$ 与交互项 $\beta_{AB} = y(1,1) - y(1,0) - y(0,1) + y(0,0)$。第 6 章的 8 层深度网络复现实验将用真实代码验证残差与 LayerNorm 之间的强非线性交互。
+\end{itemize}
+
+\subsection{算力对齐与调参预算对等}
+
+在深度学习史上，许多轰动一时的“新架构碾压旧架构”论文事后都被证伪：Lucic 等人（NeurIPS 2018）在《Are GANs Created Equal?》中给经典 GAN 与当时五花八门的新型 GAN 分配完全相同的超参数搜索预算后，发现绝大多数“结构创新”并无显著优势；Melis 等人（ICLR 2018）给标准 LSTM 做好正则化调参后，同样追平了大量声称超越 LSTM 的复杂语言模型。
+
+因此，一条不可妥协的科研红线是\textbf{等预算对比原则（Equal-Budget Comparison）}：
+\begin{enumerate}
+  \item \textbf{训练算力（FLOPs / Wall-Clock）与参数量对齐}：若新方法增加了额外分支或推理步数，必须同时汇报算力/延迟，并给出同算力预算下放大基线的对照；
+  \item \textbf{超参数调优预算对齐}：如果你给自己的方法调了 $30$ 组学习率、权重衰减与 warmup，那么基线模型也必须享有同样 $30$ 组验证集超参搜索机会——拿“精调的己方模型”去打“论文默认超参的裸奔基线”，本质上是在评测你的调参努力，而非算法优劣。
+\end{enumerate}
+
+图 \ref{fig:eval-pipeline} 总结了现代顶会级 AI 研究的端到端严谨评测流水线。
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.99\linewidth}{!}{%
+  \begin{tikzpicture}[
+    node distance=6.5mm and 6.5mm,
+    stage/.style={
+      rectangle, rounded corners=2mm, draw=teal, thick, fill=tealLight,
+      text width=32mm, minimum height=17mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+    },
+    gate/.style={
+      rectangle, rounded corners=2mm, draw=ochre, thick, fill=ochreLight,
+      text width=32mm, minimum height=17mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+    },
+    arr/.style={-{Stealth[length=2.3mm]}, thick, tealDark},
+    lbl/.style={font=\sffamily\scriptsize, text=slate}
+  ]
+    \node[gate] (s1) {\textbf{\color{ochre}1. 物理锁死测试集}\\切分 Train/Val/Test\\预注册主指标与种子\\严禁开发期窥探};
+    \node[stage, right=of s1] (s2) {\textbf{2. 等预算多种子训练}\\相同 HPO 预算与算力\\固定 $K\ge 5$ 随机种子\\仅在 Val 选超参};
+    \node[stage, right=of s2] (s3) {\textbf{3. 配对统计推断}\\同一 Test 逐样本对齐\\配对 Bootstrap 95\% CI\\McNemar 精确检验};
+    \node[stage, right=of s3] (s4) {\textbf{4. 多重比较与审计}\\Holm--Bonferroni 校正\\析因消融与泄漏核查\\完整汇报均值 $\pm$ SD};
+
+    \draw[arr] (s1) -- (s2);
+    \draw[arr] (s2) -- (s3);
+    \draw[arr] (s3) -- (s4);
+
+    \draw[dashed, navy, thick, -{Stealth[length=2mm]}]
+      (s2.south) -- ++(0,-6.5mm) -| node[pos=0.25, below, lbl]{发现欠拟合或超参不佳：仅在验证集闭环迭代，绝不触碰测试集} ([xshift=-11mm]s2.south);
+  \end{tikzpicture}}
+  \caption{科学严谨的 AI 实验评测流水线：从物理锁定测试集、等预算多种子训练，到配对 Bootstrap/McNemar 检验与多重比较审计。}
+  \label{fig:eval-pipeline}
+\end{figure}
+
+\begin{failBox}{科研评测中的三大高发数值与方法陷阱}
+\begin{enumerate}
+  \item \textbf{用标准误（SE）冒充标准差（SD）写进表格}：跨 $K$ 个随机种子的样本标准差为 $s = \sqrt{\frac{1}{K-1}\sum_{k=1}^K (x_k - \bar{x})^2}$，而均值标准误为 $\mathrm{SE} = s / \sqrt{K}$。有些论文只写 $85.2 \pm 0.3$ 却不注明 $\pm$ 后面是 SD 还是 SE，实质上把波动幅度偷偷除以了 $\sqrt{K}$！规范做法是：\textbf{表格标题必须显式写明“均值 $\pm$ 标准差（$K$ 个种子）”或“95\% 配对 Bootstrap 置信区间”。}
+  \item \textbf{未固定种子与 GPU 非确定性归约}：即使调用了 \texttt{torch.manual\_seed}，PyTorch 中部分 CUDA 算子（如 \texttt{scatter\_add}、某些卷积反向传播）默认使用并行原子加（\texttt{atomicAdd}），浮点加法不满足结合律会导致每次运行末尾数字漂移。严格复现需同时设置 \texttt{torch.use\_deterministic\_algorithms(True)} 并关闭 \texttt{cudnn.benchmark}（同时记录其带来的少量速度代价）。
+  \item \textbf{只调己方超参、对比默认基线，或漏报失败种子}：挑剔掉发散的 1 个种子只算剩下 4 个种子的均值，同样构成严重的生存者偏置（Survivorship Bias）。发散率本身就是算法稳定性的重要评测指标，必须如实报告。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{Benjamini--Hochberg FDR 控制与贝叶斯分层检验}
+当同时检验的假设数量极其庞大（例如大语言模型跨 $M=100$ 个子任务评测，或神经元可解释性扫描数千个特征）时，控制族错误率（FWER，要求一次误报都不许发生）往往过于保守，导致大量真实信号被漏掉。此时学术界常用\textbf{错误发现率（False Discovery Rate, FDR）}——即“在所有被宣布显著的发现中，误报所占的期望比例”。
+
+\textbf{Benjamini--Hochberg（BH）过程}在检验独立或正回归相关（PRDS）时，将排序后的 $p$ 值与线性斜坡阈值比对：寻找\textbf{最大}的指标 $k^*$ 使得
+\[
+  P_{(k^*)} \le \frac{k^*}{M}\, q,
+\]
+然后拒绝 $H_{(1)},\dots,H_{(k^*)}$，即可严格保证 $\mathrm{FDR} \le q$（常取 $q=0.05$ 或 $0.10$）。
+
+另一条前沿路线是 Corani 等人（2017）倡导的\textbf{贝叶斯分层相关性检验（Bayesian Hierarchical Testing）}：它抛弃了脆弱的“点零假设 $H_0: \Delta = 0$”（在样本量极大时，哪怕毫无工程意义的 $+0.01\%$ 提升也会呈现 $p < 10^{-5}$），转而定义\textbf{实际等价区间（Region of Practical Equivalence, ROPE）}，例如 $[-0.5\%, +0.5\%]$，直接计算后验概率 $\Prob(\Delta > +0.5\% \mid \text{data})$、$\Prob(|\Delta| \le 0.5\% \mid \text{data})$ 与 $\Prob(\Delta < -0.5\% \mid \text{data})$，使“统计显著”与“工程有意义”清晰分离。
+\end{extBox}
+
+\section{本章小结与核心公式速查}
+
+本章打破了“单次测试分数越高就代表方法越好”的朴素错觉。我们证明了 Best-of-$K$ 择优如何按 $\sigma\sqrt{2\ln K}$ 的规律制造虚假增益，推导了配对评测通过协方差项消减题目难度方差的机理，并给出了 McNemar 检验与 Holm--Bonferroni 校正的完整证明。表 \ref{tab:ch1-summary} 汇总了本章高频核心公式与选用指南。
+
+\begin{table}[htbp]
+  \centering
+  \caption{第 1 章核心统计评测公式与使用条件速查}
+  \label{tab:ch1-summary}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{34mm}p{58mm}X@{}}
+    \toprule
+    \textbf{方法 / 定理} & \textbf{核心公式} & \textbf{适用场景与关键提醒} \\
+    \midrule
+    Best-of-$K$ 选择偏置 & $\E[\max_k \hat{p}_k] \lesssim p + \sqrt{\frac{2p(1-p)\ln K}{N}}$ & 量化多随机种子 / 多 checkpoint 择优的虚高幅度 \\
+    配对差值方差 & $\Var(\hat{p}_B-\hat{p}_A) = \frac{p_{01}+p_{10}-(p_{01}-p_{10})^2}{N}$ & 同一测试集比对两模型；消去共同题目难度方差 \\
+    配对 Bootstrap CI & $[\hat{\Delta}^{*}_{(\alpha/2)},\, \hat{\Delta}^{*}_{(1-\alpha/2)}]$（共享重采样索引） & 适用于任意复杂指标（F1/BLEU/AUROC/ECE） \\
+    McNemar 检验 & $\chi^2 = \frac{(|n_{01}-n_{10}|-1)^2}{n_{01}+n_{10}}$；$m<25$ 用二项精确检验 & 同一测试集二值对错对比，只依赖分歧样本对 \\
+    Holm--Bonferroni & 排序后逐级检验 $P_{(k)} \le \frac{\alpha}{M-k+1}$ & 多基准/多变体同时检验；无条件优于 Bonferroni \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{分层习题}
+
+\exTier{A 层}{概念核查与基础演练}
+
+\begin{enumerate}[label=\textbf{7.1.\arabic*}]
+  \item \textbf{（标准差、标准误与单种子泡沫）} 某论文在 $N=500$ 的测试集上报告模型 $A$ 为 $75.0\%$，模型 $B$ 为 $76.5\%$（单次运行，未做配对检验）。
+  \begin{enumerate}
+    \item 计算真实准确率 $p=0.75$ 时单次评估的二项标准差 $\sigma$；若研究者实际上跑了 $K=10$ 个种子并择优汇报，按次高斯界估计期望虚高上限是多少？
+    \item 另一篇论文跑了 $K=9$ 个种子，样本标准差 $s = 1.8\%$，却在表中写 $84.0 \pm 0.6$（标准误）。请解释为何这会误导读者，并给出正确规范的表述方式。
+  \end{enumerate}
+  \exHint{利用 $\sigma=\sqrt{p(1-p)/N}$ 与定理 \ref{thm:best-of-k}；注意 $\mathrm{SE} = s/\sqrt{K}$ 将区间缩窄了 $\sqrt{9}=3$ 倍。}
+
+  \item \textbf{（McNemar 检验手算与小样本情形）} 两个代码分类模型在同一份 $N=300$ 的测试集上比较：同时做对 $220$ 题，同时做错 $50$ 题；模型 $B$ 做对而 $A$ 做错 $n_{01}=22$ 题，模型 $A$ 做对而 $B$ 做错 $n_{10}=8$ 题。
+  \begin{enumerate}
+    \item 计算两模型各自的准确率与准确率差值；
+    \item 计算连续性校正 McNemar 统计量 $\chi^2_{\mathrm{McNemar}}$，并在 $\alpha=0.05$ 水平下给出统计结论（$\chi^2_{1,0.95}=3.841$）；
+    \item 若另一项实验中 $n_{01}=9, n_{10}=1$（$m=10 < 25$），请直接用二项公式计算精确双侧 $p$ 值。
+  \end{enumerate}
+  \exHint{第 (b) 问 $m=30 \ge 25$ 可用式 \eqref{eq:mcnemar-chi2}；第 (c) 问计算 $2\big(\binom{10}{9}+\binom{10}{10}\big)/2^{10}$。}
+\end{enumerate}
+
+\exTier{B 层}{数学推导与定理证明}
+
+\begin{enumerate}[label=\textbf{7.1.\arabic*}, start=3]
+  \item \textbf{（配对检验何时反而劣于非配对？）} 结合定理 \ref{thm:paired-var} 的方差分解公式 $\Var(\hat{p}_B-\hat{p}_A) = \Var(\hat{p}_B)+\Var(\hat{p}_A)-2\operatorname{Cov}(\hat{p}_A,\hat{p}_B)$：
+  \begin{enumerate}
+    \item 推导 $\operatorname{Cov}(a_i, b_i) > 0$ 的充要条件（用 $p_{11}, p_{10}, p_{01}, p_{00}$ 表示，形式应类似于行列式 $p_{11}p_{00} - p_{10}p_{01} > 0$）；
+    \item 构造一个极端反例（给出一组具体的 $(p_{11},p_{10},p_{01},p_{00})$），使得模型 $A$ 与 $B$ 呈负相关，从而配对评测方差反而大于独立非配对评测方差，并说明这种情形在现实中对应什么场景（例如互补专家模型）。
+  \end{enumerate}
+  \exHint{将 $p_{11} - (p_{11}+p_{10})(p_{11}+p_{01})$ 中 $1$ 替换为 $p_{11}+p_{10}+p_{01}+p_{00}$ 即可化简出 $p_{11}p_{00}-p_{10}p_{01}$。}
+
+  \item \textbf{（Holm--Bonferroni 与单步 \v{S}id\'ak 校正比较）} 在 $M$ 个\textbf{相互独立}的真零假设下，考虑 \v{S}id\'ak 校正阈值 $\alpha_{\text{Sidak}} = 1 - (1-\alpha)^{1/M}$。
+  \begin{enumerate}
+    \item 证明在独立性假设下，\v{S}id\'ak 校正精确满足 $\mathrm{FWER} = \alpha$；
+    \item 利用伯努利不等式证明 $\alpha_{\text{Sidak}} > \alpha / M$（对所有 $M \ge 2, \alpha \in (0,1)$）；
+    \item 举出一个两检验强负相关（或构造联合分布）的反例，说明为何当检验不独立时，Bonferroni 仍安全而 \v{S}id\'ak 可能超过名义水平 $\alpha$。
+  \end{enumerate}
+  \exHint{对第 (c) 问，令 $M=2$，令 $P_1 \sim \mathrm{Unif}[0,1]$ 且 $P_2 = 1 - P_1$，考察事件 $\{P_1 \le \alpha_{\text{Sidak}}\} \cup \{P_2 \le \alpha_{\text{Sidak}}\}$ 的并集概率！}
+\end{enumerate}
+
+\exTier{C 层}{算法分析与编程实验}
+
+\begin{enumerate}[label=\textbf{7.1.\arabic*}, start=5]
+  \item \textbf{（复现并拓展 Best-of-$K$ 曲线）} 修改 \texttt{code/vol7\_experiments.py} 中的 \texttt{exp1}：固定 $p = 0.80$，分别取测试集规模 $N \in \{100, 200, 1000, 5000\}$，绘制 $K \in [1, 30]$ 时 $\E[\max_k \hat{p}_k] - p$ 的曲线，并与理论次高斯上界 $\sqrt{\frac{2p(1-p)\ln K}{N}}$ 同图对比。定量回答：当需要把 $K=20$ 择优偏置压到 $+1\%$ 以内时，测试集至少需要多大？
+  \exHint{从 $\sigma \cdot 1.867 \le 0.01$ 反解 $N \ge 0.16 \times (1.867 / 0.01)^2$，再用模拟脚本核验。}
+
+  \item \textbf{（实现 Holm--Bonferroni 与 BH-FDR 审计器）} 编写一个可复用的 Python 函数 \texttt{adjust\_pvalues}（接受参数 \texttt{pvals}、\texttt{alpha=0.05} 与 \texttt{method}），同时支持 \texttt{"bonferroni"}、\texttt{"holm"} 与 \texttt{"bh"} 三种模式，并返回校正后 $p$ 值及拒绝掩码。在一个包含 $M=50$ 个假设（其中 $40$ 个为真零假设 $P_i \sim \mathrm{Unif}[0,1]$，$10$ 个为强信号 $P_i \sim \operatorname{Beta}(0.3, 10)$）的蒙特卡洛模拟（$2000$ 次重复）中，实测并比较三种方法的经验 FWER、经验 FDR 与真信号召回率（Power）。
+  \exHint{实现 Holm 校正后 $p$ 值时注意保持单调不减：$p^{\text{adj}}_{(k)} = \min\big(1,\, \max_{j \le k} (M-j+1)p_{(j)}\big)$；BH 则从后往前取累积最小值。}
+\end{enumerate}
+
+\exTier{D 层}{开放探究与科研实战}
+
+\begin{enumerate}[label=\textbf{7.1.\arabic*}, start=7]
+  \item \textbf{（两阶段方差分解：数据抽样方差 vs 训练随机性方差）} 实际深度学习评测包含两重随机性：训练阶段的随机性 $\omega$（初始化、批次顺序）与测试集的有限样本随机性 $\mathcal{D}_{\text{test}}$。设 $Y_{k,i} \in \{0,1\}$ 表示第 $k$ 个训练种子（$k=1,\dots,K$）在第 $i$ 条测试样本（$i=1,\dots,N$）上的正确指示。请设计一套\textbf{双层嵌套 Bootstrap（Nested / Hierarchical Bootstrap）}算法，同时捕捉训练种子波动与测试集抽样波动，并分析当 $K=3, N=10000$ 与 $K=20, N=200$ 时，哪一项方差占主导。
+  \exHint{利用全方差公式 $\Var(\bar{Y}) = \E[\Var(\bar{Y}\mid \omega)] + \Var(\E[\bar{Y}\mid \omega])$；嵌套重采样需先对种子索引有放回重采样，再对测试样本索引有放回重采样。}
+
+  \item \textbf{（审稿人视角：诊断一份“疑似刷榜”的实验表格）} 假设你在审阅一篇顶会投稿，作者在 6 个公开 NLP 数据集上与 3 个基线对比，主表报告了“5 次运行中的最佳得分”，未报告标准差与 $p$ 值；此外，作者在消融表中只展示了完整模型减去单个模块的结果，且基线直接抄录自原论文 2022 年的旧数字（当时未启用余弦退火与 AdamW）。请以严谨审稿人的口吻撰写一份 5 条具体且可执行的修改意见（Rebuttal 要求），涵盖统计检验、多重比较、超参公平性与析因消融。
+  \exHint{逐条对应本章的四个支柱：反对 Best-of-5 择优、要求配对 Bootstrap/McNemar 与 Holm 校正、要求在统一代码库与相同优化器下重跑基线、指出 OFAT 忽略交互项。}
+\end{enumerate}

@@ -1,0 +1,578 @@
+\chapter[统计学习：偏差-方差与泛化界]{统计学习：偏差-方差分解与泛化理论}\label{ch:v4-stat-learning}
+
+\chapEpigraph{在解决给定问题时，尽量不要把解决一个更一般的问题作为中间步骤。}{Vladimir N. Vapnik（《统计学习理论的本质》）}
+
+\begin{chapIntro}{本章导读：优化解得再准，为什么在测试集上仍可能一败涂地？}
+前两章赋予了我们强大的最优化武器：给定任何一个凸目标函数，我们已经能精确分析它的收敛率并用加速算法或近端算子求解到机器精度。然而，机器学习与纯数值优化之间横亘着一条决定生死的分界线——\textbf{我们真正关心的不是在已见训练样本上把损失压到 $0$，而是在从未见过的未来样本上依然表现优异（泛化，Generalization）！}
+
+本章将建立统领所有经典与现代机器学习的统计学习框架：
+\begin{enumerate}
+  \item 辨析\textbf{经验风险}与\textbf{期望泛化风险}，揭穿“零训练误差”的幻觉；
+  \item 严格证明回归问题的\textbf{偏差-方差-噪声精确分解定理}，并用 400 次蒙特卡洛实验亲眼看到 U 形泛化曲线的每一笔拆解；
+  \item 将第 2 章的拉格朗日对偶直接桥接到\textbf{正则化理论}，从 SVD 谱收缩与 $L_1/L_2$ 几何剖析岭回归与 Lasso 抑制方差的机理；
+  \item 掌握\textbf{$K$ 折交叉验证、数据泄露排错与学习曲线诊断法}；
+  \item 借助第 2 卷 Hoeffding 不等式严格证明\textbf{有限假设空间 PAC 泛化界与样本复杂度}，并建立无限假设空间的 \textbf{VC 维}直觉，最后远眺现代深度学习中的 Rademacher 复杂度与“双下降”现象。
+\end{enumerate}
+\end{chapIntro}
+
+% ============================================================
+\section{经验风险与期望风险：为什么“零训练误差”往往是灾难？}
+% ============================================================
+
+在统计学习理论的数学模型中，我们假设输入-输出对 $(x, y) \in \mathcal{X} \times \mathcal{Y}$ 服从某个\textbf{未知}的联合概率分布 $\mathcal{P}(X, Y)$。学习算法手头仅有一份从 $\mathcal{P}$ 中独立同分布（i.i.d.）抽取的有限训练集 $\mathcal{D} = \{(x_1, y_1), \dots, (x_N, y_N)\}$，并需在预先选定的\textbf{假设空间（Hypothesis Space）} $\mathcal{H}$ 中挑选一个预测函数 $h: \mathcal{X} \to \mathcal{Y}$。
+
+给定非负损失函数 $\ell(h(x), y)$（如分类的 0-1 损失 $\mathbb{I}[h(x)\neq y]$ 或回归的平方损失 $(h(x)-y)^2$），我们必须严格区分两个截然不同的量：
+
+\begin{defBox}
+\begin{definition}[期望风险、经验风险与贝叶斯最优风险]\label{def:v4-risks}
+\begin{enumerate}
+  \item \textbf{期望风险 / 总体风险（Population Risk）}：假设 $h$ 在真实分布 $\mathcal{P}$ 上的期望损失，是我们\emph{真正想最小化却无法直接计算}的黄金标准：
+  \[
+    R(h) \coloneqq \E_{(x, y) \sim \mathcal{P}}\big[\ell(h(x), y)\big].
+  \]
+  \item \textbf{经验风险（Empirical Risk）}：假设 $h$ 在有限训练集 $\mathcal{D}$ 上的平均损失，是我们在算法中实际能算出来的代理目标：
+  \[
+    R_{\mathrm{emp}}(h) \coloneqq \frac{1}{N}\sum_{i=1}^N \ell\big(h(x_i), y_i\big).
+  \]
+  \item \textbf{贝叶斯最优风险（Bayes Risk）}：在一切可测函数上所能达到的理论最低误差 $R^* \coloneqq \inf_{h} R(h)$。由于真实世界存在固有随机噪声，通常有 $R^* > 0$。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+如果我们不加节制地执行\textbf{经验风险最小化（ERM）} $\hat{h}_{\mathrm{ERM}} = \argmin_{h \in \mathcal{H}} R_{\mathrm{emp}}(h)$ 且放任假设空间 $\mathcal{H}$ 无限庞大，就会立刻掉进\textbf{死记硬背陷阱}：构造一个“查表记忆器”——只要输入 $x$ 等于某个训练样本 $x_i$，就原封不动输出 $y_i$，否则一律瞎猜 $0$。它在训练集上的经验风险精确等于 $R_{\mathrm{emp}} = 0$，但在连续空间的新测试点上几乎处处瞎猜，泛化风险接近灾难性的随机猜测！
+
+类似地，在含噪一维回归中，用 $N-1$ 次多项式总能精确穿过全部 $N$ 个含噪数据点（$R_{\mathrm{emp}} = 0$），但在数据点之间剧烈振荡（Runge 现象），在测试集上误差暴涨。由此可见，一个模型的总泛化误差由两股彼此博弈的力量决定：\textbf{模型太简单学不会真规律（欠拟合），还是模型太灵活记住了随机噪声（过拟合）？} 在平方损失下，这一直觉可以升华为一条精确到小数点后任意一位的代数恒等式。
+
+% ============================================================
+\section{偏差-方差-噪声精确分解定理与实测验证}
+% ============================================================
+
+\subsection{核心定理与完整代数证明}
+
+假设数据由确定性真实规律 $f(x)$ 叠加零均值独立观测噪声生成：
+\[
+  y = f(x) + \varepsilon, \qquad \E[\varepsilon] = 0, \qquad \Var(\varepsilon) = \E[\varepsilon^2] = \sigma^2.
+\]
+固定一个学习算法，当我们在随机抽取的训练集 $\mathcal{D}$ 上训练它时，学到的预测函数记为 $\hat{f}_{\mathcal{D}}(x)$——请注意，\textbf{由于 $\mathcal{D}$ 本身是随机抽取的，对任意固定的测试点 $x$，预测值 $\hat{f}_{\mathcal{D}}(x)$ 是一个随机变量！} 记它在所有可能训练集上的平均预测为
+\[
+  \bar{f}(x) \coloneqq \E_{\mathcal{D}}\big[\hat{f}_{\mathcal{D}}(x)\big],
+\]
+且测试点噪声 $\varepsilon$ 与训练集 $\mathcal{D}$ 相互独立。下面的定理把期望测试均方误差（MSE）天衣无缝地一分为三。
+
+\begin{thmBox}
+\begin{theorem}[偏差-方差-噪声精确分解定理]\label{thm:v4-bias-var}
+在测试点 $x$ 处，预测模型 $\hat{f}_{\mathcal{D}}(x)$ 对新观测 $y = f(x) + \varepsilon$ 的期望均方误差精确分解为三项非负之和：
+\begin{equation}\label{eq:v4-bv-decomp}
+  \E_{\mathcal{D}, \varepsilon}\Big[\big(y - \hat{f}_{\mathcal{D}}(x)\big)^2\Big]
+  = \underbrace{\big(\bar{f}(x) - f(x)\big)^2}_{\Bias^2(\hat{f}(x))}
+  + \underbrace{\E_{\mathcal{D}}\Big[\big(\hat{f}_{\mathcal{D}}(x) - \bar{f}(x)\big)^2\Big]}_{\Var(\hat{f}(x))}
+  + \underbrace{\sigma^2}_{\text{不可约噪声}}.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+为书写简明，以下记 $f = f(x)$、$\hat{f} = \hat{f}_{\mathcal{D}}(x)$、$\bar{f} = \E_{\mathcal{D}}[\hat{f}]$（注意固定 $x$ 后 $f$ 与 $\bar{f}$ 均为确定常数，只有 $\hat{f}$ 依赖 $\mathcal{D}$、$\varepsilon$ 依赖测试噪声）。
+
+\textbf{第一步：分离不可约噪声 $\varepsilon$。} 代入 $y = f + \varepsilon$ 并展开平方：
+\begin{align*}
+  \E_{\mathcal{D}, \varepsilon}\big[(y - \hat{f})^2\big]
+  &= \E_{\mathcal{D}, \varepsilon}\big[(f - \hat{f} + \varepsilon)^2\big] \\
+  &= \E_{\mathcal{D}}\big[(f - \hat{f})^2\big] + 2\,\E_{\mathcal{D}, \varepsilon}\big[(f - \hat{f})\,\varepsilon\big] + \E_{\varepsilon}[\varepsilon^2].
+\end{align*}
+因为测试噪声 $\varepsilon$ 与训练集 $\mathcal{D}$ 独立，且 $\E[\varepsilon] = 0$，第一个交叉项精确归零：
+\[
+  \E_{\mathcal{D}, \varepsilon}\big[(f - \hat{f})\,\varepsilon\big] = \E_{\mathcal{D}}[f - \hat{f}] \cdot \underbrace{\E_{\varepsilon}[\varepsilon]}_{= 0} = 0.
+\]
+而 $\E_{\varepsilon}[\varepsilon^2] = \Var(\varepsilon) + (\E[\varepsilon])^2 = \sigma^2$，因此
+\begin{equation}\label{eq:v4-bv-step1}
+  \E_{\mathcal{D}, \varepsilon}\big[(y - \hat{f})^2\big] = \E_{\mathcal{D}}\big[(f - \hat{f})^2\big] + \sigma^2.
+\end{equation}
+
+\textbf{第二步：插入平均预测 $\bar{f}$ 分离偏差与方差。} 在 $\E_{\mathcal{D}}[(f - \hat{f})^2]$ 中一加一减常数 $\bar{f}$ 并展开：
+\begin{align*}
+  \E_{\mathcal{D}}\big[(f - \hat{f})^2\big]
+  &= \E_{\mathcal{D}}\Big[\big((f - \bar{f}) + (\bar{f} - \hat{f})\big)^2\Big] \\
+  &= \E_{\mathcal{D}}\big[(f - \bar{f})^2\big] + 2\,\E_{\mathcal{D}}\big[(f - \bar{f})(\bar{f} - \hat{f})\big] + \E_{\mathcal{D}}\big[(\bar{f} - \hat{f})^2\big].
+\end{align*}
+观察三项：
+\begin{itemize}
+  \item 第一项中 $f - \bar{f}$ 是确定常数，直接走出期望得 $(\bar{f} - f)^2 = \Bias^2(\hat{f})$；
+  \item 第二项中将常数 $f - \bar{f}$ 提到期望之外，利用 $\bar{f} = \E_{\mathcal{D}}[\hat{f}]$，第二个交叉项再次精确归零：
+  \[
+    2(f - \bar{f})\,\E_{\mathcal{D}}[\bar{f} - \hat{f}] = 2(f - \bar{f})\big(\bar{f} - \E_{\mathcal{D}}[\hat{f}]\big) = 0;
+  \]
+  \item 第三项正是随机变量 $\hat{f}$ 的方差定义 $\Var(\hat{f}) = \E_{\mathcal{D}}[(\hat{f} - \bar{f})^2]$。
+\end{itemize}
+将第二步代回式~\eqref{eq:v4-bv-step1}，即证得精确分解式~\eqref{eq:v4-bv-decomp}！
+\end{proof}
+
+定理~\ref{thm:v4-bias-var} 的三项各司其职，给出了打靶般的清晰直觉：
+\begin{itemize}
+  \item \textbf{平方偏差 $\Bias^2$}：平均预测 $\bar{f}(x)$ 距离真实目标 $f(x)$ 的系统性偏离（瞄准镜歪了）。模型越简单（如用直线拟合正弦波），偏差越大。
+  \item \textbf{方差 $\Var$}：换一批训练数据，模型预测 $\hat{f}_{\mathcal{D}}(x)$ 上下剧烈摇摆的离散程度（手抖得厉害）。模型越复杂、参数越多或样本越少，方差越大。
+  \item \textbf{不可约噪声 $\sigma^2$}：数据生成过程自带的固有随机性（即贝叶斯风险 $R^*$），任何模型都无法突破这道物理底线。
+\end{itemize}
+
+\subsection{实测验证：400 次多项式回归的 U 形曲线精确拆解}
+
+为了让学生不再只看教科书里的“概念示意图”，我们在配套脚本 \texttt{vol4\_experiments.py} 的实验 3 中直接做了 400 轮真实蒙特卡洛仿真：
+\begin{itemize}
+  \item 真实函数 $f(x) = \sin(2\pi x)$，观测噪声标准差 $\sigma = 0.30$（因此理论不可约噪声严格等于 $\sigma^2 = 0.0900$）。
+  \item 每一轮独立抽取 $n = 22$ 个含噪训练样本，用普通最小二乘法分别拟合阶数 $d = 1, 2, \dots, 9$ 的多项式模型，并在 $[0.05, 0.95]$ 的 50 个测试网格点上评估。
+  \item 对全部 400 轮预测按定义计算经验 $\Bias^2$、$\Var$、$\sigma^2$ 与总误差，并将结果导出至 \texttt{data/bias\_var.csv}。
+\end{itemize}
+
+\begin{lstlisting}[caption={400 轮蒙特卡洛多项式回归偏差-方差分解（节选自 \texttt{vol4\_experiments.py}）},label={lst:v4-ch3-bv}]
+for d in range(1, 10):
+    preds = np.zeros((400, len(x_te)))
+    A_te = np.column_stack([x_te ** k for k in range(d + 1)])
+    for k in range(400):
+        x_tr = np.clip(x_grid + rng.uniform(-0.02, 0.02, size=22), 0.0, 1.0)
+        y_tr = np.sin(2.0 * np.pi * x_tr) + rng.normal(0.0, 0.30, size=22)
+        A_tr = np.column_stack([x_tr ** j for j in range(d + 1)])
+        w, *_ = np.linalg.lstsq(A_tr, y_tr, rcond=None)
+        preds[k] = A_te @ w
+    bias2 = float(np.mean((preds.mean(axis=0) - f_te) ** 2))
+    var = float(np.mean(np.var(preds, axis=0)))
+    total = bias2 + var + 0.30 ** 2
+\end{lstlisting}
+
+图~\ref{fig:v4-ch3-bv} 与表~\ref{tab:v4-ch3-bv} 直接读取 \texttt{data/bias\_var.csv}，呈现了极其纯粹的偏差-方差权衡 U 形曲线。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.92\linewidth,
+  height=6.7cm,
+  xlabel={多项式阶数 $d$（模型复杂度）},
+  ylabel={测试均方误差（MSE）分解},
+  xmin=0.8, xmax=9.2,
+  xtick={1,2,3,4,5,6,7,8,9},
+  ymin=-0.007, ymax=0.285,
+  scaled y ticks=false,
+  yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
+  grid=both,
+  major grid style={tealLine!45, line width=0.4pt},
+  axis line style={slate!80},
+  tick label style={font=\footnotesize\sffamily, color=ink},
+  label style={font=\small\sffamily, color=ink},
+  legend style={
+    at={(0.98,0.97)}, anchor=north east,
+    fill=white, draw=tealLine, rounded corners=1.2mm,
+    font=\footnotesize\sffamily, cells={anchor=west}
+  },
+  every axis plot/.append style={line width=1.5pt}
+]
+  % Minimum annotation at deg=3
+  \addplot[gold, thick, dotted, forget plot] coordinates {(3,0) (3,0.285)};
+  \node[font=\scriptsize\sffamily, color=gold!85!ink, anchor=south west, fill=white, inner sep=1.5pt]
+    at (axis cs:3.12, 0.145) {最优点 $d=3$（$\mathrm{Total}=0.1073$）};
+
+  \addplot[color=tealDark, mark=*, mark size=1.8pt]
+    table[x=deg, y=total, col sep=comma]{data/bias_var.csv};
+  \addlegendentry{总测试 MSE（$\Bias^2 + \Var + \sigma^2$）}
+
+  \addplot[color=ochre, mark=square*, mark size=1.6pt]
+    table[x=deg, y=bias2, col sep=comma]{data/bias_var.csv};
+  \addlegendentry{平方偏差 $\Bias^2$}
+
+  \addplot[color=navy, mark=triangle*, mark size=1.9pt]
+    table[x=deg, y=var, col sep=comma]{data/bias_var.csv};
+  \addlegendentry{模型方差 $\Var$}
+
+  \addplot[color=slate, dashed, line width=1.1pt]
+    table[x=deg, y=noise, col sep=comma]{data/bias_var.csv};
+  \addlegendentry{不可约噪声 $\sigma^2 = 0.0900$}
+\end{axis}
+\end{tikzpicture}
+\caption{含噪 $\sin(2\pi x)$（$\sigma=0.30, n=22$）上 400 轮实测偏差-方差-噪声分解（读取自 \texttt{data/bias\_var.csv}）。当 $d=1, 2$ 时平方偏差高达 $0.159$（严重欠拟合）；在 $d=3$ 处三次多项式首次捕捉正弦波的反对称拐点，$\Bias^2$ 断崖跌至 $0.0035$，总误差触底 $0.1073$；继续增至 $d=9$，$\Bias^2$ 几乎为零但方差从 $0.0079$ 飙升近五倍至 $0.0383$，总误差重新抬头！}\label{fig:v4-ch3-bv}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{多项式阶数 $d$ 对应的实测 $\Bias^2$、$\Var$ 与总误差（\texttt{data/bias\_var.csv}）}\label{tab:v4-ch3-bv}
+\small
+\begin{tabular}{@{}rcccc@{}}
+\toprule
+\textbf{多项式阶数 $d$} & \textbf{平方偏差 $\Bias^2$} & \textbf{模型方差 $\Var$} & \textbf{不可约噪声 $\sigma^2$} & \textbf{总测试 MSE} \\
+\midrule
+$1$ & $0.1591$ & $0.0079$ & $0.0900$ & $0.2570$ \\
+$2$ & $0.1592$ & $0.0113$ & $0.0900$ & $0.2605$ \\
+\textbf{$3$（最优）} & $\mathbf{0.0035}$ & $\mathbf{0.0138}$ & $0.0900$ & $\mathbf{0.1073}$ \\
+$5$ & $0.0001$ & $0.0193$ & $0.0900$ & $0.1094$ \\
+$7$ & $0.0001$ & $0.0277$ & $0.0900$ & $0.1178$ \\
+$9$ & $0.0001$ & $0.0383$ & $0.0900$ & $0.1284$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+顺带欣赏一个令人拍案的数学彩蛋：为什么 $d=2$ 相比 $d=1$ 丝毫没有降低偏差（$\Bias^2$ 停在 $0.1592$），总误差反而因方差微增而变差了？因为真函数 $\sin(2\pi x)$ 关于区间中点 $x = 0.5$ 是\textbf{奇对称函数}，任何偶次抛物线 $(x-0.5)^2$ 与它在 $[0, 1]$ 上都正交，对逼近毫无帮助；直到 $d=3$ 引入奇次项 $(x-0.5)^3$，偏差才瞬间雪崩！这提醒我们：\textbf{盲目堆参数未必降低偏差，模型结构与问题对称性的匹配才是关键。}
+
+% ============================================================
+\section{正则化的对偶本质与岭回归 vs Lasso 的权衡}
+% ============================================================
+
+当模型特征维数较高（高方差）时，我们不必粗暴地删减特征或手动限制多项式阶数，而是通过\textbf{正则化（Regularization）}向优化目标注入先验平滑性，用极小的偏差增量换取方差的大幅跳水。
+
+\subsection{从第 2 章拉格朗日对偶看“约束形式”与“惩罚形式”的等价性}
+
+考虑带范数球约束的经验风险最小化问题（$p \in \{1, 2\}$，约束半径 $C > 0$）：
+\begin{equation}\label{eq:v4-reg-constrained}
+  \min_{w \in \R^D}\; R_{\mathrm{emp}}(w) \qquad\text{s.t.}\qquad \norm{w}_p^p \le C.
+\end{equation}
+若 $R_{\mathrm{emp}}(w)$ 为凸函数，且 $C > 0$（从而 $w = 0$ 满足 $\norm{0}_p^p = 0 < C$，严格满足第 2 章定理~\ref{thm:v4-slater} 的 Slater 条件！），则强对偶成立。写出其拉格朗日函数：
+\[
+  \mathcal{L}(w, \lambda) = R_{\mathrm{emp}}(w) + \lambda\big(\norm{w}_p^p - C\big), \qquad \lambda \ge 0.
+\]
+固定对偶最优乘子 $\lambda^* \ge 0$ 后，由 KKT 定理~\ref{thm:v4-kkt-thm}，原始最优解 $w^*$ 必同时最小化无约束的\textbf{惩罚形式目标（Penalized ERM）}：
+\begin{equation}\label{eq:v4-reg-penalized}
+  \min_{w \in \R^D}\; R_{\mathrm{emp}}(w) + \lambda^*\norm{w}_p^p.
+\end{equation}
+这在理论上彻底打通了第 2 章与第 3 章：\textbf{增大惩罚系数 $\lambda$，在几何上严格等价于把图~\ref{fig:v4-l1-prox}(a) 中的 $\ell_1$ 菱形或 $\ell_2$ 圆球半径 $C$ 向原点收紧！}
+
+\subsection{岭回归（Ridge, $L_2$）的 SVD 谱收缩与显式降方差证明}
+
+对最小二乘回归加上 $L_2$ 正则化，即得\textbf{岭回归（Ridge Regression）}：
+\[
+  \hat{w}_{\mathrm{ridge}}(\lambda) = \argmin_{w \in \R^D} \Big\{\norm{Xw - y}_2^2 + \lambda\norm{w}_2^2\Big\} = (X^\top X + \lambda I_D)^{-1} X^\top y.
+\]
+对设计矩阵 $X \in \R^{N\times D}$ 做瘦奇异值分解 $X = U \Sigma V^\top$（其中 $U^\top U = I_r,\; V^\top V = I_r,\; \Sigma = \diag(\sigma_1, \dots, \sigma_r)$，设 $X$ 列满秩 $r = D$）。代入 $X^\top X = V \Sigma^2 V^\top$，可将拟合值与估计器在奇异基 $V = [v_1, \dots, v_D]$ 下彻底对角化：
+\begin{equation}\label{eq:v4-ridge-svd}
+  \hat{w}_{\mathrm{ridge}}(\lambda) = \sum_{j=1}^D \underbrace{\frac{\sigma_j^2}{\sigma_j^2 + \lambda}}_{\text{谱收缩因子}\;\in (0, 1)} \frac{u_j^\top y}{\sigma_j}\, v_j.
+\end{equation}
+设真实数据满足 $y = X w_{\text{true}} + \varepsilon$（$\E[\varepsilon] = 0,\; \Cov(\varepsilon) = \sigma^2 I_N$）。直接由式~\eqref{eq:v4-ridge-svd} 算出估计误差的精确方差与偏差（对比 $\lambda = 0$ 时的 OLS）：
+\begin{align}
+  \text{OLS 总方差：}&\quad \tr\big(\Cov(\hat{w}_{\mathrm{OLS}})\big) = \sigma^2 \sum_{j=1}^D \frac{1}{\sigma_j^2}, \label{eq:v4-ols-var} \\
+  \text{Ridge 总方差：}&\quad \tr\big(\Cov(\hat{w}_{\mathrm{ridge}})\big) = \sigma^2 \sum_{j=1}^D \frac{\sigma_j^2}{(\sigma_j^2 + \lambda)^2}, \label{eq:v4-ridge-var} \\
+  \text{Ridge 平方偏差：}&\quad \norm{\E[\hat{w}_{\mathrm{ridge}}] - w_{\text{true}}}_2^2 = \sum_{j=1}^D \left(\frac{\lambda}{\sigma_j^2 + \lambda}\right)^2 (v_j^\top w_{\text{true}})^2. \label{eq:v4-ridge-bias}
+\end{align}
+看清这组公式的惊人威力了吗？当特征之间存在严重共线性时，某些奇异值 $\sigma_j \approx 0$：在 OLS 式~\eqref{eq:v4-ols-var} 中，$\frac{1}{\sigma_j^2}$ 会爆炸式放大噪声，导致方差失控；而岭回归在分母加上 $\lambda > 0$ 后，收缩因子 $\frac{\sigma_j^2}{\sigma_j^2+\lambda}$ 自动对微弱奇异方向施以重拳压制（方差大幅缩水），同时对信号强劲的主奇异方向（$\sigma_j^2 \gg \lambda$）几乎保持原样（偏差极小）！
+
+\begin{table}[htbp]
+\centering
+\caption{岭回归（$L_2$）与 Lasso（$L_1$）正则化的多维对比}\label{tab:v4-ridge-lasso}
+\small
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+\textbf{维度} & \textbf{岭回归（Ridge, $\lambda\norm{w}_2^2$）} & \textbf{Lasso（$\lambda\norm{w}_1$）} \\
+\midrule
+约束域几何 & 光滑超球面（图~\ref{fig:v4-l1-prox}(a) 虚线圆） & 带坐标轴尖角的超菱形（图~\ref{fig:v4-l1-prox}(a) 实线菱形） \\
+稀疏性 & 权重平滑收缩趋近零，但几乎不精确为零 & 自动产出精确零解，兼具\textbf{特征选择}功能 \\
+最优解形式 & 闭式解 $(X^\top X + \lambda I)^{-1}X^\top y$，严格强凸 & 无一般闭式解，用第 2 章近端梯度 ISTA/FISTA 求解 \\
+相关特征组 & 倾向于将权重均匀分摊给高度相关特征 & 倾向于挑出一个代表特征，把其余相关特征归零 \\
+适用场景 & 多数特征均有贡献、存在多重共线性 & 高维稀疏信号、需精简特征提升可解释性 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================
+\section{模型选择、$K$ 折交叉验证与学习曲线诊断}
+% ============================================================
+
+正则化系数 $\lambda$、多项式阶数 $d$ 或第 4--5 章的核带宽 $\gamma$ 与树深度，统称为\textbf{超参数（Hyperparameters）}——它们无法靠最小化训练集经验风险来选（因为训练集永远偏爱 $\lambda = 0$ 或无限深的树！）。科学地选择模型与诊断问题，是工程实践中最值钱的基本功。
+
+\subsection{三集合划分与 $K$ 折交叉验证}
+
+\begin{enumerate}
+  \item \textbf{严格三集合划分（Train / Validation / Test）}：
+  \begin{itemize}
+    \item \textbf{训练集（Training Set）}：仅用来拟合模型参数 $w$；
+    \item \textbf{验证集（Validation Set）}：用来评估候选超参数（如不同 $\lambda$ 或不同模型族）并做最终模型选择；
+    \item \textbf{测试集（Test Set）}：锁进“保险箱”，在所有调参和模型定型\textbf{彻底结束}之后，只评估一次，以获得对真实泛化误差 $R(h)$ 的无偏估计。
+  \end{itemize}
+  \item \textbf{$K$ 折交叉验证（$K$-Fold Cross-Validation）}：当总样本量不大（例如几百到几千）时，单次划出验证集既浪费训练数据，又可能因划分运气带来高方差。$K$ 折交叉验证将全部非测试数据随机均分为 $K$ 份（工程常取 $K = 5$ 或 $10$）：轮流取第 $k$ 份作验证、其余 $K-1$ 份作训练，最后取 $K$ 轮验证误差的平均值作为该超参数的评分。其极限情形 $K = N$ 称为\textbf{留一法（LOOCV）}——偏差极小，但计算代价为 $N$ 倍训练（线性回归有闭式捷径）且各折训练集高度重叠导致估计方差偏大，故实践中 $K = 5$ 或 $10$ 是偏差与方差的最佳折中。
+\end{enumerate}
+
+\begin{failBox}{机器学习最隐蔽的“自欺欺人”：数据泄露（Data Leakage）三大典型案例}
+哪怕写了严格的 $K$ 折交叉验证，只要下面三件事中做错了一件，你的验证集分数就会虚高得离谱、上线后立刻崩盘：
+\begin{enumerate}
+  \item \textbf{划分之前先做全局标准化或缺失值填充}：用全数据集（含验证集）算出特征均值 $\mu_{\text{all}}$ 与标准差 $\sigma_{\text{all}}$ 去归一化，把未来测试分布的信息提前泄漏进了训练过程！正确做法：\textbf{只在当前折的训练集上 \texttt{fit} 均值方差，再 \texttt{transform} 验证集。}
+  \item \textbf{交叉验证之外先做全量特征筛选}：在 10{,}000 个纯噪声特征里，先用全部样本挑出与标签 $y$ 相关性最高的 10 个特征，再跑 5 折 CV——哪怕 $y$ 完全是抛硬币随机生成的，CV 准确率也能骗出 $85\%$ 以上！特征选择、PCA 降维都必须严密封装在每一折的训练 Pipeline 内部。
+  \item \textbf{时间序列随机打乱划分}：对股票、气温或用户行为日志随机做 $K$ 折划分，等于用“明天的数据”去预测“今天”，属于严重的时间穿越泄露，必须采用按时间向前的\textbf{滚动时间窗验证}。
+\end{enumerate}
+\end{failBox}
+
+\subsection{学习曲线：一眼确诊“高偏差”还是“高方差”}
+
+面对一个验证误差不理想的模型，新手常盲目尝试“多采集数据”或“换更大模型”，结果事倍功半。绘制\textbf{学习曲线（Learning Curves）}——即随着训练样本量 $N$ 增大，训练误差与验证误差的演变轨迹——能像医院的 X 光片一样精准开方（见图~\ref{fig:v4-learning-curves}）：
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.95, >=Stealth]
+  % ===== Left Panel: High Bias (Underfitting) =====
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\small\sffamily\bfseries, color=ochre] at (2.85, 4.35) {(a) 高偏差（欠拟合）：双双高位收敛};
+    \draw[->, slate!80] (0,0) -- (5.8,0) node[right, font=\footnotesize\sffamily] {$N$};
+    \draw[->, slate!80] (0,0) -- (0,3.85) node[left, font=\footnotesize\sffamily, yshift=-2pt] {误差};
+
+    % Desired / Bayes baseline
+    \draw[slate!70, dashed, thick] (0, 0.75) -- (5.5, 0.75);
+    \node[right, font=\scriptsize\sffamily, color=slate] at (3.25, 0.48) {期望 / 贝叶斯底线 $R^*$};
+
+    % Validation curve: starts high, plateaus high at ~2.55
+    \draw[ochre, line width=1.6pt]
+      (0.4, 3.45) .. controls (1.4, 2.75) and (2.6, 2.60) .. (5.4, 2.55);
+    \node[ochre, font=\scriptsize\sffamily, above] at (4.35, 2.60) {验证误差};
+
+    % Training curve: starts low, rises quickly to plateau near ~2.24
+    \draw[tealDark, line width=1.6pt]
+      (0.4, 0.95) .. controls (1.3, 1.95) and (2.4, 2.18) .. (5.4, 2.24);
+    \node[tealDark, font=\scriptsize\sffamily, below] at (2.45, 2.10) {训练误差};
+
+    % High bias gap arrow
+    \draw[<->, plum, thick] (5.05, 0.75) -- (5.05, 2.24)
+      node[midway, left, font=\scriptsize\sffamily, align=right, color=plum] {巨大偏差\\（加数据无用！）};
+    \draw[<->, gold!90!ink, semithick] (5.38, 2.24) -- (5.38, 2.55);
+  \end{scope}
+
+  % ===== Right Panel: High Variance (Overfitting) =====
+  \begin{scope}[shift={(7.45,0)}]
+    \node[font=\small\sffamily\bfseries, color=navy] at (2.85, 4.35) {(b) 高方差（过拟合）：训练极低、间隙巨大};
+    \draw[->, slate!80] (0,0) -- (5.8,0) node[right, font=\footnotesize\sffamily] {$N$};
+    \draw[->, slate!80] (0,0) -- (0,3.85) node[left, font=\footnotesize\sffamily, yshift=-2pt] {误差};
+
+    % Desired / Bayes baseline
+    \draw[slate!70, dashed, thick] (0, 0.75) -- (5.5, 0.75);
+    \node[right, font=\scriptsize\sffamily, color=slate] at (3.25, 0.48) {期望 / 贝叶斯底线 $R^*$};
+
+    % Validation curve: starts very high, steadily drops with N
+    \draw[ochre, line width=1.6pt]
+      (0.4, 3.60) .. controls (1.5, 2.85) and (3.2, 2.25) .. (5.4, 1.85);
+    \node[ochre, font=\scriptsize\sffamily, above] at (4.45, 2.02) {验证误差};
+
+    % Training curve: stays very low near 0.90
+    \draw[tealDark, line width=1.6pt]
+      (0.4, 0.18) .. controls (1.6, 0.55) and (3.2, 0.78) .. (5.4, 0.90);
+    \node[tealDark, font=\scriptsize\sffamily, above] at (2.05, 0.72) {训练误差};
+
+    % Large generalization gap arrow
+    \draw[<->, navy, thick] (5.05, 0.90) -- (5.05, 1.85)
+      node[midway, left, font=\scriptsize\sffamily, align=right, color=navy] {大泛化间隙\\（加数据/加正则！）};
+  \end{scope}
+\end{tikzpicture}
+\caption{学习曲线的临床诊断图谱：(a) 若训练误差与验证误差双双收敛在远离底线 $R^*$ 的高位且彼此很近，说明模型\textbf{高偏差（欠拟合）}，此时花大价钱增加训练样本几乎毫无帮助，应增大模型容量、构造非线性特征或减小正则化 $\lambda$；(b) 若训练误差极低而验证误差高悬、两者存在宽阔的泛化间隙，说明模型\textbf{高方差（过拟合）}，应增加样本量 $N$、加大正则化 $\lambda$、做特征选择或使用第 5 章的 Bagging 集成。}\label{fig:v4-learning-curves}
+\end{figure}
+
+% ============================================================
+\section{PAC 学习理论：有限假设空间的泛化界与样本复杂度}
+% ============================================================
+
+偏差-方差分解优雅地解剖了固定样本量下的回归误差，但它没有回答一个更根本的概率问题：\textbf{如果我有 $N$ 个 i.i.d. 样本，如何以 $1-\delta$ 的高置信度，用数学定理严格保证训练误差 $R_{\mathrm{emp}}(\hat{h})$ 与未知的真实风险 $R(\hat{h})$ 之间的差距不超过 $\varepsilon$？}
+
+这一框架由 Leslie Valiant（1984）与 Vladimir Vapnik、Alexey Chervonenkis 奠基，称为 \textbf{PAC（Probably Approximately Correct，概率近似正确）学习理论}。
+
+\begin{recallBox}{第 2 卷浓度不等式回顾：Hoeffding 不等式}
+设 $Z_1, \dots, Z_N$ 为独立同分布随机变量，且几乎必然取值在有界区间 $[0, 1]$ 内，均值 $\mu = \E[Z_i]$，样本均值 $\bar{Z} = \frac{1}{N}\sum_{i=1}^N Z_i$。则对任意 $\varepsilon > 0$，双边偏差概率呈指数级衰减：
+\begin{equation}\label{eq:v4-hoeffding}
+  \Prob\!\big(|\bar{Z} - \mu| \ge \varepsilon\big) \le 2\exp(-2N\varepsilon^2).
+\end{equation}
+\end{recallBox}
+
+\textbf{警惕一个致命的初学者陷阱！} 设损失函数取值在 $[0, 1]$（例如分类的 0-1 损失）。对任意一个\emph{在看数据之前就预先固定好的}假设 $h \in \mathcal{H}$，令 $Z_i = \ell(h(x_i), y_i) \in [0, 1]$，则 $\bar{Z} = R_{\mathrm{emp}}(h),\; \mu = R(h)$，直接套用 Hoeffding 不等式立得 $\Prob(|R(h) - R_{\mathrm{emp}}(h)| \ge \varepsilon) \le 2e^{-2N\varepsilon^2}$。
+
+\textbf{但是，我们绝不能把这个不等式直接套在 ERM 选出来的 $\hat{h} = \argmin_{h\in\mathcal{H}} R_{\mathrm{emp}}(h)$ 头上！} 为什么？因为 $\hat{h}$ 是“看过训练数据之后挑出来的”，它与样本 $\mathcal{D}$ 高度相关，导致 $\ell(\hat{h}(x_i), y_i)$ 不再是独立的！如果假设空间里塞了一百万个随机函数，即使每个函数单独看都很靠谱，总会有某个倒霉（或“幸运”）的假设恰好撞大运把这 $N$ 个样本全猜对了！
+
+破解之道在于\textbf{一致收敛（Uniform Convergence）}：我们要求假设空间里的\emph{所有}假设 $h \in \mathcal{H}$ 同时不偏离真实风险，再借助最基础的\textbf{并集界（Union Bound）} $\Prob(\bigcup_k A_k) \le \sum_k \Prob(A_k)$ 一次锁死全部假设！
+
+\begin{thmBox}
+\begin{theorem}[有限假设空间的一致收敛与 PAC 泛化界]\label{thm:v4-pac-finite}
+设假设空间 $\mathcal{H}$ 有限（基数 $|\mathcal{H}| < \infty$），损失函数取值于 $[0, 1]$，训练集 $\mathcal{D}$ 包含 $N$ 个 i.i.d. 样本。则对任意置信水平参数 $\delta \in (0, 1)$，至少以 $1 - \delta$ 的概率，\textbf{同时对所有 $h \in \mathcal{H}$} 成立：
+\begin{equation}\label{eq:v4-pac-bound}
+  \sup_{h \in \mathcal{H}} \big|R(h) - R_{\mathrm{emp}}(h)\big| \le \sqrt{\frac{\ln(2|\mathcal{H}| / \delta)}{2N}}.
+\end{equation}
+记 $\hat{h} = \argmin_{h\in\mathcal{H}} R_{\mathrm{emp}}(h)$ 为经验风险最小化器，$h^* = \argmin_{h\in\mathcal{H}} R(h)$ 为假设空间内的最优假设。则在相同的 $1-\delta$ 高概率事件上，超额风险满足：
+\begin{equation}\label{eq:v4-erm-excess}
+  R(\hat{h}) - R(h^*) \le 2\sqrt{\frac{\ln(2|\mathcal{H}| / \delta)}{2N}}.
+\end{equation}
+等价地，欲以至少 $1-\delta$ 的概率保证一致泛化间隙不超过 $\varepsilon$，所需\textbf{样本复杂度（Sample Complexity）}为：
+\begin{equation}\label{eq:v4-sample-comp}
+  N \ge \frac{1}{2\varepsilon^2}\ln\frac{2|\mathcal{H}|}{\delta}.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一步：对所有假设应用并集界。} 对每个固定 $h \in \mathcal{H}$，定义“坏事件” $E_h = \{|R(h) - R_{\mathrm{emp}}(h)| \ge \varepsilon\}$。由 Hoeffding 不等式~\eqref{eq:v4-hoeffding}，对每一个 $h$ 均有 $\Prob(E_h) \le 2\exp(-2N\varepsilon^2)$。考察“至少有一个假设发生大偏差”的并集事件：
+\begin{align*}
+  \Prob\!\left(\sup_{h \in \mathcal{H}} |R(h) - R_{\mathrm{emp}}(h)| \ge \varepsilon\right)
+  &= \Prob\!\left(\bigcup_{h \in \mathcal{H}} E_h\right) \\
+  &\le \sum_{h \in \mathcal{H}} \Prob(E_h) \quad\text{（并集界）} \\
+  &\le \sum_{h \in \mathcal{H}} 2\exp(-2N\varepsilon^2) = 2|\mathcal{H}|\exp(-2N\varepsilon^2).
+\end{align*}
+
+\textbf{第二步：令失败概率上限等于 $\delta$ 并反解 $\varepsilon$ 与 $N$。} 令 $2|\mathcal{H}|\exp(-2N\varepsilon^2) = \delta$，两边取对数：
+\[
+  2N\varepsilon^2 = \ln\frac{2|\mathcal{H}|}{\delta}
+  \iff \varepsilon = \sqrt{\frac{\ln(2|\mathcal{H}|/\delta)}{2N}}
+  \iff N = \frac{1}{2\varepsilon^2}\ln\frac{2|\mathcal{H}|}{\delta}.
+\]
+这就同时证明了一致泛化界~\eqref{eq:v4-pac-bound} 与样本复杂度~\eqref{eq:v4-sample-comp}！
+
+\textbf{第三步：导出 ERM 超额风险界~\eqref{eq:v4-erm-excess}。} 在上述概率 $\ge 1-\delta$ 的好事件上，对 $\hat{h}$ 与 $h^*$ 均有一致逼近 $|R(h) - R_{\mathrm{emp}}(h)| \le \varepsilon$，叠加 $\hat{h}$ 的经验最优性 $R_{\mathrm{emp}}(\hat{h}) \le R_{\mathrm{emp}}(h^*)$：
+\[
+  R(\hat{h}) \le R_{\mathrm{emp}}(\hat{h}) + \varepsilon \le R_{\mathrm{emp}}(h^*) + \varepsilon \le \big(R(h^*) + \varepsilon\big) + \varepsilon = R(h^*) + 2\varepsilon.
+\]
+代入 $\varepsilon$ 的表达式即证得式~\eqref{eq:v4-erm-excess}！
+\end{proof}
+
+\begin{example}[样本复杂度的数量级直觉]\label{ex:v4-ch3-pac-num}
+假设我们在一个包含 $|\mathcal{H}| = 10^4$ 个候选分类器的有限空间里搜索，要求以 $95\%$ 的置信度（$\delta = 0.05$）保证一致泛化间隙不超过 $\varepsilon = 0.05$。代入式~\eqref{eq:v4-sample-comp}：
+\[
+  N \ge \frac{1}{2 \times 0.05^2}\ln\frac{2 \times 10^4}{0.05} = 200 \times \ln(4 \times 10^5) \approx 200 \times 12.90 = 2580.
+\]
+请注意公式中最美妙的地方：\textbf{样本复杂度对假设空间规模 $|\mathcal{H}|$ 仅是对数依赖 $\ln|\mathcal{H}|$！} 即使把假设数量暴增一万倍到 $10^8$，所需样本量也只从 $2580$ 增加到 $200 \times \ln(4\times 10^9) \approx 4422$——还不到两倍！另一方面，精度要求 $\varepsilon$ 是反平方依赖 $O(1/\varepsilon^2)$，这意味着泛化间隙随样本量按 $O(1/\sqrt{N})$ 衰减。
+\end{example}
+
+% ============================================================
+\section{超越有限集合：VC 维的几何直觉与无限假设空间}
+% ============================================================
+
+定理~\ref{thm:v4-pac-finite} 有一个明显的短板：即便是最简单的一维阈值分类器 $\mathcal{H} = \{h_\theta(x) = \mathbb{I}[x \ge \theta] : \theta \in \R\}$，实数参数 $\theta$ 有不可数无穷多个，$|\mathcal{H}| = \infty$，式~\eqref{eq:v4-pac-bound} 的分子瞬间爆炸成无意义的 $+\infty$！
+
+然而冷静思考一下：给定数轴上 $N$ 个固定样本点 $x_1 < x_2 < \dots < x_N$，虽然阈值 $\theta$ 有无穷多种取法，但无论怎么移动 $\theta$，它在这 $N$ 个点上所能切出来的不同二分类标记结果\textbf{最多只有 $N + 1$ 种}（而不是 $2^N$ 种，更不是 $\infty$ 种）！这正是 Vapnik 与 Chervonenkis 在 1971 年的天才洞察：\textbf{衡量无限假设空间“真实容量”的尺子，不是参数有多少个，而是它能在有限点集上实现多少种不同的二分类划分！}
+
+\begin{defBox}
+\begin{definition}[增长函数、打散与 VC 维]\label{def:v4-vc}
+设 $\mathcal{H}$ 为二分类假设空间（$h: \mathcal{X} \to \{-1, +1\}$）：
+\begin{enumerate}
+  \item \textbf{增长函数（Growth Function）} $\Pi_{\mathcal{H}}(N)$：在所有大小为 $N$ 的点集 $\{x_1, \dots, x_N\} \subseteq \mathcal{X}$ 上，$\mathcal{H}$ 所能产生的不同标记向量 $\big(h(x_1), \dots, h(x_N)\big) \in \{-1, +1\}^N$ 的最大个数。显然 $\Pi_{\mathcal{H}}(N) \le 2^N$。
+  \item \textbf{打散（Shatter）}：若存在 $N$ 个点使得 $\mathcal{H}$ 能实现它们全部 $2^N$ 种可能的 $\pm 1$ 标记组合，则称 $\mathcal{H}$ 能够\textbf{打散}这 $N$ 个点。
+  \item \textbf{VC 维（Vapnik-Chervonenkis Dimension）} $d_{\mathrm{VC}} = \mathrm{VC}(\mathcal{H})$：$\mathcal{H}$ 能够打散的\textbf{最大点集规模}（即满足 $\Pi_{\mathcal{H}}(N) = 2^N$ 的最大整数 $N$）。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\begin{example}[二维平面线性分类器的 VC 维 $= 3$]\label{ex:v4-ch3-vc2d}
+考虑二维平面上的线性分类器 $\mathcal{H}_{\mathrm{lin}}^{(2)} = \{x \mapsto \sign(w_1 x_1 + w_2 x_2 + b)\}$：
+\begin{itemize}
+  \item \textbf{能打散 3 个点（$\mathrm{VC} \ge 3$）}：任取不共线的 3 个点构成三角形（图~\ref{fig:v4-vc-shatter}(a)）。全部 $2^3 = 8$ 种标记可分为两类：3 点同色（2 种，把直线放三角形外侧即可）与 2 同 1 异（6 种，用直线切开单独那个顶点与另外两点即可）。8 种组合无一遗漏！
+  \item \textbf{无法打散任何 4 个点（$\mathrm{VC} < 4$）}：任取平面上 4 个点，由平面几何 Radon 定理，其凸包只可能是两种情形：(i) 4 点构成凸四边形——此时把对角两点标为 $+$、另两对角点标为 $-$（著名的 \textbf{XOR 异或构型}，图~\ref{fig:v4-vc-shatter}(b)），两条对角线必然相交，任何一条直线都无法将两组对角点分开！(ii) 其中 1 点落在另 3 点构成的三角形内部或边上——此时把外围 3 顶点标为 $+$、内部点标为 $-$，直线同样无解。因此没有任何 4 个点能被平面直线打散！
+\end{itemize}
+故 $\mathrm{VC}(\mathcal{H}_{\mathrm{lin}}^{(2)}) = 3$。推广至一般 $d$ 维空间，线性超平面分类器的 VC 维精确等于其自由参数个数：$\mathrm{VC}(\mathcal{H}_{\mathrm{lin}}^{(d)}) = d + 1$。
+\end{example}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.0, >=Stealth]
+  % ===== Left Panel: 3 Points Shattered =====
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\small\sffamily\bfseries, color=tealDark] at (1.5, 3.35) {(a) 平面 3 点可被直线打散（全 8 种可行）};
+    \draw[tealLine!80, rounded corners=2mm, fill=tealLight!45] (-0.4,-0.63) rectangle (3.4,2.85);
+
+    % Triangle vertices: A=(0.6,0.5), B=(2.5,0.6), C=(1.5,2.2)
+    \fill[teal] (0.6, 0.5) circle (4pt);
+    \node[white, font=\tiny\bfseries] at (0.6, 0.5) {$+$};
+    \fill[teal] (2.5, 0.6) circle (4pt);
+    \node[white, font=\tiny\bfseries] at (2.5, 0.6) {$+$};
+    \fill[ochre] (1.5, 2.2) circle (4pt);
+    \node[white, font=\tiny\bfseries] at (1.5, 2.2) {$-$};
+
+    % Separating line cleanly separating top point
+    \draw[gold, very thick] (0.05, 1.45) -- (3.05, 1.55);
+    \node[font=\scriptsize\sffamily, color=tealDark, align=center] at (1.5, -0.10)
+      {任意 $2^3=8$ 种正负标记\\均可被某条直线一刀切开};
+  \end{scope}
+
+  % ===== Right Panel: 4 Points XOR Fails =====
+  \begin{scope}[shift={(6.8,0)}]
+    \node[font=\small\sffamily\bfseries, color=ochre] at (1.6, 3.35) {(b) 平面 4 点无法打散（XOR 对角不可分）};
+    \draw[ochre!35, rounded corners=2mm, fill=ochreLight!55] (-0.4,-0.63) rectangle (3.6,2.85);
+
+    % Diagonals crossing
+    \draw[teal!50, dashed, thick] (0.55, 0.55) -- (2.65, 2.25);
+    \draw[ochre!50, dashed, thick] (0.55, 2.25) -- (2.65, 0.55);
+
+    % 4 corners in XOR configuration
+    \fill[teal] (0.55, 0.55) circle (4.2pt);
+    \node[white, font=\tiny\bfseries] at (0.55, 0.55) {$+$};
+    \fill[teal] (2.65, 2.25) circle (4.2pt);
+    \node[white, font=\tiny\bfseries] at (2.65, 2.25) {$+$};
+
+    \fill[ochre] (0.55, 2.25) circle (4.2pt);
+    \node[white, font=\tiny\bfseries] at (0.55, 2.25) {$-$};
+    \fill[ochre] (2.65, 0.55) circle (4.2pt);
+    \node[white, font=\tiny\bfseries] at (2.65, 0.55) {$-$};
+
+    % Cross mark at intersection
+    \node[font=\normalsize\bfseries, color=ochre] at (1.6, 1.40) {$\times$};
+    \node[font=\scriptsize\sffamily, color=ochre, align=center] at (1.6, -0.10)
+      {凸包对角线必相交\\不存在线性超平面可分离 XOR};
+  \end{scope}
+\end{tikzpicture}
+\caption{二维线性分类器 VC 维的直观几何证明：(a) 三个不共线点的 8 种二分类标记都能被直线分离；(b) 四个点只要呈 XOR 交错标记（或一点落入三点三角形内部），便无法线性分离，故 $\mathrm{VC}(\text{平面直线}) = 3$。注意：第 4 章的核技巧（RBF 核）正是把这种低维不可分的构型映射到高维空间变成线性可分！}\label{fig:v4-vc-shatter}
+\end{figure}
+
+有了 VC 维，Sauer-Shelah 引理证明了一个令人震撼的相变定理：一旦样本数 $N$ 超过 $d_{\mathrm{VC}}$，增长函数 $\Pi_{\mathcal{H}}(N)$ 不再按指数 $2^N$ 狂飙，而是被多项式 $\left(\frac{eN}{d_{\mathrm{VC}}}\right)^{d_{\mathrm{VC}}}$ 死死压住！于是用 $\Pi_{\mathcal{H}}(2N)$ 替代定理~\ref{thm:v4-pac-finite} 中的 $|\mathcal{H}|$，就得到了统计学习理论的皇冠明珠——\textbf{VC 泛化界}：以至少 $1-\delta$ 的概率，对所有 $h \in \mathcal{H}$ 同时成立
+\begin{equation}\label{eq:v4-vc-bound}
+  R(h) \le R_{\mathrm{emp}}(h) + O\!\left(\sqrt{\frac{d_{\mathrm{VC}}\ln(N / d_{\mathrm{VC}}) + \ln(1/\delta)}{N}}\right).
+\end{equation}
+式~\eqref{eq:v4-vc-bound} 给出了\textbf{结构风险最小化（SRM）}的理论依据：当 $N \gg d_{\mathrm{VC}}$ 时，泛化间隙以 $\tilde{O}(\sqrt{d_{\mathrm{VC}}/N})$ 趋于零；反之，如果盲目扩大模型容量使 $d_{\mathrm{VC}}$ 逼近甚至超过样本数 $N$，泛化保证就会彻底崩塌。这也正是 Vapnik 卷首语的深意——面对特定判别任务时，直接控制判别边界的有效复杂度（例如第 4 章的大间隔 SVM），往往远胜于先去估计整个高维概率密度！
+
+\begin{extBox}{从经典到现代：Rademacher 复杂度与深度学习的“双下降”现象}
+VC 维完全只看假设空间 $\mathcal{H}$ 的最坏情况几何容量，完全不关心数据分布本身。但在实践中，即使参数维数高达百万（如第 4 章的无穷维 RBF 核 SVM 或第 5 卷的深度神经网络），只要数据本身结构良好、分类间隔够大，模型依然泛化极佳！这催生了两项通往现代理论的关键突破：
+\begin{enumerate}
+  \item \textbf{Rademacher 复杂度（Rademacher Complexity）}：给定样本 $S = \{x_1, \dots, x_N\}$，独立抛 $N$ 枚公平硬币生成随机噪声标签 $\sigma_i \in \{-1, +1\}$，定义经验 Rademacher 复杂度
+  \[
+    \widehat{\mathfrak{R}}_S(\mathcal{H}) \coloneqq \E_{\sigma}\!\left[\sup_{h \in \mathcal{H}} \frac{1}{N}\sum_{i=1}^N \sigma_i h(x_i)\right].
+  \]
+  它直观衡量假设空间 $\mathcal{H}$ “强行拟合纯随机硬币噪声”的能力，并且\textbf{依赖于具体数据分布}！利用它可直接推导出\textbf{与输入维度 $d$ 无关、仅与分类间隔 $\gamma$ 相关的 SVM 泛化界}，完美解释为何无穷维 RBF 核不会瞬间过拟合。
+  \item \textbf{现代双下降现象（Double Descent，直通第 5 卷）}：经典偏差-方差 U 形曲线（图~\ref{fig:v4-ch3-bv}）在模型参数数 $P$ 逼近样本数 $N$（插值阈值 $P \approx N$）时确实会冲上尖峰；但 Belkin 等（2019）发现，当参数规模继续暴增进入\textbf{严重过参数化区间（$P \gg N$）}时，虽然训练误差保持为 $0$，测试误差竟然会\textbf{第二次下降}甚至低于经典 U 形的谷底！其背后的奥秘在于：在无数个都能零误差插值训练集的解中，梯度下降 / SGD 的\textbf{隐式正则化（Implicit Bias）}自动偏好于最小范数（最平滑）的插值解。我们将在第 5 卷深度学习中重新审视这一激动人心的前沿图景。
+\end{enumerate}
+\end{extBox}
+
+% ============================================================
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+% ============================================================
+
+\exTier{A 层}{核心概念与数值验算}
+\begin{enumerate}[label=\textbf{4.3.\arabic*}, leftmargin=3.3em, itemsep=5pt]
+  \item\label{ex:4.3.1} \textbf{常值估计器的偏差与方差手算}：设真实分布满足 $y = f(x) + \varepsilon$（$\E[\varepsilon]=0,\; \Var(\varepsilon)=\sigma^2$），考虑极简模型“永远输出训练标签均值” $\hat{f}_{\mathcal{D}}(x) \equiv \bar{y} = \frac{1}{N}\sum_{i=1}^N y_i$（其中训练点 $x_i$ 固定）。求出任意测试点 $x$ 处的精确 $\Bias^2(\hat{f}(x))$、$\Var(\hat{f}(x))$ 及期望测试 MSE，并说明当 $N \to \infty$ 时三项各自趋向何值。
+  \exHint{先算 $\bar{f}(x) = \E[\bar{y}] = \frac{1}{N}\sum_{i=1}^N f(x_i)$，再由独立性直接算 $\Var(\bar{y}) = \sigma^2 / N$。}
+
+  \item\label{ex:4.3.2} \textbf{PAC 样本复杂度计算}：假设一个二分类任务包含 $|\mathcal{H}| = 2^{20}$（约一百万）个候选决策树桩组合。若希望以至少 $99\%$ 的置信度（$\delta = 0.01$）保证一致泛化间隙不超过 $\varepsilon = 0.02$，至少需要多少个 i.i.d. 样本？若将置信度放松到 $90\%$（$\delta = 0.10$），样本需求减少的百分比是多少？
+  \exHint{直接代入公式~\eqref{eq:v4-sample-comp}，感受 $\ln(1/\delta)$ 对置信度的极低敏感度。}
+\end{enumerate}
+
+\exTier{B 层}{岭回归推导与 VC 维计算}
+\begin{enumerate}[label=\textbf{4.3.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=3]
+  \item\label{ex:4.3.3} \textbf{岭回归的存在性优势：一定存在 $\lambda > 0$ 严格胜过 OLS}：基于式~\eqref{eq:v4-ridge-var} 与式~\eqref{eq:v4-ridge-bias}，记岭回归的总参数均方误差为 $\mathrm{MSE}(\lambda) = \tr(\Cov(\hat{w}_{\mathrm{ridge}})) + \norm{\E[\hat{w}_{\mathrm{ridge}}] - w_{\text{true}}}_2^2$。求导计算 $\left.\frac{d}{d\lambda}\mathrm{MSE}(\lambda)\right|_{\lambda = 0}$，并证明：只要 $\sigma^2 > 0$，总存在足够小的 $\lambda > 0$ 使得岭回归的期望总误差\textbf{严格低于}无偏的普通最小二乘 OLS！
+  \exHint{检查 $\lambda = 0$ 处的一阶导数：平方偏差对 $\lambda$ 的导数在 $\lambda=0$ 处为 $0$，而方差的导数严格为负（$-2\sigma^2\sum \sigma_j^{-4} < 0$）！}
+
+  \item\label{ex:4.3.4} \textbf{三类几何假设空间的精确 VC 维}：分别求出以下三个假设空间的精确 VC 维，并给出“能打散 $d_{\mathrm{VC}}$ 个点”的构造与“不能打散 $d_{\mathrm{VC}}+1$ 个点”的证明：
+  (a) 一维实轴上的单侧阈值 $\mathcal{H}_1 = \{\mathbb{I}[x \ge \theta] : \theta \in \R\}$；
+  (b) 一维实轴上的闭区间指示器 $\mathcal{H}_2 = \{\mathbb{I}[a \le x \le b] : a \le b\}$；
+  (c) 二维平面上轴对齐矩形内部为正的分类器 $\mathcal{H}_3 = \{\mathbb{I}[a_1 \le x_1 \le b_1,\; a_2 \le x_2 \le b_2]\}$。
+  \exHint{答案依次为 $1,\; 2,\; 4$；对 (c) 的 5 点反证：取最左、最右、最上、最下 4 个极值点标为 $+$，剩下的第 5 个点必被包含在它们张成的最小包围盒中，无法单独标为 $-$！}
+\end{enumerate}
+
+\exTier{C 层}{统计学习深度证明}
+\begin{enumerate}[label=\textbf{4.3.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=5]
+  \item\label{ex:4.3.5} \textbf{留一法（LOOCV）线性回归的 $O(1)$ 快捷公式}：对线性最小二乘回归 $\hat{y} = H y$（帽子矩阵 $H = X(X^\top X)^{-1}X^\top$，对角元素 $h_{ii} \in (0, 1)$），利用第 1 卷 Sherman-Morrison 秩-1 逆矩阵公式证明：删去第 $i$ 个样本重新拟合得到的留一预测误差满足精确解析恒等式
+  \[
+    y_i - \hat{y}_i^{(-i)} = \frac{y_i - \hat{y}_i}{1 - h_{ii}},
+  \]
+  从而只需训练\textbf{一次}全量模型，即可精确算出全部 $N$ 折留一法交叉验证均方误差！
+  \exHint{利用 $(X^\top X - x_i x_i^\top)^{-1} = (X^\top X)^{-1} + \frac{(X^\top X)^{-1}x_i x_i^\top (X^\top X)^{-1}}{1 - h_{ii}}$ 展开 $x_i^\top \hat{w}^{(-i)}$。}
+
+  \item\label{ex:4.3.6} \textbf{单边可实现情形（Realizable PAC）的 $O(1/\varepsilon)$ 加速样本复杂度}：若假设空间 $\mathcal{H}$ 有限，且已知存在零真实误差的完美假设 $h^* \in \mathcal{H}$（即 $R(h^*) = 0$，无噪声可实现情形），证明对任意使 $R_{\mathrm{emp}}(\hat{h}) = 0$ 的一致学习器 $\hat{h}$，只需
+  \[
+    N \ge \frac{1}{\varepsilon}\ln\frac{|\mathcal{H}|}{\delta}
+  \]
+  个样本即可以至少 $1-\delta$ 的概率保证 $R(\hat{h}) \le \varepsilon$（依赖从 $1/\varepsilon^2$ 骤降至 $1/\varepsilon$！）。
+  \exHint{若某个坏假设满足 $R(h) > \varepsilon$，它在 $N$ 个 i.i.d. 样本上侥幸全对的概率至多为 $(1 - \varepsilon)^N \le e^{-N\varepsilon}$；再对所有坏假设取并集界即可。}
+\end{enumerate}
+
+\exTier{D 层}{诊断实验与泄露复现}
+\begin{enumerate}[label=\textbf{4.3.\arabic*}, leftmargin=3.3em, itemsep=5pt, start=7]
+  \item\label{ex:4.3.7} \textbf{岭回归压制高阶多项式方差实验}：修改脚本 \texttt{vol4\_experiments.py} 中的实验 3，固定图~\ref{fig:v4-ch3-bv} 中的 $d = 9$ 阶多项式，将普通最小二乘替换为岭回归（注意不对常数截距项 $w_0$ 惩罚），扫描 $\lambda \in \{0, 10^{-8}, 10^{-6}, 10^{-4}, 10^{-2}, 10^{-1}\}$。打印并绘制 400 轮实测的 $\Bias^2$、$\Var$ 与总 MSE 随 $\lambda$ 的变化曲线，验证是否能把 $d=9$ 的总测试误差压到比无正则 $d=3$（$0.1073$）更低或持平！
+  \exHint{先对高次项 $x^k$ 做中心化/标准化或采用正交多项式基，可显著改善范德蒙矩阵的数值条件数。}
+
+  \item\label{ex:4.3.8} \textbf{亲手复现“特征选择数据泄露”假象}：用 NumPy 生成 $N = 100$ 个样本、$D = 5000$ 维纯独立标准正态噪声特征 $X$，以及与 $X$ \textbf{完全独立}的随机二分类标签 $y \in \{0, 1\}$（真实最优准确率严格等于 $50\%$）。比较以下两种 5 折交叉验证流程的验证准确率：
+  (a) \textbf{错误流程（泄露）}：先在全部 100 个样本上计算每列特征与 $y$ 的相关系数，选出绝对值最大的 Top-20 特征，再跑 5 折交叉验证逻辑回归；
+  (b) \textbf{正确流程（Pipeline 隔离）}：在每一折内仅用 80 个训练样本挑选 Top-20 特征并拟合，再去预测该折 20 个验证样本。
+  报告两者的 5 折平均准确率差异，写下你的工程防错准则。
+  \exHint{错误流程常会荒谬地报出 $80\%$--$90\%$ 的虚假高分，而正确流程会诚实地回归至 $50\%$ 附近！}
+\end{enumerate}

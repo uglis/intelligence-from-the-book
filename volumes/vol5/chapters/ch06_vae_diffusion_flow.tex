@@ -1,0 +1,890 @@
+\chapter[深度生成：VAE、扩散与流匹配]{深度生成模型：VAE、扩散模型（DDPM）与流匹配}
+\label{ch:vae-diffusion-flow}
+
+\chapEpigraph{我们为自己构筑事实的图像。}{Ludwig Wittgenstein（路德维希·维特根斯坦，《逻辑哲学论》，2.1）}
+
+\begin{chapIntro}{本章导读：从“理解数据”到“从纯噪声中凭空创造世界”}
+在前五章里，我们已经掌握了深度神经网络的完整工具箱：能用反向模式自动微分计算任意深度计算图的精确梯度，能用 Kaiming 初始化与残差连接驯服百层网络的训练动力学，也能用 Transformer 与自监督预训练对离散文本序列建立极高精度的条件概率 $p_\theta(x_t \mid x_{<t})$。然而，面对高维\textbf{连续世界}——一张 $1024 \times 1024 \times 3$ 的照片、一段高保真声波，或一个由数百个原子三维坐标构成的蛋白质构象——逐像素做离散自回归既缓慢又违背空间整体性。我们真正渴望的是学会一个显式或隐式的连续生成分布 $p_\theta(x)$，能够从最平庸的各向同性高斯白噪声 $\varepsilon \sim \mathcal{N}(0, I)$ 出发，凭空“雕刻”出逼真且多样的新样本。
+
+本章作为第 5 卷的压轴篇章，将从\textbf{第 4 卷第 6 章 EM 算法的证据下界（ELBO）}这一熟悉桥梁启程，用同一套变分推断与微分方程语言，贯穿当代深度生成模型的三大正统范式：
+\begin{enumerate}
+  \item \textbf{变分自编码器（VAE）}：将 EM 的逐样本变分后验升级为神经网络摊销编码器 $q_\phi(z \mid x)$，严格证明对角高斯 KL 散度的闭式公式，剖析\textbf{重参数化技巧（Reparameterization Trick）}为何能穿透随机节点并把梯度方差压缩数百倍，以及后验坍缩（Posterior Collapse）的机理与对策；
+  \item \textbf{去噪扩散概率模型（DDPM）与分数匹配}：将单步隐变量拓展为 $T$ 步层次化马尔可夫加噪链，用数学归纳法证明前向任意步闭式边缘分布 $q(x_t \mid x_0)$，通过贝叶斯定理与配方法\textbf{零跳步}导出逆向后验均值 $\tilde{\mu}_t$ 与方差 $\tilde{\beta}_t$，揭示简洁的 $\varepsilon$-预测均方误差与\textbf{去噪分数匹配（Denoising Score Matching）}的严格等价性，并以纯 PyTorch 二维四模态环分布实测（\texttt{data/ddpm\_train.csv}）直观验证；
+  \item \textbf{流匹配（Flow Matching / Rectified Flow）}：突破扩散模型的弯曲随机轨迹，直接在噪声 $x_0$ 与真实数据 $x_1$ 之间架设笔直的常微分方程（ODE）传输路径 $x_t = (1-t)x_0 + t x_1$，严格证明条件流匹配（CFM）与边际速度场回归的梯度等价性与连续性方程守恒，阐明它何以成为 Stable Diffusion 3、Flux 等新一代文生图/文生视频引擎的共同底座。
+\end{enumerate}
+\end{chapIntro}
+
+\section{从 EM 算法的 ELBO 到变分自编码器（VAE）}
+\label{sec:vae}
+
+\begin{recallBox}{第 4 卷第 6 章：隐变量模型的 ELBO 恒等分解}
+给定观测数据 $x$ 与不可观测的连续隐变量 $z$，若联合生成模型为 $p_\theta(x, z) = p_\theta(x \mid z)\, p(z)$，则对\textbf{任意}辅助变分分布 $q(z)$，边际对数似然都严格满足如下恒等式：
+\begin{equation}
+  \ln p_\theta(x)
+  = \underbrace{\E_{z \sim q(z)}\!\left[\ln \frac{p_\theta(x, z)}{q(z)}\right]}_{\mathcal{L}_{\mathrm{ELBO}}(q,\, \theta;\, x)}
+  + \underbrace{\DKL\!\big(q(z) \,\|\, p_\theta(z \mid x)\big)}_{\ge\, 0}.
+  \label{eq:elbo-recall}
+\end{equation}
+由于 KL 散度非负，最大化证据下界 $\mathcal{L}_{\mathrm{ELBO}}$ 既能抬高真实的边际对数似然 $\ln p_\theta(x)$，又能迫使变分分布 $q(z)$ 贴近真实后验 $p_\theta(z \mid x)$。
+\end{recallBox}
+
+在第 4 卷的高斯混合模型（GMM）里，隐变量 $z$ 只是 $K$ 个离散簇编号，真实后验 $p_\theta(z \mid x)$ 可由贝叶斯公式解析算出（E 步），因此 EM 算法畅通无阻。但当我们把解码器 $p_\theta(x \mid z)$ 升级为一个多层深度神经网络（例如把 64 维隐向量 $z$ 映射为百万像素高清图像的卷积或 Transformer 解码器）时，经典 EM 瞬间撞上两堵铜墙铁壁：
+\begin{enumerate}
+  \item \textbf{真实后验彻底不可积分}：$p_\theta(z \mid x) = \frac{p_\theta(x \mid z)p(z)}{\int p_\theta(x \mid z')p(z')\,dz'}$ 的分母涉及深度非线性网络在连续高维空间上的积分，不存在任何闭式解，E 步无从下笔；
+  \item \textbf{逐样本变分参数不可扩展}：若按传统平均场变分推断，为每张样本 $x^{(i)}$ 单独维护参数 $(\mu^{(i)}, \sigma^{(i)})$，面对 $N = 10^7$ 张图像不仅显存爆炸，且测试遇到新图片时仍需从头运行迭代优化。
+\end{enumerate}
+
+Kingma 与 Welling（2014）以及 Rezende 等人（2014）提出的\textbf{变分自编码器（Variational Autoencoder, VAE）}用一记惊艳的\textbf{摊销变分推断（Amortized Variational Inference）}同时粉碎了这两道壁垒：不再为每个样本单独优化变分参数，而是训练一个共享参数的\textbf{神经编码器（识别网络）} $q_\phi(z \mid x)$，直接把输入样本 $x$ 映射为近似后验的参数 $(\mu_\phi(x),\, \sigma_\phi(x))$！
+
+\subsection{VAE 的概率结构与 ELBO 目标}
+
+\begin{defBox}
+\begin{definition}[变分自编码器（VAE）及其证据下界]
+\label{def:vae}
+设观测样本 $x \in \R^D$，隐变量 $z \in \R^d$（通常 $d \ll D$）。标准高斯 VAE 由以下两部分耦合而成：
+\begin{enumerate}
+  \item \textbf{生成模型（解码器）}：先验取标准各向同性高斯 $p(z) = \mathcal{N}(0, I_d)$；给定 $z$，由参数为 $\theta$ 的解码网络给出观测似然 $p_\theta(x \mid z)$（对连续像素常取 $\mathcal{N}(\mu_\theta(z),\, \sigma_{\text{dec}}^2 I_D)$，对应均方误差重建；对二值图像取逐像素伯努利分布，对应二元交叉熵）；
+  \item \textbf{摊销推断模型（编码器）}：由参数为 $\phi$ 的编码网络输出均值向量 $\mu_\phi(x) \in \R^d$ 与对角标准差向量 $\sigma_\phi(x) \in \R_+^d$，定义因式分解高斯变分后验：
+  \begin{equation}
+    q_\phi(z \mid x) = \mathcal{N}\!\big(z;\, \mu_\phi(x),\, \diag(\sigma_\phi^2(x))\big)
+    = \prod_{j=1}^{d} \mathcal{N}\!\big(z_j;\, \mu_{\phi, j}(x),\, \sigma_{\phi, j}^2(x)\big).
+    \label{eq:vae-encoder}
+  \end{equation}
+\end{enumerate}
+将式~\eqref{eq:elbo-recall} 中的联合密度拆为 $p_\theta(x, z) = p_\theta(x \mid z)\,p(z)$，立得单样本的 \textbf{VAE 证据下界（ELBO）}：
+\begin{equation}
+  \mathcal{L}_{\mathrm{VAE}}(\theta, \phi;\, x)
+  = \underbrace{\E_{z \sim q_\phi(z \mid x)}\!\left[\ln p_\theta(x \mid z)\right]}_{\text{重建保真项（Reconstruction）}}
+  \;-\; \underbrace{\DKL\!\big(q_\phi(z \mid x) \,\|\, p(z)\big)}_{\text{先验正则项（KL Regularization）}}
+  \;\le\; \ln p_\theta(x).
+  \label{eq:vae-elbo}
+\end{equation}
+训练时最小化整个数据集上的负 ELBO：$\min_{\theta,\phi}\; -\frac{1}{N}\sum_{i=1}^{N} \mathcal{L}_{\mathrm{VAE}}(\theta, \phi;\, x^{(i)})$；生成新样本时则彻底丢弃编码器，直接采 $z \sim \mathcal{N}(0, I_d)$ 并前向经过解码器即可！
+\end{definition}
+\end{defBox}
+
+观察式~\eqref{eq:vae-elbo} 令人拍案叫绝的对称张力：
+\begin{itemize}
+  \item 第一项\textbf{重建保真项}要求编码器把 $x$ 压缩进 $z$ 后，解码器仍能把 $x$ 原封不动还原出来；若只有这一项，模型就退化为普通确定性自编码器——它只会把训练样本零散塞进隐空间的偏僻角落，各点之间全是“无人区”，随机采样 $z \sim \mathcal{N}(0, I_d)$ 解码出来只会是一团乱码；
+  \item 第二项\textbf{KL 正则项}强行把每个样本对应的后验云团 $q_\phi(z \mid x)$ 拉向同一个标准高斯球心 $\mathcal{N}(0, I_d)$ 并撑开其方差，迫使不同样本的后验云团彼此平滑重叠、填满整个先验支撑集，从而保证隐空间处处可插值、处处可生成！
+\end{itemize}
+
+\subsection{对角高斯 KL 散度的精确闭式推导}
+
+式~\eqref{eq:vae-elbo} 中的第二项甚至不需要任何蒙特卡洛采样——对于对角高斯编码器与标准正态先验，它拥有极其简洁的精确解析公式！
+
+\begin{thmBox}
+\begin{theorem}[对角高斯与标准正态分布的闭式 KL 散度]
+\label{thm:gaussian-kl}
+设 $q(z) = \mathcal{N}\!\big(\mu,\, \diag(\sigma_1^2, \dots, \sigma_d^2)\big)$（其中 $\sigma_j > 0$）且 $p(z) = \mathcal{N}(0, I_d)$，则两者之间的 KL 散度精确等于：
+\begin{equation}
+  \DKL\!\big(q(z) \,\|\, p(z)\big)
+  = \frac{1}{2} \sum_{j=1}^{d} \left(\mu_j^2 + \sigma_j^2 - \ln \sigma_j^2 - 1\right).
+  \label{eq:gaussian-kl-closed}
+\end{equation}
+而且该式严格非负，等号成立当且仅当对所有维度 $j = 1, \dots, d$ 均有 $\mu_j = 0$ 且 $\sigma_j^2 = 1$。
+\end{theorem}
+\begin{proof}
+由于 $q(z) = \prod_{j=1}^d q_j(z_j)$ 与 $p(z) = \prod_{j=1}^d p_j(z_j)$ 均在各坐标上独立因式分解，对数密度比自然拆为逐维求和：
+\begin{align*}
+  \ln q(z) &= -\frac{d}{2}\ln(2\pi) - \frac{1}{2}\sum_{j=1}^{d} \ln\sigma_j^2 - \frac{1}{2}\sum_{j=1}^{d} \frac{(z_j - \mu_j)^2}{\sigma_j^2}, \\
+  \ln p(z) &= -\frac{d}{2}\ln(2\pi) - \frac{1}{2}\sum_{j=1}^{d} z_j^2.
+\end{align*}
+两式相减，常数项 $-\frac{d}{2}\ln(2\pi)$ 精确抵消：
+\[
+  \ln \frac{q(z)}{p(z)} = \frac{1}{2} \sum_{j=1}^{d} \left(z_j^2 - \frac{(z_j - \mu_j)^2}{\sigma_j^2} - \ln\sigma_j^2\right).
+\]
+在 $z \sim q(z)$ 下对上式逐项取数学期望。由高斯分布的一阶与二阶矩定义，对每个坐标 $j$ 均有：
+\[
+  \E_{q}\!\left[\frac{(z_j - \mu_j)^2}{\sigma_j^2}\right] = \frac{\Var_{q}(z_j)}{\sigma_j^2} = \frac{\sigma_j^2}{\sigma_j^2} = 1,
+  \qquad
+  \E_{q}\!\left[z_j^2\right] = \Var_{q}(z_j) + \big(\E_{q}[z_j]\big)^2 = \sigma_j^2 + \mu_j^2.
+\]
+代入期望表达式，立即得到式~\eqref{eq:gaussian-kl-closed}：
+\[
+  \DKL(q \,\|\, p)
+  = \E_{z \sim q}\!\left[\ln \frac{q(z)}{p(z)}\right]
+  = \frac{1}{2}\sum_{j=1}^{d}\left(\mu_j^2 + \sigma_j^2 - \ln\sigma_j^2 - 1\right).
+\]
+最后验证非负性与取等条件：令 $g(u) = u - \ln u - 1$（$u > 0$），其导数 $g'(u) = 1 - \frac{1}{u}$ 在 $u \in (0, 1)$ 严格为负、在 $u \in (1, +\infty)$ 严格为正，故 $g(u) \ge g(1) = 0$ 且等号仅在 $u = 1$ 取得。结合 $\mu_j^2 \ge 0$，可见式~\eqref{eq:gaussian-kl-closed} 每一项均非负，且总和为零当且仅当 $\mu_j = 0$ 与 $\sigma_j^2 = 1$ 对全部 $j$ 同时成立。
+\end{proof}
+\end{thmBox}
+
+\begin{example}[手算验收：对角高斯 KL 散度的直观惩罚]
+设隐空间维度 $d = 2$，编码器对某输入样本输出 $\mu = (1.0,\, -0.5)$ 与标准差 $\sigma = (0.5,\, 2.0)$（方差 $\sigma^2 = (0.25,\, 4.0)$）。代入式~\eqref{eq:gaussian-kl-closed}：
+\begin{align*}
+  \text{第 1 维} &: \frac{1}{2}\big(1.0^2 + 0.25 - \ln 0.25 - 1\big) = \frac{1}{2}(0.25 + 1.3863) \approx 0.8181\text{ nats}, \\
+  \text{第 2 维} &: \frac{1}{2}\big((-0.5)^2 + 4.0 - \ln 4.0 - 1\big) = \frac{1}{2}(3.25 - 1.3863) \approx 0.9319\text{ nats}.
+\end{align*}
+合计 $\DKL(q \,\|\, p) \approx 1.750\text{ nats}$。注意 $-\ln \sigma_j^2$ 项的精妙之处：无论编码器试图把方差缩成确定性点质量（$\sigma_j \to 0^+ \implies -\ln\sigma_j^2 \to +\infty$），还是无限拉宽（$\sigma_j \to +\infty \implies \sigma_j^2 \to +\infty$），KL 散度都会施加无穷大惩罚！工程代码中，编码器末层几乎总是直接输出\textbf{对数方差} $s_j = \ln \sigma_j^2 \in \R$（无范围约束），此时式~\eqref{eq:gaussian-kl-closed} 化作一行数值极稳定的代码：\texttt{-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)}。
+\end{example}
+
+\subsection{重参数化技巧（Reparameterization Trick）与低方差梯度证明}
+\label{sec:reparam}
+
+搞定了 KL 散度项后，还剩下式~\eqref{eq:vae-elbo} 的第一项重建期望 $\E_{z \sim q_\phi(z \mid x)}[f_\theta(z)]$（其中 $f_\theta(z) := \ln p_\theta(x \mid z)$）。对解码器参数 $\theta$ 求梯度毫无难度，因为期望分布不依赖 $\theta$，梯度可直接穿进期望号内。真正的拦路虎在于对\textbf{编码器参数 $\phi$} 求梯度：
+\[
+  \nabla_\phi \E_{z \sim q_\phi(z \mid x)}\!\left[f_\theta(z)\right] \;=\; ?
+\]
+在计算图中，$z \sim q_\phi(z \mid x)$ 是一个\textbf{随机采样节点}——第 1 章的反向模式自动微分（链式法则）无法直接穿透一个依赖参数 $\phi$ 的随机抽样门！历史上主要有两条出路：
+
+\begin{enumerate}
+  \item \textbf{分数函数估计器（REINFORCE / Log-Derivative Trick）}：利用恒等式 $\nabla_\phi q_\phi(z) = q_\phi(z)\nabla_\phi \ln q_\phi(z)$，将梯度改写为：
+  \begin{equation}
+    \nabla_\phi \E_{z \sim q_\phi}\!\left[f(z)\right]
+    = \int f(z)\,\nabla_\phi q_\phi(z)\,dz
+    = \E_{z \sim q_\phi}\!\left[f(z)\,\nabla_\phi \ln q_\phi(z)\right].
+    \label{eq:reinforce}
+  \end{equation}
+  虽然式~\eqref{eq:reinforce} 严格无偏且适用于离散隐变量（它在第 6 卷强化学习策略梯度中是核心基石），但它在连续生成模型中存在致命短板：\textbf{完全无视 $f(z)$ 自身可微的精确梯度信息 $\nabla_z f(z)$}，仅靠黑箱标量打分 $f(z)$ 盲目试错，导致单样本蒙特卡洛估计的方差高得惊人，训练极难收敛！
+  \item \textbf{重参数化技巧（Reparameterization / Pathwise Estimator）}：将随机性从参数 $\phi$ 上\textbf{剥离}到一个固定无参的外部噪声源 $\varepsilon \sim \mathcal{N}(0, I_d)$，把采样改写为关于 $(\mu_\phi, \sigma_\phi, \varepsilon)$ 的确定性可微映射：
+  \begin{equation}
+    z = g_\phi(\varepsilon, x) = \mu_\phi(x) + \sigma_\phi(x) \had \varepsilon,
+    \qquad \varepsilon \sim \mathcal{N}(0, I_d).
+    \label{eq:reparam}
+  \end{equation}
+  此时随机变量 $g_\phi(\varepsilon, x)$ 的概率分布与 $q_\phi(z \mid x)$ \textbf{完全同分布}，且期望的积分测度不再依赖 $\phi$！于是梯度运算符可以合法穿过期望号，沿着确定性路径直接调用第 1 章的链式法则：
+  \begin{equation}
+    \nabla_\phi \E_{z \sim q_\phi(z \mid x)}\!\left[f_\theta(z)\right]
+    = \E_{\varepsilon \sim \mathcal{N}(0, I_d)}\!\left[\nabla_\phi f_\theta\!\big(\mu_\phi(x) + \sigma_\phi(x)\had \varepsilon\big)\right]
+    = \E_{\varepsilon}\!\left[\big(\nabla_z f_\theta(z)\big)^\top \frac{\partial g_\phi(\varepsilon, x)}{\partial \phi}\right].
+    \label{eq:reparam-grad}
+  \end{equation}
+\end{enumerate}
+
+重参数化到底把梯度方差降低了多少？我们用一道极干净的解析基准给出精确回答！
+
+\begin{thmBox}
+\begin{proposition}[重参数化与 REINFORCE 的解析方差鸿沟]
+\label{prop:reparam-var}
+考虑一维二次目标 $f(z) = z^2$ 与变分分布 $q_\mu(z) = \mathcal{N}(\mu, \sigma^2)$（$\sigma > 0$ 固定），其真实均值梯度为 $\frac{\partial}{\partial \mu}\E_{q_\mu}[z^2] = \frac{\partial}{\partial \mu}(\mu^2 + \sigma^2) = 2\mu$。设 $\hat{g}_{\mathrm{reparam}}$ 与 $\hat{g}_{\mathrm{RF}}$ 分别为重参数化与 REINFORCE 的单样本无偏梯度估计器，则两者方差精确为：
+\begin{equation}
+  \Var(\hat{g}_{\mathrm{reparam}}) = 4\sigma^2,
+  \qquad
+  \Var(\hat{g}_{\mathrm{RF}}) = \frac{\mu^4}{\sigma^2} + 14\mu^2 + 15\sigma^2.
+  \label{eq:reparam-vs-rf-var}
+\end{equation}
+\end{proposition}
+\begin{proof}
+记标准正态变量 $\varepsilon \sim \mathcal{N}(0, 1)$，利用标准正态高阶中心矩 $\E[\varepsilon] = \E[\varepsilon^3] = \E[\varepsilon^5] = 0$、$\E[\varepsilon^2] = 1$、$\E[\varepsilon^4] = 3$、$\E[\varepsilon^6] = 15$：
+\begin{enumerate}
+  \item \textbf{重参数化估计器}：令 $z = \mu + \sigma \varepsilon$，直接求导得 $\hat{g}_{\mathrm{reparam}} = \frac{\partial}{\partial \mu}(\mu + \sigma\varepsilon)^2 = 2\mu + 2\sigma\varepsilon$。显然 $\E[\hat{g}_{\mathrm{reparam}}] = 2\mu$，其方差为
+  \[
+    \Var(\hat{g}_{\mathrm{reparam}}) = \Var(2\sigma\varepsilon) = 4\sigma^2,
+  \]
+  完全不随均值位置 $\mu$ 膨胀，且随不确定度 $\sigma \to 0$ 趋于零。
+  \item \textbf{REINFORCE 估计器}：由 $\frac{\partial}{\partial \mu}\ln q_\mu(z) = \frac{z - \mu}{\sigma^2} = \frac{\varepsilon}{\sigma}$，得
+  \[
+    \hat{g}_{\mathrm{RF}} = z^2 \frac{z - \mu}{\sigma^2}
+    = (\mu + \sigma\varepsilon)^2 \frac{\varepsilon}{\sigma}
+    = \frac{\mu^2}{\sigma}\varepsilon + 2\mu\varepsilon^2 + \sigma\varepsilon^3.
+  \]
+  易见 $\E[\hat{g}_{\mathrm{RF}}] = 2\mu\,\E[\varepsilon^2] = 2\mu$（同样无偏）。计算其二阶矩（奇数次项期望全为零）：
+  \begin{align*}
+    \E[\hat{g}_{\mathrm{RF}}^2]
+    &= \frac{\mu^4}{\sigma^2}\E[\varepsilon^2] + 4\mu^2\E[\varepsilon^4] + \sigma^2\E[\varepsilon^6] + 2\left(\frac{\mu^2}{\sigma}\right)\sigma\,\E[\varepsilon^4] \\
+    &= \frac{\mu^4}{\sigma^2} + 12\mu^2 + 15\sigma^2 + 6\mu^2
+    = \frac{\mu^4}{\sigma^2} + 18\mu^2 + 15\sigma^2.
+  \end{align*}
+  减去均值平方 $(2\mu)^2 = 4\mu^2$，即得 $\Var(\hat{g}_{\mathrm{RF}}) = \frac{\mu^4}{\sigma^2} + 14\mu^2 + 15\sigma^2$。
+\end{enumerate}
+\end{proof}
+\end{thmBox}
+
+代入一组最平常的数值 $\mu = 3,\; \sigma = 0.5$：重参数化的梯度方差仅为 $4 \times 0.25 = 1.0$，而 REINFORCE 的方差竟高达 $324 + 126 + 3.75 = \mathbf{453.75}$！更致命的是，当编码器学得越来越精准（$\sigma \to 0$）时，重参数化方差收敛到 $0$，REINFORCE 方差却按 $O(\mu^4 / \sigma^2)$ \textbf{发散爆炸}！正是重参数化带来的极低方差，使得 VAE 在每个训练步只需采样 $L = 1$ 个噪声 $\varepsilon$ 即可配合 AdamW 丝滑收敛。
+
+\begin{failBox}{VAE 的两大经典顽疾：后验坍缩（Posterior Collapse）与图像模糊}
+\begin{enumerate}
+  \item \textbf{后验坍缩（Posterior Collapse）}：当解码器 $p_\theta(x \mid z)$ 过于强大（例如采用自回归 LSTM、PixelCNN 或 Transformer 解码器）时，即使完全无视输入隐码 $z$，解码器单凭像素或词元之间的局部相关性也能取得很低的负对数似然 $-\ln p_\theta(x \mid z)$。此时优化器为了白白赚取 KL 项的零损失，会迅速把所有样本的编码器推向恒等先验：
+  \[
+    q_\phi(z \mid x) \equiv \mathcal{N}(0, I_d) \quad (\forall x) \implies \DKL\!\big(q_\phi(z \mid x) \,\|\, p(z)\big) \to 0,\quad I_q(X; Z) \to 0!
+  \]
+  这就是令人头疼的\textbf{后验坍缩}——编码器彻底摆烂，隐变量 $z$ 与输入 $x$ 互信息归零，模型失去了所有可控表征能力。\textbf{三大工业急救法}：① \textbf{KL 退火（KL Annealing）}：在目标函数中引入系数 $\beta_t$，训练前期令 $\beta_t$ 从 $0$ 线性热身至 $1$，先让编码器把有用信息写入 $z$ 再逐步施加先验约束；\mbox{② \textbf{自由比特（Free Bits）}}：把逐维 KL 改为 $\max(\lambda_{\text{free}},\, \DKL^{(j)})$，允许每个维度免费携带至少 $\lambda_{\text{free}}$ nats 信息不受压制；③ \textbf{离散码本（VQ-VAE）}：将连续隐变量量化到离散码本，彻底规避高斯 KL 坍缩（这也是 Stable Diffusion 早期潜空间压缩器的先驱）。
+  \item \textbf{高斯似然导致的“平均化模糊”}：若解码器假定像素服从各向同性高斯 $p_\theta(x \mid z) = \mathcal{N}(\mu_\theta(z), \sigma^2 I)$，最大化对数似然等价于最小化像素 $L_2$ 误差 $\|x - \mu_\theta(z)\|_2^2$。当同一隐码 $z$ 对应多种合理解码细节（如头发丝向左或向右偏 1 像素）时，最小化 $L_2$ 风险的最优预测是\textbf{所有可能结果的算术平均}——在视觉上便呈现出一层挥之不去的“磨砂模糊感”。
+\end{enumerate}
+\end{failBox}
+
+\section{扩散模型（DDPM）：层次化加噪、逆向后验与分数匹配}
+\label{sec:ddpm}
+
+为什么单步 VAE 在高分辨率图像生成上总显吃力？本质原因在于它试图让解码器\textbf{一步登天}：一次性把低维正态噪声直接映射为百万像素的精细流形。既然一步跨不过天堑，一个天才而返璞归真的想法呼之欲出：\textbf{把“从纯噪声画出一幅画”拆解成 $T$ 个微小的、几乎线性的渐进式去噪小步}！
+
+这正是 Sohl-Dickstein 等人（2015）奠基、Ho 等人（2020）以极简形式引爆全球的\textbf{去噪扩散概率模型（Denoising Diffusion Probabilistic Models, DDPM）}。在数学上，DDPM 可以精确视作一个\textbf{与数据同维的 $T$ 层层次化 VAE}，其精妙之处在于：\textbf{前向编码器（加噪过程）完全固定、无需任何可训练参数}，从而将全部神经网络容量倾注于学习逆向去噪！
+
+\subsection{前向马尔可夫加噪与任意步闭式采样定理}
+
+给定数据分布样本 $x_0 \sim q(x_0)$（$x_0 \in \R^D$）及预先设定的单调递增小方差表（Noise Schedule）$0 < \beta_1 < \beta_2 < \dots < \beta_T < 1$，定义长度为 $T$ 的前向马尔可夫加噪链：
+\begin{equation}
+  q(x_{1:T} \mid x_0) = \prod_{t=1}^{T} q(x_t \mid x_{t-1}),
+  \qquad
+  q(x_t \mid x_{t-1}) = \mathcal{N}\!\big(x_t;\, \sqrt{1 - \beta_t}\, x_{t-1},\; \beta_t I\big).
+  \label{eq:ddpm-forward-step}
+\end{equation}
+注意系数 $\sqrt{1 - \beta_t}$ 的用意：它恰好保持方差量级守恒——若 $\Var(x_{t-1}) = I$，则 $\Var(\sqrt{1-\beta_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon) = (1-\beta_t)I + \beta_t I = I$！随着步数 $t$ 推进，原始信号不断按 $\sqrt{1-\beta_t}$ 衰减、高斯白噪声不断注入，当 $T$ 足够大时，$x_T$ 的分布便与纯标准高斯 $\mathcal{N}(0, I)$ 几乎无法区分。
+
+为方便书写，引入两个贯穿全章的标准记号：
+\begin{equation}
+  \alpha_t := 1 - \beta_t, \qquad \bar{\alpha}_t := \prod_{s=1}^{t} \alpha_s
+  \qquad (\text{约定 } \bar{\alpha}_0 := 1).
+  \label{eq:ddpm-alpha}
+\end{equation}
+训练时，我们绝不需要真的执行 $t$ 次串行加噪才能拿到 $x_t$——高斯分布的线性可加性赋予了我们“一步直达任意时刻 $t$”的闭式时空穿梭机！
+
+\begin{thmBox}
+\begin{theorem}[DDPM 前向扩散的任意步闭式边缘分布]
+\label{thm:ddpm-forward}
+在前向马尔可夫过程~\eqref{eq:ddpm-forward-step} 下，对任意步数 $t \in \{1, 2, \dots, T\}$，给定初始数据 $x_0$ 时的条件边缘分布精确为：
+\begin{equation}
+  q(x_t \mid x_0) = \mathcal{N}\!\big(x_t;\, \sqrt{\bar{\alpha}_t}\, x_0,\; (1 - \bar{\alpha}_t) I\big),
+  \label{eq:ddpm-xt-closed}
+\end{equation}
+等价地，可用单个标准高斯噪声 $\varepsilon \sim \mathcal{N}(0, I)$ 一步重参数化采样：
+\begin{equation}
+  x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\,\varepsilon.
+  \label{eq:ddpm-xt-reparam}
+\end{equation}
+\end{theorem}
+\begin{proof}
+对时间步 $t$ 施用数学归纳法。
+\begin{itemize}
+  \item \textbf{奠基步骤（$t = 1$）}：由于 $\bar{\alpha}_1 = \alpha_1 = 1 - \beta_1$，式~\eqref{eq:ddpm-forward-step} 直接给出
+  \[
+    q(x_1 \mid x_0) = \mathcal{N}\!\big(\sqrt{\alpha_1}\, x_0,\, (1 - \alpha_1) I\big)
+    = \mathcal{N}\!\big(\sqrt{\bar{\alpha}_1}\, x_0,\, (1 - \bar{\alpha}_1) I\big),
+  \]
+  命题在 $t = 1$ 成立。
+  \item \textbf{归纳假设与递推（$t-1 \implies t$）}：假设对 $t - 1$ 成立 $x_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\, x_0 + \sqrt{1 - \bar{\alpha}_{t-1}}\, \bar{\varepsilon}_{t-1}$，其中 $\bar{\varepsilon}_{t-1} \sim \mathcal{N}(0, I)$。按第 $t$ 步转移规则~\eqref{eq:ddpm-forward-step} 引入独立标准正态噪声 $\varepsilon_t \sim \mathcal{N}(0, I)$（与 $\bar{\varepsilon}_{t-1}$ 独立）：
+  \begin{align*}
+    x_t &= \sqrt{\alpha_t}\, x_{t-1} + \sqrt{1 - \alpha_t}\,\varepsilon_t \\
+        &= \sqrt{\alpha_t}\!\left(\sqrt{\bar{\alpha}_{t-1}}\, x_0 + \sqrt{1 - \bar{\alpha}_{t-1}}\,\bar{\varepsilon}_{t-1}\right) + \sqrt{1 - \alpha_t}\,\varepsilon_t \\
+        &= \sqrt{\alpha_t \bar{\alpha}_{t-1}}\, x_0
+           + \underbrace{\sqrt{\alpha_t(1 - \bar{\alpha}_{t-1})}\,\bar{\varepsilon}_{t-1} + \sqrt{1 - \alpha_t}\,\varepsilon_t}_{\text{两个独立零均值高斯随机向量之和}}.
+  \end{align*}
+  由于独立高斯随机向量相加仍为高斯分布且方差直接相加，上式第二部分服从零均值各向同性高斯分布，其标量方差精确化简为：
+  \[
+    \alpha_t(1 - \bar{\alpha}_{t-1}) + (1 - \alpha_t)
+    = \alpha_t - \alpha_t\bar{\alpha}_{t-1} + 1 - \alpha_t
+    = 1 - \bar{\alpha}_t.
+  \]
+  又 $\sqrt{\alpha_t \bar{\alpha}_{t-1}} = \sqrt{\bar{\alpha}_t}$，故 $x_t$ 与 $\sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1 - \bar{\alpha}_t}\,\varepsilon$（$\varepsilon \sim \mathcal{N}(0, I)$）严格同分布。由数学归纳法原理，式~\eqref{eq:ddpm-xt-closed} 对所有 $t = 1, \dots, T$ 成立。
+\end{itemize}
+\end{proof}
+\end{thmBox}
+
+\subsection{变分下界分解与逆向条件后验的精确推导}
+
+现在定义参数化逆向去噪马尔可夫链：从纯高斯先验 $p(x_T) = \mathcal{N}(0, I)$ 起步，每步由参数为 $\theta$ 的神经网络预测高斯去噪转移核：
+\begin{equation}
+  p_\theta(x_{0:T}) = p(x_T)\prod_{t=1}^{T} p_\theta(x_{t-1} \mid x_t),
+  \qquad
+  p_\theta(x_{t-1} \mid x_t) = \mathcal{N}\!\big(x_{t-1};\, \mu_\theta(x_t, t),\; \Sigma_\theta(x_t, t)\big).
+  \label{eq:ddpm-reverse}
+\end{equation}
+沿用式~\eqref{eq:elbo-recall} 的 ELBO 思想（将整条轨迹 $x_{1:T}$ 视作高维隐变量 $z$），负对数似然受控于变分上界（VLB）：
+\[
+  \E_{q(x_0)}\!\left[-\ln p_\theta(x_0)\right]
+  \le \E_{q(x_{0:T})}\!\left[\ln \frac{q(x_{1:T} \mid x_0)}{p_\theta(x_{0:T})}\right]
+  = \E_{q}\!\left[-\ln p(x_T) + \sum_{t=2}^{T} \ln \frac{q(x_t \mid x_{t-1})}{p_\theta(x_{t-1} \mid x_t)} + \ln\frac{q(x_1 \mid x_0)}{p_\theta(x_0 \mid x_1)}\right].
+\]
+此处若直接做蒙特卡洛估计方差极大，因为分子 $q(x_t \mid x_{t-1})$ 与分母 $p_\theta(x_{t-1} \mid x_t)$ 的条件方向正好相反！关键一招是借助马尔可夫性与贝叶斯定理，给每个前向步添上 $x_0$ 条件并翻转方向：
+\[
+  q(x_t \mid x_{t-1}) = q(x_t \mid x_{t-1}, x_0)
+  = \frac{q(x_{t-1} \mid x_t, x_0)\, q(x_t \mid x_0)}{q(x_{t-1} \mid x_0)} \qquad (t \ge 2).
+\]
+代入求和中，相邻项的 $\ln q(x_t \mid x_0)$ 与 $-\ln q(x_{t-1} \mid x_0)$ 发生华丽的\textbf{望远镜对消（Telescoping Cancellation）}，仅余首尾两项 $\ln q(x_T \mid x_0) - \ln q(x_1 \mid x_0)$，而 $-\ln q(x_1 \mid x_0)$ 又恰好与末项 $+\ln q(x_1 \mid x_0)$ 抵消！整理后，整条扩散链的变分上界优雅分解为一系列完全可解析计算的 KL 散度之和：
+\begin{equation}
+  \mathcal{L}_{\mathrm{VLB}}(\theta)
+  = \E_{q}\!\Bigg[
+    \underbrace{\DKL\!\big(q(x_T \mid x_0) \,\|\, p(x_T)\big)}_{L_T\text{（无参数常数）}}
+    + \sum_{t=2}^{T} \underbrace{\DKL\!\big(q(x_{t-1} \mid x_t, x_0) \,\|\, p_\theta(x_{t-1} \mid x_t)\big)}_{L_{t-1}\text{（逐层高斯去噪匹配）}}
+    \underbrace{-\ln p_\theta(x_0 \mid x_1)}_{L_0\text{（末步重建）}}
+  \Bigg].
+  \label{eq:ddpm-vlb}
+\end{equation}
+
+要让 $p_\theta(x_{t-1} \mid x_t)$ 去精准贴近目标分布 $q(x_{t-1} \mid x_t, x_0)$，我们必须先把后者\textbf{彻底算出来}！令人欣喜的是，虽然无条件逆向分布 $q(x_{t-1} \mid x_t)$ 不可知（需要知道整个数据分布），但只要\textbf{额外给定起点 $x_0$}，$q(x_{t-1} \mid x_t, x_0)$ 竟然是一个完全解析的高斯分布！
+
+\begin{thmBox}
+\begin{theorem}[DDPM 逆向条件后验的精确闭式公式]
+\label{thm:ddpm-posterior}
+对任意 $t \in \{2, \dots, T\}$，给定当前加噪样本 $x_t$ 与原始干净样本 $x_0$ 时，前一步 $x_{t-1}$ 的真实条件后验分布严格服从各向同性高斯分布：
+\begin{equation}
+  q(x_{t-1} \mid x_t, x_0) = \mathcal{N}\!\big(x_{t-1};\, \tilde{\mu}_t(x_t, x_0),\; \tilde{\beta}_t I\big),
+  \label{eq:ddpm-post-gauss}
+\end{equation}
+其精确方差与均值分别为：
+\begin{equation}
+  \tilde{\beta}_t = \frac{1 - \bar{\alpha}_{t-1}}{1 - \bar{\alpha}_t}\,\beta_t,
+  \qquad
+  \tilde{\mu}_t(x_t, x_0) = \frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1 - \bar{\alpha}_t}\, x_0
+  + \frac{\sqrt{\alpha_t}(1 - \bar{\alpha}_{t-1})}{1 - \bar{\alpha}_t}\, x_t.
+  \label{eq:ddpm-post-mean-x0}
+\end{equation}
+进一步，利用式~\eqref{eq:ddpm-xt-reparam} 将 $x_0 = \frac{1}{\sqrt{\bar{\alpha}_t}}\big(x_t - \sqrt{1 - \bar{\alpha}_t}\,\varepsilon\big)$ 代入，后验均值可化为极其简洁的\textbf{噪声参数化形式}：
+\begin{equation}
+  \tilde{\mu}_t(x_t, \varepsilon) = \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon\right).
+  \label{eq:ddpm-post-mean-eps}
+\end{equation}
+\end{theorem}
+\begin{proof}
+\textbf{第一步：贝叶斯定理展开指数二次型。} 由贝叶斯公式与前向马尔可夫性质 $q(x_t \mid x_{t-1}, x_0) = q(x_t \mid x_{t-1})$，将 $q(x_{t-1} \mid x_t, x_0)$ 视为关于变量 $x_{t-1}$ 的密度（吸收一切仅依赖 $x_t, x_0$ 的归一化常数）：
+\[
+  q(x_{t-1} \mid x_t, x_0)
+  = \frac{q(x_t \mid x_{t-1})\, q(x_{t-1} \mid x_0)}{q(x_t \mid x_0)}
+  \propto q(x_t \mid x_{t-1})\, q(x_{t-1} \mid x_0).
+\]
+将式~\eqref{eq:ddpm-forward-step} 与定理~\ref{thm:ddpm-forward} 中的两个高斯密度代入，提取指数括号内的全部 $x_{t-1}$ 项：
+\begin{align*}
+  q(x_{t-1} \mid x_t, x_0)
+  &\propto \exp\!\left(
+    -\frac{1}{2}\!\left[
+      \frac{\norm{x_t - \sqrt{\alpha_t}\, x_{t-1}}_2^2}{\beta_t}
+      + \frac{\norm{x_{t-1} - \sqrt{\bar{\alpha}_{t-1}}\, x_0}_2^2}{1 - \bar{\alpha}_{t-1}}
+    \right]
+  \right) \\
+  &\propto \exp\!\left(
+    -\frac{1}{2}\!\left[
+      \underbrace{\left(\frac{\alpha_t}{\beta_t} + \frac{1}{1 - \bar{\alpha}_{t-1}}\right)}_{A_t} \norm{x_{t-1}}_2^2
+      - 2 \underbrace{\left(\frac{\sqrt{\alpha_t}}{\beta_t}\, x_t + \frac{\sqrt{\bar{\alpha}_{t-1}}}{1 - \bar{\alpha}_{t-1}}\, x_0\right)^\top}_{b_t^\top} x_{t-1}
+    \right]
+  \right).
+\end{align*}
+
+\textbf{第二步：配方法精确读出方差 $\tilde{\beta}_t$ 与均值 $\tilde{\mu}_t(x_t, x_0)$。} 对比标准高斯指数 $-\frac{1}{2\tilde{\beta}_t}\norm{x_{t-1} - \tilde{\mu}_t}_2^2 = -\frac{1}{2}\big(\tilde{\beta}_t^{-1}\norm{x_{t-1}}_2^2 - 2\tilde{\beta}_t^{-1}\tilde{\mu}_t^\top x_{t-1} + \text{const}\big)$，立即有 $\tilde{\beta}_t = A_t^{-1}$ 与 $\tilde{\mu}_t = \tilde{\beta}_t b_t$。先通分化简精度系数 $A_t$（注意 $\beta_t = 1 - \alpha_t$ 且 $\alpha_t \bar{\alpha}_{t-1} = \bar{\alpha}_t$）：
+\[
+  A_t = \frac{\alpha_t}{\beta_t} + \frac{1}{1 - \bar{\alpha}_{t-1}}
+      = \frac{\alpha_t(1 - \bar{\alpha}_{t-1}) + \beta_t}{\beta_t(1 - \bar{\alpha}_{t-1})}
+      = \frac{\alpha_t - \bar{\alpha}_t + 1 - \alpha_t}{\beta_t(1 - \bar{\alpha}_{t-1})}
+      = \frac{1 - \bar{\alpha}_t}{\beta_t(1 - \bar{\alpha}_{t-1})}.
+\]
+取倒数即得后验方差：
+\[
+  \tilde{\beta}_t = A_t^{-1} = \frac{1 - \bar{\alpha}_{t-1}}{1 - \bar{\alpha}_t}\,\beta_t.
+\]
+将其乘以线性系数向量 $b_t$，精确约分即得式~\eqref{eq:ddpm-post-mean-x0}：
+\[
+  \tilde{\mu}_t(x_t, x_0)
+  = \frac{1 - \bar{\alpha}_{t-1}}{1 - \bar{\alpha}_t}\,\beta_t
+    \left(\frac{\sqrt{\alpha_t}}{\beta_t}\, x_t + \frac{\sqrt{\bar{\alpha}_{t-1}}}{1 - \bar{\alpha}_{t-1}}\, x_0\right)
+  = \frac{\sqrt{\alpha_t}(1 - \bar{\alpha}_{t-1})}{1 - \bar{\alpha}_t}\, x_t
+  + \frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1 - \bar{\alpha}_t}\, x_0.
+\]
+
+\textbf{第三步：代换 $x_0$ 化为纯噪声表达 $\tilde{\mu}_t(x_t, \varepsilon)$。} 由式~\eqref{eq:ddpm-xt-reparam} 反解 $x_0 = \frac{1}{\sqrt{\bar{\alpha}_t}}\big(x_t - \sqrt{1 - \bar{\alpha}_t}\,\varepsilon\big)$，并利用恒等式 $\frac{\sqrt{\bar{\alpha}_{t-1}}}{\sqrt{\bar{\alpha}_t}} = \frac{1}{\sqrt{\alpha_t}}$，代入上式：
+\begin{align*}
+  \tilde{\mu}_t(x_t, \varepsilon)
+  &= \frac{\sqrt{\alpha_t}(1 - \bar{\alpha}_{t-1})}{1 - \bar{\alpha}_t}\, x_t
+   + \frac{\beta_t}{\sqrt{\alpha_t}(1 - \bar{\alpha}_t)}\!\left(x_t - \sqrt{1 - \bar{\alpha}_t}\,\varepsilon\right) \\
+  &= \frac{\alpha_t(1 - \bar{\alpha}_{t-1}) + (1 - \alpha_t)}{\sqrt{\alpha_t}(1 - \bar{\alpha}_t)}\, x_t
+   - \frac{1 - \alpha_t}{\sqrt{\alpha_t}\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon.
+\end{align*}
+注意第一项的分子恰为 $\alpha_t - \bar{\alpha}_t + 1 - \alpha_t = 1 - \bar{\alpha}_t$，与分母中的 $(1 - \bar{\alpha}_t)$ 奇迹般完全约去！于是提出公因子 $\frac{1}{\sqrt{\alpha_t}}$，即得式~\eqref{eq:ddpm-post-mean-eps}：
+\[
+  \tilde{\mu}_t(x_t, \varepsilon) = \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon\right).
+\]
+\end{proof}
+\end{thmBox}
+
+\subsection{极简 $\varepsilon$-预测目标与去噪分数匹配（Score Matching）的深层统一}
+
+现在回到式~\eqref{eq:ddpm-vlb} 中的核心训练项 $L_{t-1} = \DKL\big(q(x_{t-1} \mid x_t, x_0) \,\|\, p_\theta(x_{t-1} \mid x_t)\big)$。Ho 等人（2020）将逆向方差固定为与输入无关的常数 $\Sigma_\theta(x_t, t) = \sigma_t^2 I$（实测取 $\sigma_t^2 = \beta_t$ 或 $\sigma_t^2 = \tilde{\beta}_t$ 表现相近），并依照式~\eqref{eq:ddpm-post-mean-eps} 的解析形式，用神经网络 $\varepsilon_\theta(x_t, t)$ 预测被掺入的噪声 $\varepsilon$，从而参数化逆向均值：
+\begin{equation}
+  \mu_\theta(x_t, t) := \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon_\theta(x_t, t)\right).
+  \label{eq:ddpm-mu-theta}
+\end{equation}
+由两个同方差各向同性高斯分布的 KL 散度公式（只剩均值欧氏距离平方），立得：
+\[
+  L_{t-1}(\theta)
+  = \E_{x_0, \varepsilon}\!\left[\frac{1}{2\sigma_t^2}\norm{\tilde{\mu}_t(x_t, \varepsilon) - \mu_\theta(x_t, t)}_2^2\right]
+  = \E_{x_0, \varepsilon}\!\left[
+      \underbrace{\frac{(1 - \alpha_t)^2}{2\sigma_t^2 \alpha_t (1 - \bar{\alpha}_t)}}_{w_t}
+      \norm{\varepsilon - \varepsilon_\theta(\sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1 - \bar{\alpha}_t}\,\varepsilon,\, t)}_2^2
+    \right].
+\]
+Ho 等人发现了一件极富启发性的工程事实：直接\textbf{舍弃}随时间步剧烈变化的前置权重 $w_t$（它把过重权重压在噪声极小的 $t \approx 1$ 细枝末节上，反而不利于学习全局结构），让所有时间步 $t \in \{1, \dots, T\}$ 等权平均，不仅把整个变分下界压缩成了令人震撼的一行均方误差，反而大幅提升了真实图像生成质量！这就是著名的 \textbf{DDPM 简化训练目标}：
+\begin{equation}
+  \mathcal{L}_{\mathrm{simple}}(\theta)
+  = \E_{t \sim \mathcal{U}\{1,\dots,T\},\; x_0 \sim q(x_0),\; \varepsilon \sim \mathcal{N}(0, I)}
+    \!\left[\norm{\varepsilon - \varepsilon_\theta\!\left(\sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\,\varepsilon,\; t\right)}_2^2\right].
+  \label{eq:ddpm-lsimple}
+\end{equation}
+训练时只需随机抽一个数据 $x_0$、随机抽一个步号 $t$、随机撒一撮白噪声 $\varepsilon$，让网络看着被污染的 $x_t$ 猜出刚才撒进去的 $\varepsilon$ 即可！推理采样时则从 $x_T \sim \mathcal{N}(0, I)$ 起步，沿 $t = T, T-1, \dots, 1$ 逐轮减去预测噪声并补入微小扰动 $z \sim \mathcal{N}(0, I)$（末步 $t=1$ 不加噪）：
+\begin{equation}
+  x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon_\theta(x_t, t)\right) + \sigma_t z \qquad (t > 1).
+  \label{eq:ddpm-sample-step}
+\end{equation}
+
+更令人惊叹的是，DDPM 与另一条截然不同的物理几何脉络——Song 与 Ermon（2019, 2020）的\textbf{基于分数的生成模型（Score-Based Generative Modeling）}——在数学深处完全合流！
+
+\begin{thmBox}
+\begin{proposition}[噪声预测与去噪分数匹配（Denoising Score Matching）的严格等价]
+\label{prop:dsm}
+给定条件加噪核 $q(x_t \mid x_0) = \mathcal{N}\!\big(\sqrt{\bar{\alpha}_t}\,x_0,\, (1 - \bar{\alpha}_t) I\big)$ 及关系 $x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1 - \bar{\alpha}_t}\,\varepsilon$，其关于加噪样本 $x_t$ 的\textbf{条件对数密度梯度（Stein 分数函数）}精确满足：
+\begin{equation}
+  \nabla_{x_t} \ln q(x_t \mid x_0)
+  = -\frac{x_t - \sqrt{\bar{\alpha}_t}\, x_0}{1 - \bar{\alpha}_t}
+  = -\frac{\varepsilon}{\sqrt{1 - \bar{\alpha}_t}}.
+  \label{eq:score-eps-link}
+\end{equation}
+并且，在全部可能的函数 $s(x_t, t)$ 中，最小化去噪分数匹配目标 $\E_{x_0, x_t}\big[\norm{s(x_t, t) - \nabla_{x_t}\ln q(x_t \mid x_0)}_2^2\big]$ 的唯一理论最优解恰好是\textbf{边际数据分布的真实分数函数} $s^*(x_t, t) = \nabla_{x_t} \ln q_t(x_t)$！
+\end{proposition}
+\begin{proof}
+对 $\ln q(x_t \mid x_0) = -\frac{D}{2}\ln\big(2\pi(1-\bar{\alpha}_t)\big) - \frac{\norm{x_t - \sqrt{\bar{\alpha}_t}\, x_0}_2^2}{2(1-\bar{\alpha}_t)}$ 关于 $x_t$ 直接求梯度，立得式~\eqref{eq:score-eps-link}：
+\[
+  \nabla_{x_t}\ln q(x_t \mid x_0)
+  = -\frac{x_t - \sqrt{\bar{\alpha}_t}\, x_0}{1 - \bar{\alpha}_t}
+  = -\frac{\sqrt{1 - \bar{\alpha}_t}\,\varepsilon}{1 - \bar{\alpha}_t}
+  = -\frac{\varepsilon}{\sqrt{1 - \bar{\alpha}_t}}.
+\]
+再证最优解为边际分数：由于 $L_2$ 风险的逐点极小值由条件期望给出（Vincent, 2011），对任意固定 $x_t$，最优预测器满足
+\begin{align*}
+  s^*(x_t, t)
+  &= \E_{x_0 \sim q(x_0 \mid x_t)}\!\left[\nabla_{x_t} \ln q(x_t \mid x_0)\right]
+   = \int \frac{q(x_0)\, q(x_t \mid x_0)}{q_t(x_t)} \cdot \frac{\nabla_{x_t} q(x_t \mid x_0)}{q(x_t \mid x_0)}\, dx_0 \\
+  &= \frac{1}{q_t(x_t)} \nabla_{x_t} \int q(x_0)\, q(x_t \mid x_0)\, dx_0
+   = \frac{\nabla_{x_t} q_t(x_t)}{q_t(x_t)}
+   = \nabla_{x_t} \ln q_t(x_t).
+\end{align*}
+\end{proof}
+\end{thmBox}
+
+\begin{insightBox}{预测噪声 $\varepsilon$，本质上是在高维空间画出一张指向数据流形的引力场}
+把式~\eqref{eq:score-eps-link} 代回逆向采样更新~\eqref{eq:ddpm-sample-step}，就会看到极其动人的物理图景：
+\[
+  -\frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon_\theta(x_t, t)
+  \;=\; \beta_t\, \underbrace{\left(-\frac{\varepsilon_\theta(x_t, t)}{\sqrt{1 - \bar{\alpha}_t}}\right)}_{s_\theta(x_t, t) \approx \nabla_{x_t} \ln q_t(x_t)}!
+\]
+原来，每一步“减去预测噪声 $\varepsilon_\theta$”，在几何上就是\textbf{沿着加噪数据分布的对数概率梯度（分数向量场）$\nabla_{x_t} \ln q_t(x_t)$ 向上爬坡}！而末尾补入的微小随机项 $\sigma_t z$ 则扮演退火朗之万动力学（Annealed Langevin Dynamics）中的热扰动，帮助粒子跃出低概率浅坑、在多模态数据峰群间按真实概率权重均匀落脚！在连续时间极限 $T \to \infty$ 下，Song 等人（2021）证明整个 DDPM 正是一条由 Anderson（1982）逆时随机微分方程（Reverse-Time SDE）刻画的扩散物理过程。
+\end{insightBox}
+
+\section{实战验证：30 行纯 PyTorch 二维环形分布 DDPM 实测}
+\label{sec:ddpm-exp}
+
+为了亲眼见证纯高斯白噪声如何在神经网络的几十次微步牵引下坍缩到复杂的多模态几何流形，我们在 \texttt{code/vol5\_experiments.py} 的 \texttt{exp6\_ddpm\_2d\_ring} 中，用区区 30 行核心 PyTorch 代码手写了一个二维 DDPM（$T = 40$，线性噪声表 $\beta_t \in [10^{-3}, 0.08]$）。目标数据分布设定为半径 $r = 2.0$ 上的\textbf{四模态高斯环}：四个簇心分别位于 $(\pm 2, 0)$ 与 $(0, \pm 2)$，各簇标准差 $\sigma = 0.18$。去噪网络 $\varepsilon_\theta(x_t, t)$ 仅由一个 3 层 \texttt{SiLU} 多层感知机（输入拼接 $(x_t, t/T) \in \R^3$，隐藏宽度 $64$）构成，完全不依赖任何现成扩散库。
+
+\begin{lstlisting}[caption={纯 PyTorch 二维四模态环 DDPM 核心训练与逆向采样代码（与 \texttt{code/vol5\_experiments.py} 完全一致）},label={lst:ddpm-2d}]
+import math, torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+T = 40
+betas = torch.linspace(1e-3, 0.08, T)
+alphas = 1.0 - betas
+abar = torch.cumprod(alphas, dim=0)
+
+centers = torch.tensor([[2.0, 0.0], [0.0, 2.0], [-2.0, 0.0], [0.0, -2.0]])
+def sample_data(n):
+    idx = torch.randint(0, 4, (n,))
+    return centers[idx] + 0.18 * torch.randn(n, 2)
+
+eps_net = nn.Sequential(
+    nn.Linear(3, 64), nn.SiLU(),
+    nn.Linear(64, 64), nn.SiLU(),
+    nn.Linear(64, 2)
+)
+opt = torch.optim.AdamW(eps_net.parameters(), lr=4e-3)
+
+# ---- 1. DDPM Training Step (Eq. ddpm-lsimple) ----
+for step in range(601):
+    x0 = sample_data(256)
+    t = torch.randint(0, T, (256,))
+    eps = torch.randn_like(x0)
+    ab = abar[t].unsqueeze(-1)
+    xt = torch.sqrt(ab) * x0 + torch.sqrt(1.0 - ab) * eps
+    t_in = ((t.float() + 1.0) / T).unsqueeze(-1)
+    loss = F.mse_loss(eps_net(torch.cat([xt, t_in], dim=-1)), eps)
+    opt.zero_grad(); loss.backward(); opt.step()
+
+# ---- 2. DDPM Reverse Sampling Loop (Eq. ddpm-sample-step) ----
+@torch.no_grad()
+def sample_ddpm(n=400):
+    x = torch.randn(n, 2)
+    for t in reversed(range(T)):
+        t_in = torch.full((n, 1), (t + 1) / T)
+        eps_pred = eps_net(torch.cat([x, t_in], dim=-1))
+        c1 = 1.0 / math.sqrt(alphas[t].item())
+        c2 = (1.0 - alphas[t].item()) / math.sqrt(1.0 - abar[t].item())
+        mean = c1 * (x - c2 * eps_pred)
+        x = mean + math.sqrt(betas[t].item()) * torch.randn_like(x) if t > 0 else mean
+    return x
+\end{lstlisting}
+
+为了量化生成样本的质量，我们在训练过程中每隔 $60$ 步从纯标准正态噪声独立采样 $400$ 个点，计算它们到四个真实簇心最近距离的均值（\texttt{gen\_err}），并与真实数据自身的最近簇心距离下限（\texttt{real\_err}）直接对照。值得顺手做一次精妙的解析验算：对于二维各向同性高斯簇 $c + \sigma \varepsilon$（$\sigma = 0.18$），由于四簇间距 $2\sqrt{2} \approx 2.83 \gg \sigma$，样本到最近簇心的欧氏距离服从缩放瑞利分布（Rayleigh Distribution）$\sigma\sqrt{\varepsilon_1^2 + \varepsilon_2^2}$，其理论期望精确为：
+\[
+  \E[\text{dist}_{\text{real}}] = \sigma \sqrt{\frac{\pi}{2}} \approx 0.18 \times 1.2533 = 0.2256,
+\]
+与脚本实测的 $400$ 个真实样本均值 \texttt{real\_err = 0.2232} 吻合误差不足 $1\%$！
+
+实测数据（完整保存在 \texttt{data/ddpm\_train.csv}）呈现了清晰的收敛进程（见图~\ref{fig:ddpm-train}）：
+\begin{itemize}
+  \item \textbf{\texttt{step = 0}（未训练初始化）}：预测噪声几乎为零，每维噪声预测均方误差 \texttt{eps\_mse = 0.9883}（紧贴标准正态方差理论值 $1.0$）；此时逆向采样的 400 个点杂乱散落，平均距最近簇心高达 \texttt{gen\_err = 2.522}；
+  \item \textbf{\texttt{step = 180}}：模型迅速刻画出四个簇的全局引力盆地，\texttt{eps\_mse} 降至 \texttt{0.5192}，生成样本距离骤降 $80\%$ 至 \texttt{0.506}；
+  \item \textbf{\texttt{step = 360}}：分布形态进一步收紧，\texttt{eps\_mse} 降至 \texttt{0.4360}，\texttt{gen\_err = 0.372}；
+  \item \textbf{\texttt{step = 600}}：生成样本已稳稳汇聚于四座高斯孤岛上，\texttt{gen\_err = 0.297}（第 480 步已达 \texttt{0.292}），逼近真实分布的瑞利物理下限 \texttt{0.223}！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left panel: Generation distance to nearest true mode
+  \begin{axis}[
+    width=0.47\linewidth,
+    height=5.6cm,
+    xlabel={训练步数（Step）},
+    ylabel={到最近真实模态的平均距离},
+    xmin=-12, xmax=612,
+    ymin=0, ymax=2.8,
+    grid=major,
+    grid style={dashed, gray!25},
+    legend pos=north east,
+    legend style={font=\scriptsize, fill=white, fill opacity=0.9, draw=tealLine},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily},
+    title={\small\sffamily\bfseries (a) 生成样本收敛至四模态真实流形},
+    title style={color=tealDark}
+  ]
+    \addplot[teal, very thick, mark=*, mark size=1.7pt]
+      table[col sep=comma, x=step, y=gen_err] {data/ddpm_train.csv};
+    \addlegendentry{DDPM 生成距离 \texttt{gen\_err}}
+    \addplot[ochre, thick, dashed]
+      table[col sep=comma, x=step, y=real_err] {data/ddpm_train.csv};
+    \addlegendentry{真实分布下限 \texttt{0.223}}
+    \node[font=\scriptsize\sffamily, color=tealDark, anchor=west] at (axis cs:76, 1.73) {step=0: 2.522};
+    \node[font=\scriptsize\sffamily, color=tealDark, anchor=south west] at (axis cs:185, 0.58) {step=180: 0.506};
+    \node[font=\scriptsize\sffamily, color=tealDark, anchor=south east] at (axis cs:592, 0.36) {step=600: 0.297};
+  \end{axis}
+
+  % Right panel: Epsilon prediction MSE
+  \begin{axis}[
+    xshift=0.51\linewidth,
+    width=0.47\linewidth,
+    height=5.6cm,
+    xlabel={训练步数（Step）},
+    ylabel={噪声预测均方误差（$\varepsilon$-MSE）},
+    xmin=-12, xmax=612,
+    ymin=0.2, ymax=1.1,
+    grid=major,
+    grid style={dashed, gray!25},
+    legend pos=north east,
+    legend style={font=\scriptsize, fill=white, fill opacity=0.9, draw=navy!30},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily},
+    title={\small\sffamily\bfseries (b) $\varepsilon$-预测 MSE 与不可约噪声底噪},
+    title style={color=navy}
+  ]
+    \addplot[navy, very thick, mark=square*, mark size=1.5pt]
+      table[col sep=comma, x=step, y=eps_mse] {data/ddpm_train.csv};
+    \addlegendentry{噪声预测 \texttt{eps\_mse}}
+    \draw[slate, densely dotted, thick] (axis cs:0, 0.42) -- (axis cs:600, 0.42);
+    \node[font=\scriptsize\sffamily, color=slate, anchor=north east] at (axis cs:590, 0.31) {大 $t$ 不可约条件方差底噪};
+    \node[font=\scriptsize\sffamily, color=navy, anchor=west] at (axis cs:22, 0.99) {step=0: 0.988};
+  \end{axis}
+\end{tikzpicture}
+\caption{纯 PyTorch 二维四模态高斯环 DDPM 实测曲线（直接读取自 \texttt{data/ddpm\_train.csv}，$T = 40$，半径 $r=2.0$，$\sigma=0.18$）。(a) 仅需 600 步微调，400 个纯噪声采样点经逆向去噪后的最近簇心距离从 \texttt{2.522} 锐减至 \texttt{0.297}，逼近真实分布下限 \texttt{0.223}；(b) $\varepsilon$-MSE 从 \texttt{0.988} 迅速跌落并稳定在 $0.36\sim 0.48$ 区间，呈现扩散模型特有的“高噪声时间步不可约底噪”现象。}
+\label{fig:ddpm-train}
+\end{figure}
+
+\begin{remark}[为什么图~\ref{fig:ddpm-train}(b) 中的 $\varepsilon$-MSE 永远不会降到 $0$？]
+初学扩散模型的读者看到训练损失停在 $0.40$ 左右且小幅波动，常误以为模型“欠拟合”或“没训好”。其实恰恰相反，这是\textbf{Bayes 最优回归的必然特征}！当随机抽到大时间步（如 $t = 38$）时，原始信号 $\sqrt{\bar{\alpha}_t}\,x_0$ 已被严重淹没，同一观测点 $x_t$ 可能以相近后验概率来自四个不同模态 $x_0$，对应四种截然不同的真实噪声 $\varepsilon$。哪怕拥有上帝视角的最优预测器 $\varepsilon^*(x_t, t) = \E[\varepsilon \mid x_t]$，其最小可能均方误差仍严格等于条件方差 $\E[\Var(\varepsilon \mid x_t)] > 0$（且每个小批随机抽取的 $t$ 分布略有起伏，造成单批损失自然抖动）。因此监控扩散模型是否收敛，绝不能只盯单步噪声 MSE，而要定期运行逆向采样检查真实生成分布指标（如本文的 \texttt{gen\_err} 或图像领域的 FID）！
+\end{remark}
+
+\section{流匹配（Flow Matching / Rectified Flow）：拉直生成轨迹}
+\label{sec:flow-matching}
+
+DDPM 彻底解决了 VAE 的图像模糊与 GAN 的训练崩溃，但它留下了一个昂贵的工程遗产：\textbf{采样太慢}。因为前向加噪 $\sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t}\varepsilon$ 与逆向马尔可夫链构成的是高曲率的随机折线轨迹（即使换成对应的确定性概率流 ODE 依然显著弯曲），为了压制数值离散化误差，经典 DDPM 往往需要串行调用超大神经网络 $50 \sim 1000$ 次才能画出一张图！
+
+能否抛开复杂的马尔可夫方差表 $\beta_t, \alpha_t, \bar{\alpha}_t$，直接回答一个返璞归真的几何问题：\textbf{如果强行规定每个噪声点 $x_0 \sim \mathcal{N}(0, I)$ 必须沿着两点间最短的直线奔向真实数据点 $x_1 \sim p_{\text{data}}$，神经网络只需学会预测这条直线上的速度场，行不行？}
+
+这正是 Lipman 等人（2023）的\textbf{流匹配（Flow Matching）}与 Liu 等人（2023）的\textbf{校正流（Rectified Flow）}所给出的惊艳答案——它不仅在数学上比 DDPM 简洁十倍，更直接成为了 Stable Diffusion 3、Flux.1 与 Meta Movie Gen 等新一代旗舰多模态生成模型的统一引擎！
+
+\subsection{连续时间流与时间坐标约定}
+
+\begin{remark}[重要记号约定：DDPM 与流匹配的时间方向互反！]
+在阅读两类文献时务必留意主流时间方向约定：
+\begin{itemize}
+  \item \textbf{DDPM 习惯}：$t = 0$ 是真实数据，$t = T$ 是纯高斯噪声（前向加噪、逆向生成）；
+  \item \textbf{流匹配（Flow Matching）习惯}：$t = 0$ 是纯高斯先验 $x_0 \sim p_0 = \mathcal{N}(0, I)$，$t = 1$ 是真实数据 $x_1 \sim p_1 = p_{\text{data}}$，生成过程就是沿着常微分方程从 $t = 0$ 正向积分至 $t = 1$！
+\end{itemize}
+本节严格遵循流匹配的标准记号（$t \in [0, 1]$：$x_0$ 为噪声，$x_1$ 为数据）。
+\end{remark}
+
+我们希望训练一个由神经网络参数化的时变速度场 $v_\theta(x, t): \R^D \times [0, 1] \to \R^D$，使得粒子从 $x_0 \sim p_0$ 出发，按常微分方程（ODE）：
+\begin{equation}
+  \frac{dx_t}{dt} = v_\theta(x_t, t), \qquad t \in [0, 1]
+  \label{eq:fm-ode}
+\end{equation}
+演化至终时刻 $t = 1$ 时，粒子群的边缘分布 $p_1$ 恰好吻合真实数据分布 $p_{\text{data}}$。由流体力学中的质量守恒原理，速度场 $u_t(x)$ 驱动的密度演化 $p_t(x)$ 必须满足\textbf{连续性方程（Continuity Equation）}：
+\begin{equation}
+  \frac{\partial p_t(x)}{\partial t} + \nabla_x \cdot \!\big(p_t(x)\, u_t(x)\big) = 0.
+  \label{eq:continuity}
+\end{equation}
+可是我们根本不知道能把 $p_0$ 搬运到 $p_1$ 的全局边际速度场 $u_t(x)$ 长什么样！流匹配最震撼的天才构想在于：\textbf{先给定一对具体的起点 $x_0$ 与终点 $x_1$，构造一条显式的直线条件路径，再把无数对直线路径的速度场“叠合”起来！}
+
+\subsection{直线插值路径与条件流匹配（CFM）无偏等价定理}
+
+任取独立配对的噪声 $x_0 \sim p_0 = \mathcal{N}(0, I)$ 与真实样本 $x_1 \sim p_1 = p_{\text{data}}$，在它们之间连结一条最简单的\textbf{匀速直线插值路径}：
+\begin{equation}
+  x_t = (1 - t)\, x_0 + t\, x_1, \qquad t \in [0, 1].
+  \label{eq:rf-path}
+\end{equation}
+在这条直线上，粒子的瞬时条件速度是一个极其清爽的常向量：
+\begin{equation}
+  u_t(x_t \mid x_0, x_1) = \frac{dx_t}{dt} = x_1 - x_0.
+  \label{eq:rf-cond-vel}
+\end{equation}
+现在直接用神经网络 $v_\theta(x_t, t)$ 对该条件速度做最朴素的均方误差回归，定义\textbf{条件流匹配 / 校正流损失（CFM / Rectified Flow Loss）}：
+\begin{equation}
+  \mathcal{L}_{\mathrm{CFM}}(\theta)
+  = \E_{t \sim \mathcal{U}[0,1],\; x_0 \sim \mathcal{N}(0, I),\; x_1 \sim p_{\text{data}}}
+    \!\left[\norm{v_\theta\!\big((1 - t)\, x_0 + t\, x_1,\; t\big) - (x_1 - x_0)}_2^2\right].
+  \label{eq:cfm-loss}
+\end{equation}
+初学者一定会产生一个直击灵魂的疑问：不同样本对 $(x_0, x_1)$ 画出的直线会在中间时刻 $t$ 彼此交叉相撞！同一个点 $x_t$ 处可能对应着截然不同的 $(x_1 - x_0)$ 速度箭头，神经网络去拟合这些互相打架的目标，最终学出来的 ODE 真的能精确复现边际数据分布 $p_1$ 吗？下面这条优美的定理给出斩钉截铁的肯定回答！
+
+\begin{thmBox}
+\begin{theorem}[条件流匹配与边际流匹配的梯度等价性及分布守恒定理]
+\label{thm:cfm}
+在直线路径 $x_t = (1-t)x_0 + t x_1$ 下，记 $p_t(x)$ 为时刻 $t$ 的真实插值边缘密度，并定义该点处所有过路直线的条件平均速度场（边际速度场）：
+\begin{equation}
+  u_t(x) := \E\!\left[x_1 - x_0 \;\middle|\; x_t = x\right].
+  \label{eq:marginal-vel}
+\end{equation}
+那么以下两条核心性质同时严格成立：
+\begin{enumerate}
+  \item \textbf{精确分布传输（连续性方程守恒）}：由边际速度场 $u_t(x)$ 驱动的确定性 ODE $\frac{dx}{dt} = u_t(x)$ 在所有时刻 $t \in [0, 1]$ 严格满足连续性方程~\eqref{eq:continuity}，从而将 $p_0 = \mathcal{N}(0, I)$ 精确搬运至 $p_1 = p_{\text{data}}$；
+  \item \textbf{梯度零偏差等价}：定义不可直接计算的边际流匹配损失 $\mathcal{L}_{\mathrm{FM}}(\theta) := \E_{t,\, x_t \sim p_t}\!\left[\norm{v_\theta(x_t, t) - u_t(x_t)}_2^2\right]$，则 $\mathcal{L}_{\mathrm{CFM}}(\theta)$ 与 $\mathcal{L}_{\mathrm{FM}}(\theta)$ 仅差一个与参数 $\theta$ 无关的常数 $C$，故两者拥有\textbf{完全相同的精确梯度与全局极小解}：
+  \begin{equation}
+    \mathcal{L}_{\mathrm{CFM}}(\theta) = \mathcal{L}_{\mathrm{FM}}(\theta) + C
+    \;\implies\;
+    \nabla_\theta \mathcal{L}_{\mathrm{CFM}}(\theta) = \nabla_\theta \mathcal{L}_{\mathrm{FM}}(\theta),
+    \quad
+    v^*(x, t) = u_t(x).
+    \label{eq:cfm-fm-equiv}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+\textbf{第一部分（弱形式验证连续性方程）。} 任取光滑紧支测试函数 $\varphi \in C_c^\infty(\R^D)$。沿随机直线路径 $x_t = (1-t)x_0 + t x_1$，按链式法则对期望 $\E[\varphi(x_t)]$ 关于时间 $t$ 求导：
+\[
+  \frac{d}{dt}\int_{\R^D} \varphi(x)\, p_t(x)\, dx
+  = \frac{d}{dt}\E_{x_0, x_1}\!\left[\varphi(x_t)\right]
+  = \E_{x_0, x_1}\!\left[\inner{\nabla \varphi(x_t)}{x_1 - x_0}\right].
+\]
+对右端应用全期望公式（条件期望的塔性质），先给定 $x_t$ 对 $(x_0, x_1)$ 求内层期望：
+\begin{align*}
+  \E_{x_0, x_1}\!\left[\inner{\nabla \varphi(x_t)}{x_1 - x_0}\right]
+  &= \E_{x_t}\!\left[\inner{\nabla \varphi(x_t)}{\E\!\left[x_1 - x_0 \mid x_t\right]}\right] \\
+  &= \int_{\R^D} \inner{\nabla \varphi(x)}{u_t(x)}\, p_t(x)\, dx
+   = -\int_{\R^D} \varphi(x)\,\nabla_x \cdot\!\big(p_t(x)\, u_t(x)\big)\, dx,
+\end{align*}
+最后一步使用了高维分部积分（散度定理）以及 $\varphi$ 紧支集在无穷远处为零的性质。由于上式对一切测试函数 $\varphi$ 恒成立，故 $\partial_t p_t + \nabla_x \cdot (p_t u_t) = 0$ 在分布意义下严格成立！
+
+\textbf{第二部分（展开平方并消去交叉项）。} 将 $\mathcal{L}_{\mathrm{CFM}}(\theta)$ 与 $\mathcal{L}_{\mathrm{FM}}(\theta)$ 展开：
+\begin{align*}
+  \mathcal{L}_{\mathrm{CFM}}(\theta)
+  &= \E_{t, x_0, x_1}\!\left[\norm{v_\theta(x_t, t)}_2^2 - 2\inner{v_\theta(x_t, t)}{x_1 - x_0} + \norm{x_1 - x_0}_2^2\right], \\
+  \mathcal{L}_{\mathrm{FM}}(\theta)
+  &= \E_{t, x_t}\!\left[\norm{v_\theta(x_t, t)}_2^2 - 2\inner{v_\theta(x_t, t)}{u_t(x_t)} + \norm{u_t(x_t)}_2^2\right].
+\end{align*}
+两式首项 $\E[\norm{v_\theta(x_t, t)}_2^2]$ 因 $(t, x_t)$ 边缘分布完全一致而严格相等。对于中间交叉项，再次施用全期望公式：
+\[
+  \E_{x_0, x_1}\!\left[\inner{v_\theta(x_t, t)}{x_1 - x_0}\right]
+  = \E_{x_t}\!\left[\inner{v_\theta(x_t, t)}{\E\!\left[x_1 - x_0 \mid x_t\right]}\right]
+  = \E_{x_t}\!\left[\inner{v_\theta(x_t, t)}{u_t(x_t)}\right].
+\]
+于是两损失之差严格等于
+\[
+  C := \mathcal{L}_{\mathrm{CFM}}(\theta) - \mathcal{L}_{\mathrm{FM}}(\theta)
+  = \E_{t, x_0, x_1}\!\left[\norm{x_1 - x_0}_2^2\right] - \E_{t, x_t}\!\left[\norm{u_t(x_t)}_2^2\right],
+\]
+它完全不含参数 $\theta$（恰好等于条件方差的期望）！两端对 $\theta$ 求梯度立得 $\nabla_\theta \mathcal{L}_{\mathrm{CFM}}(\theta) = \nabla_\theta \mathcal{L}_{\mathrm{FM}}(\theta)$，故最小化极其易算的 $\mathcal{L}_{\mathrm{CFM}}(\theta)$ 严格等价于逼近真实的边际速度场 $u_t(x)$！
+\end{proof}
+\end{thmBox}
+
+定理~\ref{thm:cfm} 揭示了一个美妙的物理现象——\textbf{轨迹自动“解交叉”（Uncrossing）}！虽然人工随机配对的直线 $(x_0, x_1)$ 在中途相交，但当确定性 ODE 沿着交点处的\emph{平均速度} $u_t(x)$ 行进时，两条相撞的轨迹会在交点处自然“拐弯交换目的地”，绝不真正穿越彼此，而且平均传输距离严格变短！因此流匹配生成的 ODE 轨迹天生远比 DDPM 笔直得多，只需最朴素的显式欧拉步进：
+\[
+  x_{t + \Delta t} = x_t + \Delta t \cdot v_\theta(x_t, t), \qquad \Delta t = \frac{1}{K},
+\]
+往往仅需 $K = 10 \sim 25$ 步（配合一次“再拉直” Reflow 甚至只需 $1 \sim 4$ 步！）就能输出惊艳的高清图像！
+
+\subsection{三大深度生成范式的全景几何对比}
+
+至此，VAE、DDPM 与 Flow Matching 三大范式的核心机理已全盘托出。图~\ref{fig:gen-compare} 从概率流形与轨迹几何的角度将三者并排呈现，表~\ref{tab:gen-comparison} 则进一步将它们与自回归模型（第 4--5 章）和生成对抗网络（GAN）放入同一坐标系下做系统对照。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2mm, minimum height=0.82cm, align=center, font=\footnotesize\sffamily},
+  arr/.style={-{Stealth[length=2.3mm]}, thick},
+  lbl/.style={font=\scriptsize\sffamily, color=slate}
+]
+  % ==================== Row 1: VAE ====================
+  \node[font=\small\sffamily\bfseries, color=tealDark, anchor=west] at (-0.2, 7.85) {(1) 变分自编码器（VAE）：单步摊销瓶颈与重参数化};
+  \draw[tealLine, rounded corners=2mm, fill=tealLight!45] (-0.2, 5.43) rectangle (15.6, 7.48);
+
+  \node[box, fill=white, draw=teal, minimum width=1.45cm] (vx) at (0.85, 6.42) {真实数据\\$x$};
+  \node[box, fill=tealLight, draw=teal, minimum width=2.1cm] (venc) at (3.65, 6.42) {编码器 $q_\phi(z|x)$\\$(\mu_\phi,\, \sigma_\phi)$};
+  \node[box, fill=ochreLight, draw=ochre, minimum width=2.7cm] (vz) at (7.45, 6.42) {重参数化采样\\$z = \mu_\phi + \sigma_\phi \had \varepsilon$};
+  \node[box, fill=tealLight, draw=teal, minimum width=2.0cm] (vdec) at (11.15, 6.42) {解码器 $p_\theta(x|z)$\\一步映射};
+  \node[box, fill=white, draw=teal, minimum width=1.55cm] (vxhat) at (14.4, 6.42) {重建样本\\$\hat{x}$};
+
+  \draw[arr, teal] (vx) -- (venc);
+  \draw[arr, teal] (venc) -- (vz);
+  \draw[arr, teal] (vz) -- (vdec);
+  \draw[arr, teal] (vdec) -- (vxhat);
+  \node[lbl, anchor=south] at (7.45, 6.86) {$\varepsilon \sim \mathcal{N}(0, I)$ 外部注入，反向梯度可穿透};
+  \node[lbl, anchor=north, color=ochre] at (7.45, 5.98) {$\DKL(q_\phi \,\|\, \mathcal{N}(0,I))$ 拉齐先验 $\cdot$ 推理仅需 1 步（NFE=1）};
+
+  % ==================== Row 2: DDPM ====================
+  \node[font=\small\sffamily\bfseries, color=navy, anchor=west] at (-0.2, 5.05) {(2) 扩散模型（DDPM）：多步随机马尔可夫加噪与逆向去噪};
+  \draw[navy!35, rounded corners=2mm, fill=navyLight!55] (-0.2, 2.25) rectangle (15.6, 4.75);
+
+  \node[box, fill=white, draw=navy, minimum width=1.35cm] (dx0) at (0.85, 3.50) {数据\\$x_0$};
+  \node[box, fill=white, draw=navy!70, minimum width=1.35cm] (dx1) at (3.55, 3.50) {微噪\\$x_1$};
+  \node[font=\bfseries, color=navy] (ddots) at (5.65, 3.50) {$\cdots$};
+  \node[box, fill=white, draw=navy!70, minimum width=1.6cm] (dxt) at (7.95, 3.50) {中间态\\$x_t$};
+  \node[font=\bfseries, color=navy] (ddots2) at (10.3, 3.50) {$\cdots$};
+  \node[box, fill=navyLight, draw=navy, minimum width=2.25cm] (dxT) at (13.6, 3.50) {纯高斯噪声\\$x_T \sim \mathcal{N}(0, I)$};
+
+  % Forward arrows (top, staying inside box)
+  \draw[arr, slate, dashed] (dx0.north east) to[bend left=18] node[above=1pt, font=\scriptsize\sffamily, color=slate] {$q(x_1|x_0)$} (dx1.north west);
+  \draw[arr, slate, dashed] (dx1.north east) to[bend left=12] node[above=1pt, font=\scriptsize\sffamily, color=slate] {固定加噪 $\beta_t$} (dxt.north west);
+  \draw[arr, slate, dashed] (dxt.north east) to[bend left=12] node[above=1pt, font=\scriptsize\sffamily, color=slate] {闭式直达 $\sqrt{\bar{\alpha}_t}x_0 + \sqrt{1-\bar{\alpha}_t}\varepsilon$} (dxT.north west);
+
+  % Reverse arrows (bottom, staying inside box)
+  \draw[arr, ochre] (dxT.south west) to[bend left=12] node[below=1pt, font=\scriptsize\sffamily, color=ochre] {逆向去噪 $p_\theta(x_{t-1}|x_t)$（预测 $\varepsilon_\theta$ / 分数爬坡）} (dxt.south east);
+  \draw[arr, ochre] (dxt.south west) to[bend left=12] (dx1.south east);
+  \draw[arr, ochre] (dx1.south west) to[bend left=18] node[below=1pt, font=\scriptsize\sffamily, color=ochre] {$50\!\sim\!1000$ 步} (dx0.south east);
+
+  % ==================== Row 3: Flow Matching ====================
+  \node[font=\small\sffamily\bfseries, color=plum, anchor=west] at (-0.2, 1.75) {(3) 流匹配（Flow Matching / Rectified Flow）：拉直确定性 ODE 传输轨迹};
+  \draw[plum!35, rounded corners=2mm, fill=plumLight!60] (-0.2, -0.35) rectangle (15.6, 1.45);
+
+  \node[box, fill=plumLight, draw=plum, minimum width=2.35cm] (fx0) at (1.35, 0.58) {纯高斯噪声\\$x_0 \sim \mathcal{N}(0, I)$};
+  \node[box, fill=white, draw=plum, minimum width=3.15cm] (fxt) at (7.70, 0.58) {直线插值态\\$x_t = (1-t)x_0 + t x_1$};
+  \node[box, fill=white, draw=plum, minimum width=2.25cm] (fx1) at (14.1, 0.58) {目标数据\\$x_1 \sim p_{\text{data}}$};
+
+  \draw[arr, plum, very thick] (fx0) -- node[above=2pt, font=\scriptsize\sffamily, color=plum, align=center] {回归速度场\\$v_\theta(x_t, t) \approx x_1 - x_0$} (fxt);
+  \draw[arr, plum, very thick] (fxt) -- node[above=2pt, font=\scriptsize\sffamily, color=plum, align=center] {确定性 ODE 欧拉步进\\（仅需 $10\!\sim\!25$ 步）} (fx1);
+  \node[lbl, anchor=north, color=plum] at (7.70, 0.10) {轨迹平直无冗余随机抖动 $\cdot$ 与现代 DiT 架构无缝契合};
+\end{tikzpicture}}
+\caption{VAE、DDPM 与流匹配（Flow Matching）三大深度生成范式的结构与传输路径几何对照。从“单步压缩瓶颈”（VAE），经由“多步弯曲随机去噪”（DDPM），演化至“直线常微分方程速度场回归”（Flow Matching），深度生成模型逐步实现了训练稳定性、样本保真度与推理速度的全面突破。}
+\label{fig:gen-compare}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{现代深度生成模型五大范式的系统对比}
+\label{tab:gen-comparison}
+{\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{21mm}p{29mm}p{17mm}p{18mm}p{20mm}X@{}}
+\toprule
+\textbf{生成范式} & \textbf{核心训练目标} & \textbf{推理步数 (NFE)} & \textbf{训练稳定性} & \textbf{样本保真与多样性} & \textbf{代表系统与现代角色} \\
+\midrule
+\textbf{VAE} & ELBO（重建 $+$ 高斯 KL） & 极快（1 步） & 极高 & 多样但易模糊 & 现代潜扩散模型（SD / Sora）的\textbf{潜空间压缩底座} \\
+\textbf{GAN} & 极小极大对抗博弈 & 极快（1 步） & 低（易模式坍缩） & 极锐利但覆盖不全 & StyleGAN、VAE 感知/对抗微调损失 \\
+\textbf{自回归 (AR)} & 精确下一词交叉熵 & 逐词元串行（$T$ 步） & 极高 & 离散模态之王 & GPT-4、Llama-3、Qwen、DeepSeek \\
+\textbf{DDPM} & 噪声 $\varepsilon$-MSE / 分数匹配 & 较慢（$50\sim 1000$） & 极高 & 极高保真且全覆盖 & DDPM、Stable Diffusion 1.5/XL、AlphaFold 3 \\
+\textbf{流匹配 (FM)} & 直线速度场 CFM MSE & 较快（$4\sim 25$） & 极高 & 顶级保真与平滑可控 & Stable Diffusion 3、Flux.1、Movie Gen \\
+\bottomrule
+\end{tabularx}}
+\end{table}
+
+\begin{extBox}{现代图像与视频生成的三大加速器：CFG、DDIM 与 DiT}
+将本卷的理论推向工业级文生图（Stable Diffusion 3 / Flux）与文生视频（Sora）只需补上三块至关重要的积木：
+\begin{enumerate}
+  \item \textbf{无分类器引导（Classifier-Free Guidance, CFG；Ho \& Salimans, 2022）}：如何让扩散或流模型严丝合缝地听从文本提示词 $c$（如“一只戴草帽的柴犬”）？在训练时，以 $10\%\sim 20\%$ 的概率随机把文本条件 $c$ 置空为 $\varnothing$，令同一网络同时学会有条件预测 $\varepsilon_\theta(x_t, c)$ 与无条件预测 $\varepsilon_\theta(x_t, \varnothing)$。由贝叶斯公式 $\ln p(c \mid x_t) = \ln p(x_t \mid c) - \ln p(x_t) + \text{const}$，两侧取梯度并代入式~\eqref{eq:score-eps-link} 可知，隐式分类器梯度恰好正比于 $-\big(\varepsilon_\theta(x_t, c) - \varepsilon_\theta(x_t, \varnothing)\big)$！推理时引入引导强度 $w > 1$（常见 $w \in [5, 8]$），构造外推预测：
+  \[
+    \tilde{\varepsilon}_\theta(x_t, c)
+    = \varepsilon_\theta(x_t, \varnothing) + w\,\big(\varepsilon_\theta(x_t, c) - \varepsilon_\theta(x_t, \varnothing)\big),
+  \]
+  在数学上等价于从锐化后的倾斜分布 $p(x_t)\,p(c \mid x_t)^w$ 中采样——牺牲少量边缘多样性，换取图文对齐度与构图锐度的质的飞跃！
+  \item \textbf{去噪扩散隐式模型（DDIM；Song et al., 2021）}：注意到 DDPM 的简化目标~\eqref{eq:ddpm-lsimple} \textbf{只依赖前向边缘分布 $q(x_t \mid x_0)$}，与前向过程是否马尔可夫毫无关系！Song 等人构造了一族共享完全相同边缘分布的非马尔可夫过程，令随机噪声系数 $\eta = 0$ 时逆向过程化为完全确定性的 ODE 离散化，无需重新训练任何权重，即可直接跨步跳跃采样（例如从 $1000$ 步缩减为 $20\sim 50$ 步），速度立提 $20\sim 50$ 倍！
+  \item \textbf{潜空间扩散与扩散 Transformer（LDM \& DiT；Rombach et al., 2022; Peebles \& Xie, 2023）}：在 $1024 \times 1024 \times 3$ 原始像素上跑扩散计算量过于恐怖。现代系统采取了\textbf{“VAE $+$ 扩散/流匹配”的绝妙联姻}——先用预训练 VAE 将像素图 $8\times$ 下采样压缩进紧致连续潜空间 $z \in \R^{128 \times 128 \times 16}$，再在潜空间内运行扩散或流匹配，最后由 VAE 解码器一步还原高清像素！而主干去噪网络也由早期的卷积 U-Net 全面进化为 \textbf{DiT（Diffusion Transformer）}：把潜空间网格切块（Patchify）送入第 4 章的双向 Transformer，通过\textbf{自适应层归一化（adaLN-Zero）}把时间步 $t$ 与文本条件 $c$ 动态注入每一层的缩放平移参数 $(\gamma, \beta, \alpha)$ 中——至此，第 4 章的 Transformer 与第 6 章的扩散/流模型完美合璧，视觉与视频生成也正式迈入第 5 章的\textbf{神经缩放定律时代}！
+\end{enumerate}
+\end{extBox}
+
+\section*{本章小结与第 5 卷收官脉络}
+\addcontentsline{toc}{section}{本章小结与第 5 卷收官脉络}
+
+本章将现代深度生成模型的三条核心数学主脉打通为一座结构严密的大厦：
+\begin{itemize}
+  \item \textbf{变分自编码器（VAE）}承接第 4 卷 EM 算法的 ELBO，借由摊销神经编码器、对角高斯闭式 KL 散度 $\frac{1}{2}\sum_j(\mu_j^2 + \sigma_j^2 - \ln\sigma_j^2 - 1)$ 与低方差重参数化技巧 $z = \mu_\phi + \sigma_\phi \had \varepsilon$，建立了端到端可微的连续隐变量生成框架，至今仍是潜空间扩散模型的压缩基石；
+  \item \textbf{去噪扩散模型（DDPM）}用固定前向马尔可夫加噪 $q(x_t \mid x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_t}x_0, (1-\bar{\alpha}_t)I)$ 拆解生成难题，借贝叶斯与配方法导出精确逆向后验均值 $\tilde{\mu}_t = \frac{1}{\sqrt{\alpha_t}}\big(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}}\varepsilon\big)$，最终沉淀为一行的 $\varepsilon$-MSE 目标，并与去噪分数匹配 $\nabla_{x_t}\ln q(x_t \mid x_0) = -\varepsilon / \sqrt{1-\bar{\alpha}_t}$ 严格等价；纯 PyTorch 2D 四模态实测印证了生成误差从 \texttt{2.522} 逼近真实瑞利下限 \texttt{0.223} 的全过程；
+  \item \textbf{流匹配（Flow Matching / Rectified Flow）}进一步甩掉繁琐的噪声调度与弯曲随机路径，在噪声与数据间直连线段 $x_t = (1-t)x_0 + t x_1$，证明了条件速度场回归与边际连续性方程的精确等价性，以更少步数、更简代码驱动着当代视觉与视频生成前沿。
+\end{itemize}
+
+回顾整部\textbf{第 5 卷《深度学习、自动微分与现代架构》}，我们从第 1 章 60 行手写反向模式自动微分出发，历经第 2 章的初始化与优化动力学、第 3 章的卷积与残差高速公路、第 4 章的缩放注意力与迷你 GPT、第 5 章的自监督预训练与 Chinchilla 缩放律，直至本章的 VAE、扩散与流匹配——现代神经网络的所有核心零件已在你眼前彻底透明。然而，一个预训练好的“通识底座”尚不能自主对齐人类意图、在复杂环境中做长程序贯决策，也还需突破 GPU 显存与集群分布式通信的物理极限。这正是下一卷——\textbf{第 6 卷《强化学习、大模型后训练与 AI 系统》}——等待我们征服的崭新疆域！
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{熟练掌握高斯 KL 手算、重参数化求导与 DDPM 单步噪声表演算}
+
+\begin{enumerate}
+  \item[\textbf{5.6.1}] \textbf{VAE 单样本损失与重参数化梯度完整手算}：设隐空间维度 $d = 1$，某输入 $x = 2.0$ 经编码器输出均值 $\mu = 1.0$ 与对数方差 $s := \ln \sigma^2 = 0.0$（即 $\sigma = 1.0$）。设本次采样抽到外部噪声 $\varepsilon = -0.5$，解码器简化为恒等映射 $\hat{x} = z$，重建损失取 $\mathcal{L}_{\text{rec}} = \frac{1}{2}(x - \hat{x})^2$。
+  \begin{enumerate}
+    \item 计算重参数化隐码 $z$、重建损失 $\mathcal{L}_{\text{rec}}$、式~\eqref{eq:gaussian-kl-closed} 给出的 KL 散度以及总损失 $\mathcal{L}_{\text{tot}} = \mathcal{L}_{\text{rec}} + \DKL$；
+    \item 手工计算总损失对编码器输出参数 $\mu$ 与 $s = \ln \sigma^2$ 的精确偏导数 $\frac{\partial \mathcal{L}_{\text{tot}}}{\partial \mu}$ 与 $\frac{\partial \mathcal{L}_{\text{tot}}}{\partial s}$。
+  \end{enumerate}
+  \exHint{利用 $\sigma = e^{s/2}$，故 $\frac{\partial z}{\partial s} = \frac{1}{2}\sigma\varepsilon$，而 $\frac{\partial \DKL}{\partial s} = \frac{1}{2}(e^s - 1)$。}
+
+  \item[\textbf{5.6.2}] \textbf{微型 $T = 3$ 步 DDPM 系数表与逆向去噪手算}：给定 3 步线性噪声表 $\beta_1 = 0.1,\; \beta_2 = 0.2,\; \beta_3 = 0.3$。
+  \begin{enumerate}
+    \item 逐一计算 $\alpha_t$、累积乘积 $\bar{\alpha}_t$、每步信噪比 $\mathrm{SNR}(t) := \frac{\bar{\alpha}_t}{1 - \bar{\alpha}_t}$，以及式~\eqref{eq:ddpm-post-mean-x0} 给出的真实后验方差 $\tilde{\beta}_2$ 与 $\tilde{\beta}_3$（保留四位小数）；
+    \item 设一维逆向采样行至 $t = 2$ 时状态为 $x_2 = 1.50$，神经网络预测噪声 $\varepsilon_\theta(x_2, 2) = 0.40$，计算去噪均值 $\mu_\theta(x_2, 2)$ 以及该点对应的估计分数 $s_\theta(x_2, 2)$。
+  \end{enumerate}
+  \exHint{按定义 $\bar{\alpha}_1 = 0.9,\; \bar{\alpha}_2 = 0.72,\; \bar{\alpha}_3 = 0.504$；验证 $\tilde{\beta}_t < \beta_t$ 恒成立。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{深入变分界收紧、多参数化等价性与扩散--流匹配数学同构}
+
+\begin{enumerate}
+  \item[\textbf{5.6.3}] \textbf{一般多元高斯 KL 散度公式与标准正态特例}：将定理~\ref{thm:gaussian-kl} 推广到全协方差情形：证明两个 $d$ 维非退化高斯分布 $q = \mathcal{N}(\mu_q, \Sigma_q)$ 与 $p = \mathcal{N}(\mu_p, \Sigma_p)$ 之间的精确 KL 散度为：
+  \[
+    \DKL(q \,\|\, p) = \frac{1}{2}\!\left[\tr(\Sigma_p^{-1}\Sigma_q) + (\mu_p - \mu_q)^\top \Sigma_p^{-1}(\mu_p - \mu_q) - d + \ln \frac{\det \Sigma_p}{\det \Sigma_q}\right],
+  \]
+  并验证当 $\mu_p = 0,\; \Sigma_p = I_d,\; \Sigma_q = \diag(\sigma_1^2, \dots, \sigma_d^2)$ 时，该式精确退化为式~\eqref{eq:gaussian-kl-closed}。
+  \exHint{利用迹的循环不变性 $\E_q[(z - \mu_p)^\top \Sigma_p^{-1}(z - \mu_p)] = \tr\!\big(\Sigma_p^{-1}\E_q[(z-\mu_p)(z-\mu_p)^\top]\big)$！}
+
+  \item[\textbf{5.6.4}] \textbf{DDPM 的三种等价参数化（$x_0 / \varepsilon / v$-预测）与流匹配的时间坐标同构}：
+  \begin{enumerate}
+    \item 在 DDPM 中，除了预测噪声 $\varepsilon$，还可令网络直接预测干净数据 $\hat{x}_0(x_t, t)$，或预测 Salimans 与 Ho（2022）提出的角速度目标 $v_t := \sqrt{\bar{\alpha}_t}\,\varepsilon - \sqrt{1 - \bar{\alpha}_t}\,x_0$。写出三者之间精确的双向代数换算公式，并说明为何在极高噪声步（$\bar{\alpha}_t \to 0$）时直接预测 $x_0$ 极不稳定而 $v$-预测始终保持单位方差；
+    \item 对流匹配直线插值 $x_s = (1 - s)x_0 + s x_1$（$s \in (0, 1)$），令 $\tilde{x}_s := \frac{x_s}{\sqrt{(1-s)^2 + s^2}}$。证明经此尺度重归一化后，$\tilde{x}_s$ 与 DDPM 前向分布~\eqref{eq:ddpm-xt-reparam} 在满足 $\sqrt{\bar{\alpha}_t} = \frac{s}{\sqrt{(1-s)^2 + s^2}}$ 的时间重参数化下\textbf{完全同分布}！
+  \end{enumerate}
+  \exHint{对 $v_t$ 验证 $\Var(v_t) = \bar{\alpha}_t \Var(\varepsilon) + (1-\bar{\alpha}_t)\Var(x_0) = 1$（当 $\Var(x_0) = 1$），且 $x_0 = \sqrt{\bar{\alpha}_t}\,x_t - \sqrt{1-\bar{\alpha}_t}\,v_t$。}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{亲手编写二维流匹配并对比少步采样，复现并治愈 VAE 后验坍缩}
+
+\begin{enumerate}
+  \item[\textbf{5.6.5}] \textbf{同一网络上的正面对决：流匹配 vs DDPM 少步采样实验}：复制代码~\ref{lst:ddpm-2d} 的 4 模态高斯环与完全相同的 3 层 \texttt{SiLU} 网络（\texttt{Linear(3,64)-SiLU-Linear(64,64)-SiLU-Linear(64,2)}），仅改动训练循环与采样器，按式~\eqref{eq:cfm-loss} 训练 600 步\textbf{校正流（Rectified Flow）}模型。随后分别以采样步数 $K \in \{5,\; 10,\; 20,\; 40\}$ 运行确定性欧拉积分 $x_{t+\Delta t} = x_t + \Delta t \cdot v_\theta(x_t, t)$，记录各步数下的 \texttt{gen\_err} 并与 DDPM 对比。
+  \exHint{流匹配在仅用 $K = 10$ 步欧拉积分时通常即可达到与 40 步 DDPM 相当甚至更低的 \texttt{gen\_err}！}
+
+  \item[\textbf{5.6.6}] \textbf{可控复现并修复 VAE 后验坍缩}：在二维环形数据或 MNIST 子集上编写一个极简 PyTorch VAE（含 \texttt{logvar} 编码与重参数化），设计三组消融实验：
+  \begin{enumerate}
+    \item 固定 $\beta = 1.0$ 标准训练；
+    \item 将 KL 权重刻意加大至 $\beta = 10.0$，观察所有维度的 $\DKL^{(j)}$ 是否迅速坍缩至 $< 0.01$ 且解码重建退化为数据集均图；
+    \item 采用线性 KL 退火（前 $30\%$ 轮次将 $\beta$ 从 $0$ 线性增至 $1$），绘制总损失、重建误差与活跃隐维度数量随轮次的变化曲线。
+  \end{enumerate}
+  \exHint{监测“活跃隐维度”的标准指标是编码器均值在验证集上的方差 $\Var_{x \sim p_{\text{val}}}(\mu_{\phi, j}(x)) > 0.01$。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{探索校正流迭代拉直（Reflow）与离散扩散大语言模型}
+
+\begin{enumerate}
+  \item[\textbf{5.6.7}] \textbf{Reflow（二次拉直）与一步生成（Consistency Models）}：尽管 1-Rectified Flow 显著拉直了轨迹，但由于初始 $(x_0, x_1)$ 独立配对时直线在空间中大量交叉，平均速度场 $u_t(x)$ 仍有残余弯曲。Liu 等人（2023）提出 \textbf{Reflow}：用训练好的 1-Rectified Flow 从噪声 $x_0$ 积分生成配对终点 $\hat{x}_1 = \mathrm{ODE}(x_0)$，再以新配对 $(x_0, \hat{x}_1)$ 重复执行式~\eqref{eq:cfm-loss} 训练 2-Rectified Flow。
+  \begin{enumerate}
+    \item 利用 Jensen 不等式与连续性方程，证明每次 Reflow 不仅严格保持边缘分布 $p_0, p_1$ 不变，还严格\textbf{单调不增}二次最优传输代价 $\E[\norm{\hat{x}_1 - x_0}_2^2] \le \E[\norm{x_1 - x_0}_2^2]$；
+    \item 对比 Reflow 与 Song 等人（2023）的\textbf{一致性模型（Consistency Models）}（直接约束同一条 ODE 轨迹上任意两点 $x_t, x_{t'}$ 映射到同一终点 $x_1$），分析两者在实现 1--4 步极速生成时的核心权衡。
+  \end{enumerate}
+  \exHint{把 $\hat{x}_1 - x_0 = \int_0^1 u_t(x_t)\,dt$ 代入，对时间积分施用 Jensen 不等式 $\norm{\int_0^1 u_t\,dt}_2^2 \le \int_0^1 \norm{u_t}_2^2\,dt$，再利用条件期望收缩方差 $\E[\norm{u_t(x_t)}_2^2] \le \E[\norm{x_1 - x_0}_2^2]$！}
+
+  \item[\textbf{5.6.8}] \textbf{离散扩散语言模型（MDLM / LLaDA）与统一多模态之争}：本章的高斯扩散与流匹配天然依赖连续欧氏空间中的加性噪声与可微分数 $\nabla_x \ln p_t(x)$，难以直接作用于离散文本词元。近年兴起的\textbf{掩码离散扩散（Masked Discrete Diffusion；Sahoo et al., 2024; Nie et al., 2025）}将前向高斯加噪替换为连续时间吸收态马尔可夫链：每个词元随时间 $t \in [0, 1]$ 以递增概率独立坍缩为 \texttt{[MASK]}，逆向过程则在任意掩码率下迭代并行去噪解码。结合第 5 章的 BERT（MLM）与第 4 章的自回归 GPT，剖析：
+  \begin{enumerate}
+    \item 掩码离散扩散的变分下界为何可化简为“对所有掩码比例 $t \in (0, 1]$ 加权积分的 BERT 掩码语言建模损失”？
+    \item 在推理吞吐（并行解码多词元）、KV Cache 复用与长程逻辑一致性上，离散扩散大模型相比传统因果自回归 LLM 分别具备哪些优势与硬伤？
+  \end{enumerate}
+  \exHint{BERT 只在固定 $15\%$ 掩码率下训练，无法从 $100\%$ 全掩码白板出发生成；而离散扩散在 $(0, 1]$ 全区间训练，使其能够由全 \texttt{[MASK]} 逐步并行“显影”出整篇文本！}
+\end{enumerate}

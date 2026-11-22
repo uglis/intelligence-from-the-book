@@ -1,0 +1,1059 @@
+\chapter[范数、高维几何与线性最小二乘]{向量范数、高维几何、\\正交投影与线性最小二乘}\label{ch:norms-proj-ls}
+
+\chapEpigraph{数学是赋予不同事物以相同名称的艺术。}{昂利·庞加莱（Henri Poincar\'e），《科学与方法》}
+
+\begin{chapIntro}{本章导学：前置衔接、学习目标与首个真实模型}
+\textbf{前置衔接}：衔接第 1 章的矩阵乘法列空间视角；本章开篇内置\textbf{零障碍线性代数前置精华}（向量空间、张成、基、线性变换、秩与零空间、行列式体积直觉），完全自洽且\textbf{不依赖第 3 章的特征值与谱定理}。
+
+\textbf{学习目标}：建立清晰的空间、基、线性变换与行列式几何直觉；掌握 $\ell_1/\ell_2/\ell_\infty$ 范数几何与高维近正交现象；严格掌握正交分解、线性代数四大基本子空间与“超定 vs 欠定”二象性；从三点手算直线出发，完整证明正交投影最优逼近定理、正规方程可逆判据与 Gram-Schmidt/QR 数值求解，并亲手做出你在本套讲义中的\textbf{第一个真实机器学习模型}——多项式最小二乘与岭回归！
+
+\textbf{下游坐标}：本章是本卷第 3--4 章谱定理与 SVD/PCA 的几何底座，也是第 2 卷高斯极大似然与线性回归、第 4 卷 $L_1/L_2$ 正则化与偏差-方差权衡、第 5--6 卷向量检索（Embedding）与梯度裁剪的直接源头。
+\end{chapIntro}
+
+第 1 章把数据与参数放进了矩阵，但要真正看懂高维空间里的数据结构与模型求解，我们还需要两套底层直觉：先看清“向量张成的空间、基、线性变换、秩与行列式”的几何本质（第~\ref{sec:linalg-bridge}~节），再拿起衡量距离与夹角的尺子（范数与内积），一路走向高维近正交、正交投影，最终完成首个数据拟合与抗过拟合实验闭环。
+
+\section{零障碍线性代数前置精华：空间、变换与行列式的几何直觉}\label{sec:linalg-bridge}
+
+如果你此前尚未系统修完线性代数，或只记得“解方程、算行列式”的代数步骤，本节将用四段紧凑而直观的几何画面，帮你一次打通后续全书反复依赖的全部线性代数底层语言；若你已熟悉这些概念，也可把本节当作快速校准“AI 几何直觉”的热身。
+
+\subsection{向量空间、线性组合与张成空间（Span）}
+
+在人工智能与几何的双重视野里，一个 $n$ 维实向量 $v = (v_1, v_2, \dots, v_n)^T \in \R^n$ 同时扮演两个角色：在代码中，它是长度为 $n$ 的特征数组；在几何中，它是\textbf{从原点出发、指向点 $(v_1, \dots, v_n)$ 的一支有向箭头}。向量空间 $\R^n$ 中最基本的动作只有两个——\textbf{数乘伸缩}（$\alpha v$）与\textbf{首尾相加}（$u + v$）。把这两种动作合在一起，就得到了线性代数最核心的构造：
+
+\begin{defBox}
+\begin{definition}[线性组合、张成空间与线性子空间]\label{def:span-subspace}
+给定一组向量 $v_1, v_2, \dots, v_k \in \R^n$：
+\begin{enumerate}
+  \item 形如 $c_1 v_1 + c_2 v_2 + \dots + c_k v_k$（其中标量 $c_1, \dots, c_k \in \R$ 任意取值）的向量称为它们的\textbf{线性组合（Linear Combination）}。
+  \item 所有可能线性组合汇成的集合称为这组向量的\textbf{张成空间（Span）}：
+  \[
+    \spanop\{v_1, \dots, v_k\} \coloneqq \left\{\sum_{i=1}^{k} c_i v_i \;:\; c_1, \dots, c_k \in \R\right\}.
+  \]
+  \item 若非空子集 $U \subseteq \R^n$ 包含零向量 $0$，且对加法（$u, w \in U \Rightarrow u+w \in U$）与数乘（$u \in U, \alpha \in \R \Rightarrow \alpha u \in U$）均封闭，则称 $U$ 为 $\R^n$ 的一个\textbf{线性子空间（Subspace）}。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+把“张成空间”想象成你的\textbf{步幅工具箱}：手里每多一支向量，就多了一种可以任意伸缩行走的方向。
+\begin{itemize}
+  \item 在平面 $\R^2$ 中，若 $v_1 = (2, 1)^T$ 与 $v_2 = (0.5, 1.5)^T$ 不共线，任意调节 $c_1 v_1 + c_2 v_2$ 就能编织出一张铺满整个平面的斜网格，$\spanop\{v_1, v_2\} = \R^2$；但如果两支向量恰好共线（例如 $u_2 = 2u_1$），无论怎么伸缩相加都逃不出同一条过原点的直线！
+  \item 在三维空间 $\R^3$ 中，两支不共线的向量 $v_1, v_2$ 张成一张\textbf{穿过原点的倾斜平面}（二维子空间），如图~\ref{fig:ch2-span-geom} 所示；而任何不穿过原点的平面都不是子空间（因为它不含原点，且把向量乘以 $2$ 就会跳出该平面）。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+% Panel 1: 2D Span Grid vs Collinear Collapse
+\begin{scope}[shift={(0,0)}]
+  \node[font=\sffamily\bfseries\small, text=tealDark] at (1.5, 3.20) {二维张成：两支不共线向量铺满 $\R^2$};
+  % Background oblique span grid of v1=(1.2, 0.35), v2=(0.45, 1.05)
+  \begin{scope}[opacity=0.28]
+    \foreach \i in {-1,0,1,2} {
+      \draw[tealLine, thin] ({-0.9 + \i*1.2}, {-1.05 + \i*0.35}) -- ({1.35 + \i*1.2}, {2.10 + \i*0.35});
+    }
+    \foreach \j in {-1,0,1,2} {
+      \draw[tealLine, thin] ({-1.2 + \j*0.45}, {-0.35 + \j*1.05}) -- ({3.6 + \j*0.45}, {1.05 + \j*1.05});
+    }
+  \end{scope}
+  % Standard axes
+  \draw[->, slate!60, thin] (-0.9, 0) -- (3.8, 0) node[right, text=slate] {$x_1$};
+  \draw[->, slate!60, thin] (0, -0.7) -- (0, 2.50) node[left=1pt, text=slate] {$x_2$};
+  % Span vectors v1, v2 and linear combination w = 1.5 v1 + 1.2 v2
+  \draw[-{Stealth[length=2.3mm]}, teal, very thick] (0,0) -- (1.2, 0.35) node[below right=-1pt, text=tealDark] {$v_1$};
+  \draw[-{Stealth[length=2.3mm]}, navy, very thick] (0,0) -- (0.45, 1.05) node[above left=-1pt, text=navy] {$v_2$};
+  % Combination parallelogram
+  \draw[dashed, gold, thick] (1.8, 0.525) -- (2.34, 1.785) -- (0.54, 1.26);
+  \draw[-{Stealth[length=2.3mm]}, ochre, very thick] (0,0) -- (2.34, 1.785)
+    node[above right=-1pt, text=ochre] {$c_1 v_1 + c_2 v_2$};
+  \fill[tealDark] (0,0) circle (1.8pt);
+  \node[below, text=slate, align=center] at (1.5, -0.95) {\scriptsize 任意平面点都有唯一组合系数 $(c_1, c_2)$\\[-1pt]\scriptsize 若 $v_2 \parallel v_1$，张成空间将塌缩为一条直线};
+\end{scope}
+
+% Panel 2: 3D Plane spanned by two vectors in R^3
+\begin{scope}[shift={(7.6,0.1)}]
+  \node[font=\sffamily\bfseries\small, text=navy] at (1.6, 3.10) {三维张成：两支独立向量张成过原点平面};
+  % 3D axes (x_3 up, x_2 right, x_1 front-left)
+  \coordinate (O) at (1.5, 0.75);
+  \draw[->, slate!65, thin] (O) -- ++(2.55, 0) node[right, text=slate] {$x_2$};
+  \draw[->, slate!65, thin] (O) -- ++(0, 1.78) node[left=1pt, text=slate] {$x_3$};
+  \draw[->, slate!65, thin] (O) -- ++(-1.55, -0.95) node[below left, text=slate] {$x_1$};
+
+  % Tilted 2D plane spanned by u=(1.35, 0.45) and w=(-0.85, 0.72) in screen coords
+  \coordinate (P1) at ($(O) + (-1.35,-0.45) + (0.85,-0.72)$);
+  \coordinate (P2) at ($(O) + (1.55,0.52) + (0.85,-0.72)$);
+  \coordinate (P3) at ($(O) + (1.55,0.52) + (-0.95,0.80)$);
+  \coordinate (P4) at ($(O) + (-1.35,-0.45) + (-0.95,0.80)$);
+  \filldraw[fill=tealLight, fill opacity=0.72, draw=tealLine, thick] (P1) -- (P2) -- (P3) -- (P4) -- cycle;
+
+  % Faint grid lines on the tilted plane
+  \foreach \t in {-0.5, 0, 0.5} {
+    \draw[tealLine!80, thin]
+      ($(O) + \t*(1.45,0.48) + (0.85,-0.72)$) -- ($(O) + \t*(1.45,0.48) + (-0.95,0.80)$);
+    \draw[tealLine!80, thin]
+      ($(O) + (-1.35,-0.45) + \t*(-0.90,0.76)$) -- ($(O) + (1.55,0.52) + \t*(-0.90,0.76)$);
+  }
+
+  % Basis vectors on the plane
+  \draw[-{Stealth[length=2.3mm]}, teal, very thick] (O) -- ++(1.25, 0.42) node[right, text=tealDark] {$v_1$};
+  \draw[-{Stealth[length=2.3mm]}, navy, very thick] (O) -- ++(-0.78, 0.66) node[above left=-1pt, text=navy] {$v_2$};
+  % A vector outside the plane (for intuition)
+  \draw[-{Stealth[length=2.1mm]}, ochre, thick, dashed] (O) -- ++(0.35, 1.48) node[right, text=ochre] {$b \notin \spanop\{v_1,v_2\}$};
+  \fill[tealDark] (O) circle (1.9pt);
+  \node[below, text=slate, align=center] at (1.6, -1.05) {\scriptsize $\spanop\{v_1,v_2\}$ 是 $\R^3$ 中的二维切面\\[-1pt]\scriptsize 含噪目标 $b$ 往往落在平面外（引出正交投影）};
+\end{scope}
+\end{tikzpicture}}
+\caption{张成空间（Span）的 2D 与 3D 几何直觉：线性组合的全体构成穿过原点的平坦子空间}\label{fig:ch2-span-geom}
+\end{figure}
+
+\subsection{线性无关、基（Basis）与维数（Dimension）}
+
+如果工具箱里的某支向量 $v_k$ 已经可以由其他向量组合出来（即 $v_k \in \spanop\{v_1, \dots, v_{k-1}\}$），那么去掉 $v_k$ 后张成空间\textbf{一点都不会变小}——这支向量就是多余的。把所有冗余剔除干净，剩下的“极简无废话坐标系”就是\textbf{基}。
+
+\begin{defBox}
+\begin{definition}[线性无关、基与维数]\label{def:indep-basis-dim}
+设 $v_1, \dots, v_k \in \R^n$，$U \subseteq \R^n$ 是线性子空间：
+\begin{enumerate}
+  \item \textbf{线性无关（Linear Independence）}：方程 $c_1 v_1 + \dots + c_k v_k = 0$ 仅有唯一零解 $c_1 = \dots = c_k = 0$（等价地，没有任何一支向量能写成其余向量的线性组合）。否则称其\textbf{线性相关}。
+  \item \textbf{基（Basis）}：若向量组 $\{b_1, \dots, b_r\} \subseteq U$ 同时满足（i）\textbf{线性无关}（无冗余）且（ii）\textbf{张成整个 $U$}（$\spanop\{b_1, \dots, b_r\} = U$，无遗漏），则称它为 $U$ 的一组基。
+  \item \textbf{维数（Dimension）}：可以证明，同一子空间 $U$ 的任意两组基所含向量个数必然相等，这个唯一确定的非负整数称为 $U$ 的\textbf{维数}，记作 $\dim(U) = r$（约定 $\dim\{0\} = 0$）。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+为什么“基”如此珍贵？因为\textbf{一旦选定子空间 $U$ 的一组基 $\{b_1, \dots, b_r\}$，$U$ 中每个向量 $x$ 都可以唯一地写成坐标展开 $x = c_1 b_1 + \dots + c_r b_r$}！（若有两种写法 $\sum c_i b_i = \sum c'_i b_i$，相减得 $\sum (c_i - c'_i) b_i = 0$，由线性无关立刻迫使 $c_i = c'_i$。）
+
+在机器学习的数据表 $X \in \R^{m \times n}$ 中，每一列就是一个特征向量。如果你把“身高（厘米）”和“身高（米）”同时放进特征列，这两列就\textbf{线性相关}（$x_{\text{cm}} = 100\, x_{\text{m}}$）——模型多了一个毫无新信息的冗余参数，线性回归权重将立刻失去唯一性！
+
+\subsection{线性变换、矩阵的秩（Rank）与零空间（Null Space）}
+
+现在迎来自学线性代数最关键的一次视角跃迁：\textbf{不要只把矩阵 $A \in \R^{m \times n}$ 看成一张静态数字表格，而要把它看成一台把输入空间 $\R^n$ 搬运到输出空间 $\R^m$ 的“线性变形机” $T(x) = Ax$}。
+
+所谓“线性”，几何上只有两条铁律：（1）原点原地不动（$A0 = 0$）；（2）所有直线变换后依然是直线，且平行等距的网格线依然保持平行等距（旋转、拉伸、剪切、投影都是线性变换，但弯曲扭折不是）。结合第 1 章的列视角，只需盯住标准基向量 $e_1, \dots, e_n$ 的去向，就能完全锁定整台变形机的行为：
+\[
+  A e_j = a_{\cdot j} \quad (\text{矩阵 } A \text{ 的第 } j \text{ 列就是第 } j \text{ 支标准基向量变换后的落点！}).
+\]
+由此，任意输入 $x = \sum_{j=1}^n x_j e_j$ 经 $A$ 作用后的落点自然是 $Ax = \sum_{j=1}^n x_j a_{\cdot j}$。所有可能输出汇成的集合，正是第 1 章提到的\textbf{列空间} $\col(A) = \spanop\{a_{\cdot 1}, \dots, a_{\cdot n}\}$。于是矩阵的两个核心不变量立刻有了血肉：
+\begin{itemize}
+  \item \textbf{矩阵的秩（Rank）}：$\rank(A) \coloneqq \dim\col(A)$，即\textbf{经过变换 $A$ 之后，输出世界真正剩下的维数}。秩越高，保留的信息自由度越完整；若 $\rank(A) < n$，说明空间在变换中发生了“维数塌缩”（压扁）。
+  \item \textbf{零空间（Null Space / 核空间）}：$\nul(A) \coloneqq \{x \in \R^n : Ax = 0\}$，即\textbf{所有被 $A$ 彻底压扁归零的输入方向全体}。显然 $\nul(A)$ 是 $\R^n$ 的线性子空间：如果 $x_n \in \nul(A)$，那么把任何输入 $x$ 加上 $x_n$ 后输出毫无变化：$A(x + x_n) = Ax + 0 = Ax$。
+\end{itemize}
+
+输入空间原本有 $n$ 个自由度，经过 $A$ 作用后，一部分自由度活了下来（撑起 $\rank(A)$ 维输出空间），剩下的自由度被彻底压缩进了原点（构成 $\dim\nul(A)$ 维零空间）——不多不少，恰好守恒！这就是线性代数最核心的维数守恒定律：
+\begin{equation}\label{eq:rank-nullity}
+  \rank(A) + \dim\nul(A) = n \qquad (\text{秩-零化度定理, Rank--Nullity Theorem}).
+\end{equation}
+
+用两个 $2 \times 2$ 矩阵立刻对比感受：
+\[
+  A_1 = \begin{pmatrix} 2 & 1 \\ 0 & 1.5 \end{pmatrix}, \qquad
+  A_2 = \begin{pmatrix} 2 & 1 \\ 1 & 0.5 \end{pmatrix}.
+\]
+对 $A_1$，两列 $(2,0)^T$ 与 $(1,1.5)^T$ 不共线，故 $\col(A_1) = \R^2$、$\rank(A_1) = 2$，没有任何非零向量被压扁，$\nul(A_1) = \{0\}$（$2 + 0 = 2$）。而对 $A_2$，第 2 列恰好是第 1 列的一半，整个二维平面被彻底压扁到直线 $\spanop\{(2, 1)^T\}$ 上（$\rank(A_2) = 1$）；同时，整条直线 $x_2 = -2x_1$（即 $\spanop\{(1, -2)^T\}$）上的所有点都会被 $A_2$ 送到原点（$\dim\nul(A_2) = 1$，$1 + 1 = 2$）。
+
+\subsection{行列式 $\det(A)$ 的几何本质：有向体积缩放因子}
+
+传统教材往往一上来就背诵繁琐的逆序数或余子式展开来定义方阵 $A \in \R^{n \times n}$ 的行列式 $\det(A)$。但从线性变换的几何眼睛望去，行列式的本质惊人地单纯：
+
+\begin{defBox}
+\begin{definition}[行列式的几何意义]\label{def:det-geom}
+对方阵 $A \in \R^{n \times n}$，考察标准基向量 $e_1, \dots, e_n$ 围成的单位超立方体（2D 为面积 $=1$ 的单位正方形，3D 为体积 $=1$ 的单位立方体）。在变换 $x \mapsto Ax$ 下，它变成由列向量 $a_{\cdot 1}, \dots, a_{\cdot n}$ 围成的平行多面体：
+\begin{itemize}
+  \item \textbf{绝对值 $|\det(A)|$}：等于该平行多面体的\textbf{面积/体积缩放倍数}（例如 2D 方阵 $\begin{psmallmatrix}a & b \\ c & d\end{psmallmatrix}$ 变换后的平行四边形有向面积恰好为 $ad - bc$）；
+  \item \textbf{正负号}：$\det(A) > 0$ 表示空间保持原有定向（如旋转、拉伸、剪切）；$\det(A) < 0$ 表示空间发生了镜像翻转（如左右对调）；$\det(A) = 0$ 表示空间被\textbf{彻底压扁至低维，体积归零}。
+\end{itemize}
+\end{definition}
+\end{defBox}
+
+图~\ref{fig:ch2-det-geom} 用刚才的 $A_1$ 与 $A_2$ 将这一几何图像画得一目了然。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+% Panel 1: Unit square (det = 1)
+\begin{scope}[shift={(0,0)}]
+  \node[font=\sffamily\bfseries\small, text=ink] at (1.15, 2.75) {(1) 原始单位正方形};
+  \draw[step=0.65cm, codeborder, very thin] (-0.35,-0.35) grid (2.6, 2.15);
+  \draw[->, slate!75, thin] (-0.35, 0) -- (2.75, 0) node[right] {$x_1$};
+  \draw[->, slate!75, thin] (0, -0.35) -- (0, 2.25) node[left=1pt] {$x_2$};
+  \filldraw[fill=navyLight, fill opacity=0.85, draw=navy, thick] (0,0) rectangle (0.65, 0.65);
+  \draw[-{Stealth[length=2.1mm]}, teal, very thick] (0,0) -- (0.65, 0) node[below, text=tealDark] {$e_1$};
+  \draw[-{Stealth[length=2.1mm]}, navy, very thick] (0,0) -- (0, 0.65) node[left, text=navy] {$e_2$};
+  \node[text=navy, font=\scriptsize\bfseries] at (0.325, 0.325) {$1$};
+  \node[below, text=slate] at (1.15, -0.58) {面积 $= 1$};
+\end{scope}
+
+% Arrow 1 -> 2
+\draw[-{Stealth[length=2.4mm]}, teal, thick] (3.05, 0.95) -- (4.05, 0.95)
+  node[midway, above, text=tealDark, font=\scriptsize] {$A_1$};
+
+% Panel 2: A1 = [[2,1],[0,1.5]], det = 3 (unit = 0.65cm)
+\begin{scope}[shift={(4.45,0)}]
+  \node[font=\sffamily\bfseries\small, text=tealDark] at (1.45, 2.75) {(2) 可逆变换：$\det(A_1)=3$};
+  % Transformed grid lines (e1->(1.3,0), e2->(0.65,0.975))
+  \begin{scope}[opacity=0.28]
+    \foreach \j in {0,1,2} {
+      \draw[tealLine, thin] ({\j*0.65}, {\j*0.975}) -- ({2.6+\j*0.65}, {\j*0.975});
+    }
+    \foreach \i in {0,1,2} {
+      \draw[tealLine, thin] ({\i*1.3}, 0) -- ({\i*1.3+1.3}, 1.95);
+    }
+  \end{scope}
+  \draw[->, slate!75, thin] (-0.25, 0) -- (3.35, 0) node[right] {$x_1$};
+  \draw[->, slate!75, thin] (0, -0.35) -- (0, 2.25) node[left=1pt] {$x_2$};
+  % Parallelogram (0,0) -> (1.3,0) -> (1.95,0.975) -> (0.65,0.975)
+  \filldraw[fill=tealLight, fill opacity=0.90, draw=teal, thick]
+    (0,0) -- (1.3,0) -- (1.95,0.975) -- (0.65,0.975) -- cycle;
+  \draw[-{Stealth[length=2.1mm]}, teal, very thick] (0,0) -- (1.3, 0) node[below, text=tealDark] {$A_1 e_1$};
+  \draw[-{Stealth[length=2.1mm]}, navy, very thick] (0,0) -- (0.65, 0.975) node[above left=-1pt, text=navy] {$A_1 e_2$};
+  \node[text=tealDark, font=\scriptsize\bfseries] at (0.98, 0.48) {面积 $= 3$};
+  \node[below, text=slate] at (1.45, -0.58) {$\rank=2,\;\nul=\{0\}$（可逆）};
+\end{scope}
+
+% Arrow 2 -> 3 (from Panel 1 conceptually, label A2)
+\draw[-{Stealth[length=2.4mm]}, ochre, thick] (8.15, 0.95) -- (9.15, 0.95)
+  node[midway, above, text=ochre, font=\scriptsize] {对比 $A_2$};
+
+% Panel 3: A2 = [[2,1],[1,0.5]], det = 0
+\begin{scope}[shift={(9.55,0)}]
+  \node[font=\sffamily\bfseries\small, text=ochre] at (1.40, 2.75) {(3) 奇异压扁：$\det(A_2)=0$};
+  \draw[->, slate!75, thin] (-0.25, 0) -- (3.15, 0) node[right] {$x_1$};
+  \draw[->, slate!75, thin] (0, -0.35) -- (0, 2.25) node[left=1pt] {$x_2$};
+  % Collapsed 1D column space line y = 0.5 x
+  \draw[ochre!35, line width=4.5pt, line cap=round] (-0.2, -0.1) -- (2.9, 1.45);
+  \draw[ochre, thick, dashed] (-0.2, -0.1) -- (2.9, 1.45) node[above left=2pt and -2pt, text=ochre, font=\scriptsize] {$\col(A_2)$};
+  % A2 e1 = (2,1) -> (1.3, 0.65), A2 e2 = (1,0.5) -> (0.65, 0.325)
+  \draw[-{Stealth[length=2.1mm]}, teal, very thick] (0,0) -- (1.3, 0.65) node[above left=-1pt, text=tealDark] {$A_2 e_1$};
+  \draw[-{Stealth[length=2.1mm]}, navy, very thick] (0,0) -- (0.65, 0.325) node[below right=-1pt, text=navy] {$A_2 e_2$};
+  % Null space line y = -2x hint
+  \draw[slate, dotted, thick] (-0.25, 0.50) -- (0.20, -0.40);
+  \node[text=slate, font=\scriptsize] at (1.05, 2.02) {平面被压扁为直线};
+  \node[below, text=ochre] at (1.40, -0.58) {面积 $= 0$（不可逆、丢失信息）};
+\end{scope}
+\end{tikzpicture}}
+\caption{行列式 $\det(A)$ 的几何本质：单位正方形经线性变换后的有向面积缩放倍数；一旦 $\det(A)=0$，整个平面不可逆地塌缩到一维直线}\label{fig:ch2-det-geom}
+\end{figure}
+
+带着这幅“体积缩放器”的画面，线性代数中两组最核心的结论几乎不证自明：
+\begin{enumerate}
+  \item \textbf{乘积法则}：$\det(AB) = \det(A)\det(B)$——先后做两次体积缩放，总缩放倍数就是两次倍数的乘积！
+  \item \textbf{奇异性总等价链}：对方阵 $A \in \R^{n \times n}$，以下五句话说的是\textbf{同一件几何事实}：
+  \begin{equation}\label{eq:singular-equiv}
+    \det(A) = 0
+    \;\iff\; \text{空间被压扁}
+    \;\iff\; \rank(A) < n
+    \;\iff\; \nul(A) \neq \{0\}
+    \;\iff\; A \text{ 不可逆（奇异）}.
+  \end{equation}
+\end{enumerate}
+
+\begin{insightBox}{为什么这两条直觉贯穿整套 AI 讲义？}
+一旦理解了“$\det(A)=0 \iff$ 存在非零向量被压扁到 $0$”，第 3 章的\textbf{特征方程} $\det(A - \lambda I) = 0$ 就不再是神秘的代数咒语；而第 2 卷多元高斯分布的概率密度归一化常数 $\frac{1}{\sqrt{\det(\Sigma)}}$，以及第 5 卷标准化流（Normalizing Flows）的雅可比行列式 $|\det J|$，本质上全都是\textbf{“空间局部体积被拉伸了多少倍”}这一同一几何思想的化身！
+\end{insightBox}
+
+\section{向量范数、余弦相似度与高维几何直觉}\label{sec:norms-highdim}
+
+\subsection{向量范数与 $\ell_1, \ell_2, \ell_\infty$ 单位球几何}
+
+衡量一个向量 $x \in \R^n$ 的“大小”不止有欧氏长度一种方式。在人工智能里，换一把尺子往往会改变整个模型的解结构（例如让参数自动稀疏化）。抽象来看，任何合理的“长度度量”都只需满足三条几何公理。
+
+\begin{defBox}
+\begin{definition}[向量范数与 $\ell_p$ 范数]\label{def:vector-norm}
+映射 $\norm{\cdot}: \R^n \to \R$ 若对任意 $x, y \in \R^n$ 及 $\alpha \in \R$ 满足：
+\begin{enumerate}
+  \item \textbf{非负性与正定性}：$\norm{x} \ge 0$，且 $\norm{x} = 0 \iff x = 0$；
+  \item \textbf{绝对齐次性}：$\norm{\alpha x} = \abs{\alpha}\,\norm{x}$；
+  \item \textbf{三角不等式}：$\norm{x + y} \le \norm{x} + \norm{y}$，
+\end{enumerate}
+则称 $\norm{\cdot}$ 为 $\R^n$ 上的一个\textbf{范数（Norm）}。AI 中最常用的三类 $\ell_p$ 范数为：
+\[
+\norm{x}_1 = \sum_{i=1}^{n} \abs{x_i}, \qquad
+\norm{x}_2 = \sqrt{\sum_{i=1}^{n} x_i^2}, \qquad
+\norm{x}_\infty = \max_{1 \le i \le n} \abs{x_i}.
+\]
+\end{definition}
+\end{defBox}
+
+先拿二维小向量 $x = (3, -4)^T \in \R^2$ 感受三把尺子的差别：
+\[
+\norm{x}_\infty = \max(3, 4) = 4
+\;\le\;
+\norm{x}_2 = \sqrt{3^2 + (-4)^2} = 5
+\;\le\;
+\norm{x}_1 = 3 + 4 = 7.
+\]
+这个不等式链 $\norm{x}_\infty \le \norm{x}_2 \le \norm{x}_1 \le \sqrt{n}\norm{x}_2$ 对所有 $x \in \R^n$ 恒成立（习题~2.5 给出完整证明）。更有启发的是画出这三种范数的\textbf{单位球} $\{x \in \R^2 : \norm{x}_p \le 1\}$，如图~\ref{fig:unit-balls} 所示。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+% Panel 1: L1 ball
+\begin{scope}[shift={(0,0)}]
+  \draw[->, slate] (-1.55, 0) -- (1.65, 0) node[right] {$x_1$};
+  \draw[->, slate] (0, -1.55) -- (0, 1.65) node[above] {$x_2$};
+  \filldraw[fill=tealLight, draw=teal, very thick] (1,0) -- (0,1) -- (-1,0) -- (0,-1) -- cycle;
+  \foreach \p in {(1,0), (0,1), (-1,0), (0,-1)} {
+    \fill[ochre] \p circle (2.2pt);
+  }
+  \node[above right=1pt, text=ochre] at (0,1) {\scriptsize 尖角在坐标轴上};
+  \node[below, font=\sffamily\bfseries\small, text=tealDark] at (0, -1.72) {$\ell_1$ 单位球（菱形）};
+  \node[below, text=slate] at (0, -2.18) {$\abs{x_1} + \abs{x_2} \le 1$};
+\end{scope}
+
+% Panel 2: L2 ball
+\begin{scope}[shift={(5.3,0)}]
+  \draw[->, slate] (-1.55, 0) -- (1.65, 0) node[right] {$x_1$};
+  \draw[->, slate] (0, -1.55) -- (0, 1.65) node[above] {$x_2$};
+  \filldraw[fill=navyLight, draw=navy, very thick] (0,0) circle (1.0);
+  \node[above right=2pt, text=navy] at (0.71, 0.71) {\scriptsize 各向同性光滑};
+  \node[below, font=\sffamily\bfseries\small, text=navy] at (0, -1.72) {$\ell_2$ 单位球（圆盘）};
+  \node[below, text=slate] at (0, -2.18) {$x_1^2 + x_2^2 \le 1$};
+\end{scope}
+
+% Panel 3: L_inf ball
+\begin{scope}[shift={(10.6,0)}]
+  \draw[->, slate] (-1.55, 0) -- (1.65, 0) node[right] {$x_1$};
+  \draw[->, slate] (0, -1.55) -- (0, 1.65) node[above] {$x_2$};
+  \filldraw[fill=ochreLight, draw=ochre, very thick] (-1,-1) rectangle (1,1);
+  \node[above right=1pt, text=ochre] at (0.12, 1.0) {\scriptsize 逐分量上限约束};
+  \node[below, font=\sffamily\bfseries\small, text=ochre] at (0, -1.72) {$\ell_\infty$ 单位球（正方形）};
+  \node[below, text=slate] at (0, -2.18) {$\max(\abs{x_1}, \abs{x_2}) \le 1$};
+\end{scope}
+\end{tikzpicture}}
+\caption{$\R^2$ 中 $\ell_1$、$\ell_2$ 与 $\ell_\infty$ 单位球的几何形状差异}\label{fig:unit-balls}
+\end{figure}
+
+\begin{insightBox}{三把尺子在后续卷次中的分工}
+\begin{itemize}
+  \item \textbf{$\ell_1$ 菱形与稀疏性（第 4 卷 Lasso）}：$\ell_1$ 单位球在坐标轴上存在尖锐顶点；当损失函数的等高线扩张并与菱形相切时，切点大概率落在坐标轴顶点处，使若干权重精确变为 $0$，从而自动完成特征筛选。
+  \item \textbf{$\ell_2$ 圆盘与光滑收缩（第~\ref{sec:poly-ridge}~节岭回归、第 5 卷 Weight Decay）}：$\ell_2$ 球处处光滑且旋转不变，惩罚 $\norm{w}_2^2$ 会温和均匀地缩小所有过大权重，防止过拟合，同时处处可导。
+  \item \textbf{$\ell_\infty$ 正方形与对抗扰动（第 7 卷安全鲁棒性）}：图像像素级对抗攻击常用 $\norm{\delta}_\infty \le \varepsilon$ 约束每个像素的肉眼不可见最大改变量。
+\end{itemize}
+\end{insightBox}
+
+\subsection{实内积、柯西-施瓦茨不等式与余弦相似度}
+
+\begin{recallBox}{实欧氏内积与正交}
+在 $\R^n$ 上，标准实内积定义为 $\inner{u}{v} = u^T v = \sum_{i=1}^n u_i v_i$。它满足四条公理：（1）对称性 $\inner{u}{v} = \inner{v}{u}$；（2）双线性 $\inner{\alpha u_1 + \beta u_2}{v} = \alpha\inner{u_1}{v} + \beta\inner{u_2}{v}$；（3）正定性 $\inner{u}{u} \ge 0$ 且等号当且仅当 $u=0$；（4）诱导欧氏范数 $\norm{u}_2 = \sqrt{\inner{u}{u}}$。若 $\inner{u}{v} = 0$，称 $u$ 与 $v$ \textbf{正交}，记作 $u \perp v$。
+\end{recallBox}
+
+下面这条不等式是整个内积空间几何、相关性分析与数值优化的基石。
+
+\begin{thmBox}
+\begin{theorem}[柯西-施瓦茨不等式、三角不等式与勾股定理]\label{thm:cauchy-schwarz}
+对任意 $u, v \in \R^n$，恒有
+\begin{equation}\label{eq:cs}
+\abs{\inner{u}{v}} \le \norm{u}_2 \norm{v}_2,
+\end{equation}
+等号成立当且仅当 $u$ 与 $v$ 线性相关（共线）。由此立得：
+\begin{enumerate}
+  \item \textbf{三角不等式}：$\norm{u + v}_2 \le \norm{u}_2 + \norm{v}_2$；
+  \item \textbf{勾股定理}：若 $u \perp v$，则 $\norm{u + v}_2^2 = \norm{u}_2^2 + \norm{v}_2^2$。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+若 $v = 0$，不等式~\eqref{eq:cs} 两端均为 $0$，且 $\{u, 0\}$ 显然线性相关。下设 $v \neq 0$，对任意实数 $t \in \R$ 构造非负二次函数：
+\[
+q(t) = \norm{u + t v}_2^2 = \inner{u + tv}{u + tv} = \norm{v}_2^2 t^2 + 2\inner{u}{v} t + \norm{u}_2^2 \ge 0.
+\]
+由于 $\norm{v}_2^2 > 0$ 且抛物线 $q(t)$ 恒在横轴上方（或相切），其判别式必非正：
+\[
+\Delta = 4\inner{u}{v}^2 - 4\norm{u}_2^2 \norm{v}_2^2 \le 0
+\implies \abs{\inner{u}{v}} \le \norm{u}_2 \norm{v}_2.
+\]
+等号成立当且仅当 $\Delta = 0$，即存在唯一实根 $t_0$ 使 $q(t_0) = \norm{u + t_0 v}_2^2 = 0$，由范数正定性等价于 $u = -t_0 v$，即 $u, v$ 线性相关。
+
+进而展开 $\norm{u + v}_2^2 = \norm{u}_2^2 + 2\inner{u}{v} + \norm{v}_2^2$：
+\begin{itemize}
+  \item 代入 $\inner{u}{v} \le \norm{u}_2\norm{v}_2$ 得 $\norm{u+v}_2^2 \le (\norm{u}_2 + \norm{v}_2)^2$，开方即得三角不等式；
+  \item 若 $u \perp v$，交叉项 $2\inner{u}{v} = 0$，立即得到勾股定理 $\norm{u+v}_2^2 = \norm{u}_2^2 + \norm{v}_2^2$。
+\end{itemize}
+\end{proof}
+
+有了柯西-施瓦茨不等式保证比值落在 $[-1, 1]$ 内，我们就可以在任意高维空间 $\R^d$ 中合理定义两个非零向量的夹角余弦——即 AI 向量检索与表征学习的核心指标\textbf{余弦相似度（Cosine Similarity）}：
+\begin{equation}\label{eq:cosine-sim}
+\cos\theta(u, v) = \frac{\inner{u}{v}}{\norm{u}_2 \norm{v}_2} \in [-1, 1] \qquad (u, v \neq 0).
+\end{equation}
+余弦相似度最重要的工程特性是\textbf{尺度不变性}：对任意正数 $\alpha, \beta > 0$，$\cos\theta(\alpha u, \beta v) = \cos\theta(u, v)$。举个具体例子：假设文档 A 的词频向量为 $u = (2, 1, 0)^T$，文档 B 把文档 A 原封不动复制了 10 遍，词频向量变成 $v = (20, 10, 0)^T$。两篇文档主题完全相同，但欧氏距离 $\norm{u - v}_2 = 9\sqrt{5} \approx 20.1$ 极大；而余弦相似度 $\cos\theta(u, v) = 1.0$，一眼识别出它们方向完全一致！
+
+\subsection{高维随机向量的“几乎必然正交”现象}
+
+三维世界培养的几何直觉到了高维空间（如大语言模型常见的 $d = 768$ 或 $4096$ 维 Embedding 空间）会剧烈失效。其中一个对 AI 至关重要的反直觉现象是：\textbf{在超高维空间中，任意独立随机抽取的两个向量几乎总是彼此垂直（近正交）}！
+
+先看简单的直觉估算：设 $u, v \in \R^d$ 的各分量独立服从标准正态分布 $\mathcal{N}(0, 1)$，归一化后得到球面上的均匀随机单位向量 $\hat{u} = u/\norm{u}_2$ 与 $\hat{v} = v/\norm{v}_2$。每个坐标大约是 $\pm 1/\sqrt{d}$ 量级，内积 $\cos\theta = \sum_{i=1}^d \hat{u}_i \hat{v}_i$ 是 $d$ 个正负随机抵消的微小乘积之和。大数抵消的结果是：$\cos\theta$ 的均值为 $0$，而其标准差严格按 $1/\sqrt{d}$ 衰减！
+
+我们在配套实验脚本的 \texttt{exp2\_highdim\_ortho} 函数（位于 \texttt{code/vol1\_experiments.py}）中，对每个维度 $d \in \{2, 5, 10, \dots, 1000\}$ 独立采样 $5{,}000$ 对随机单位向量，实测结果见表~\ref{tab:highdim-cos} 与图~\ref{fig:highdim-ortho}。
+
+\begin{table}[htbp]
+\centering
+\caption{高维随机单位向量余弦相似度实测统计（每维 $5{,}000$ 对样本，源自 \texttt{data/highdim\_cos.csv}）}\label{tab:highdim-cos}
+{\small
+\begin{tabular}{@{}rcccc@{}}
+\toprule
+\textbf{维度 $d$} & \textbf{实测标准差 $\operatorname{Std}(\cos\theta)$} & \textbf{理论值 $1/\sqrt{d}$} & \textbf{$P(\abs{\cos\theta} < 0.1)$} & \textbf{最大 $\abs{\cos\theta}$} \\
+\midrule
+2 & 0.7118 & 0.7071 & 6.50\% & 1.0000 \\
+10 & 0.3150 & 0.3162 & 22.72\% & 0.9101 \\
+50 & 0.1392 & 0.1414 & 51.74\% & 0.5156 \\
+100 & 0.1002 & 0.1000 & 68.16\% & 0.3651 \\
+500 & 0.0455 & 0.0447 & 96.82\% & 0.1724 \\
+1000 & 0.0317 & 0.0316 & \textbf{99.86\%} & 0.1086 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.47\linewidth,
+  height=5.2cm,
+  xmode=log, ymode=log,
+  xlabel={维度 $d$（对数刻度）},
+  ylabel={余弦相似度标准差},
+  grid=both,
+  grid style={line width=0.25pt, draw=codeborder},
+  legend pos=south west,
+  legend style={font=\scriptsize, fill=white, draw=codeborder},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize\sffamily}
+]
+  \addplot[only marks, mark=*, mark size=2.2pt, color=teal]
+    table[x=d, y=emp_std, col sep=comma]{data/highdim_cos.csv};
+  \addlegendentry{实测标准差}
+  \addplot[thick, dashed, color=ochre]
+    table[x=d, y=theory_std, col sep=comma]{data/highdim_cos.csv};
+  \addlegendentry{理论曲线 $1/\sqrt{d}$}
+\end{axis}
+\end{tikzpicture}
+\hfill
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.47\linewidth,
+  height=5.2cm,
+  xmode=log,
+  ymin=0, ymax=105,
+  xlabel={维度 $d$（对数刻度）},
+  ylabel={落入近正交区比例 $P(\abs{\cos\theta}<0.1)$ (\%)},
+  grid=both,
+  grid style={line width=0.25pt, draw=codeborder},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize\sffamily}
+]
+  \addplot[thick, mark=square*, mark size=2pt, color=navy]
+    table[x=d, y=pct_abs_lt_01, col sep=comma]{data/highdim_cos.csv};
+  \node[anchor=west, font=\scriptsize\sffamily, text=ochre, fill=white, inner sep=1.5pt]
+    at (axis cs:2.2, 87) {$d=1000$ 时达 $99.86\%$};
+\end{axis}
+\end{tikzpicture}
+\caption{高维随机向量的近正交集中现象（数据直接读取自 \texttt{data/highdim\_cos.csv}）：左图实测标准差与 $1/\sqrt{d}$ 严丝合缝，右图近正交比例随维度升至 $99.86\%$}\label{fig:highdim-ortho}
+\end{figure}
+
+\begin{insightBox}{高维近正交对 AI 是一把“双刃剑”}
+\begin{itemize}
+  \item \textbf{表征学习的红利}：在平面 $\R^2$ 里最多只能摆 2 个两两垂直的向量；但在 $d=1000$ 维空间里，只要容忍 $\abs{\cos\theta} < 0.1$ 的微小夹角偏差，就能塞进\textbf{远超 $d$ 个（甚至指数级数量）几乎互不干扰的语义方向}。这正是大语言模型用几千维向量表征几十万词义与概念的几何底气。
+  \item \textbf{朴素近邻算法的维度灾难}：如果直接把原始高维噪声特征丢进 $k$-近邻（$k$-NN）分类器，任意两点几乎都互相垂直、距离趋同（$\norm{\hat{u}-\hat{v}}_2 = \sqrt{2 - 2\cos\theta} \approx \sqrt{2}$），导致“最近邻”与“最远邻”几乎没有区分度——除非数据本身集中在低维流形上（第 4 章 PCA）或经过深度网络学习出紧凑表征。
+\end{itemize}
+\end{insightBox}
+
+\section{正交补、四大基本子空间与“超定 vs 欠定”二象性}\label{sec:four-subspaces}
+
+\subsection{标准正交基与正交分解定理}
+
+设 $U \subseteq \R^n$ 是线性子空间。如果向量组 $\{q_1, \dots, q_k\}$ 是 $U$ 的一组基，且满足两两正交、长度为 1，即
+\[
+\inner{q_i}{q_j} = \delta_{ij} = \begin{cases} 1, & i = j, \\ 0, & i \neq j, \end{cases}
+\]
+则称 $\{q_1, \dots, q_k\}$ 为 $U$ 的一组\textbf{标准正交基（Orthonormal Basis）}。与 $U$ 中所有向量都垂直的向量全体组成 $U$ 的\textbf{正交补（Orthogonal Complement）}：
+\[
+U^\perp = \{w \in \R^n : \inner{w}{u} = 0,\; \forall u \in U\}.
+\]
+先看三维直觉：在 $\R^3$ 中，若 $U$ 是水平 $xy$-平面，则 $U^\perp$ 就是竖直 $z$-轴；空间中任意一点 $(x, y, z)^T$ 都可以唯一地拆成“落在平面内的影子”$(x, y, 0)^T \in U$ 与“垂直于平面的高度”$(0, 0, z)^T \in U^\perp$ 之和。下面的定理把这一几何直觉严格推广到任意维度。
+
+\begin{thmBox}
+\begin{theorem}[正交分解定理]\label{thm:ortho-decomp}
+设 $U$ 是 $\R^n$ 的任意线性子空间，则 $\R^n$ 可唯一分解为 $U$ 与其正交补 $U^\perp$ 的直和：
+\[
+\R^n = U \oplus U^\perp.
+\]
+也就是说，对任意 $v \in \R^n$，存在唯一的 $u \in U$ 与 $w \in U^\perp$ 使得 $v = u + w$。进而有 $\dim U + \dim U^\perp = n$ 且 $(U^\perp)^\perp = U$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+若 $U = \{0\}$，取 $u = 0,\, w = v$ 显然成立。下设 $\dim U = k \ge 1$，取 $U$ 的一组标准正交基 $\{q_1, \dots, q_k\}$（下一节的 Gram-Schmidt 过程保证任何有限维非零子空间都存在标准正交基）。
+
+\textbf{（1）存在性}：对任意 $v \in \R^n$，构造
+\[
+u = \sum_{i=1}^{k} \inner{v}{q_i} q_i \in U, \qquad w = v - u.
+\]
+验证 $w \in U^\perp$：对每个基向量 $q_j$（$1 \le j \le k$），利用内积双线性与标准正交性：
+\[
+\inner{w}{q_j} = \inner{v}{q_j} - \sum_{i=1}^{k} \inner{v}{q_i} \inner{q_i}{q_j}
+= \inner{v}{q_j} - \inner{v}{q_j} = 0.
+\]
+由于 $U$ 中任意向量都是 $q_1, \dots, q_k$ 的线性组合，故 $w$ 与 $U$ 中所有向量正交，即 $w \in U^\perp$，且 $v = u + w$。
+
+\textbf{（2）唯一性}：若另有一组分解 $v = u' + w'$（$u' \in U,\, w' \in U^\perp$），则令 $z = u - u' = w' - w$。此时 $z$ 同时属于 $U$ 与 $U^\perp$，必有 $\inner{z}{z} = 0$，由内积正定性得 $z = 0$，故 $u = u'$ 且 $w = w'$。
+
+由直和维数公式立即得到 $\dim U + \dim U^\perp = n$。再由定义显然有 $U \subseteq (U^\perp)^\perp$，而 $\dim(U^\perp)^\perp = n - \dim U^\perp = \dim U$，故 $(U^\perp)^\perp = U$。
+\end{proof}
+
+\subsection{线性代数基本定理（四大基本子空间）}
+
+\begin{recallBox}{矩阵 $A \in \R^{m \times n}$ 的四个基本子空间与维数}
+设矩阵 $A \in \R^{m \times n}$ 的秩为 $r = \rank(A)$，则它自然关联着四个线性子空间：
+\begin{itemize}
+  \item \textbf{列空间} $\col(A) = \{Ax : x \in \R^n\} \subseteq \R^m$，维数为 $r$；
+  \item \textbf{行空间} $\row(A) = \col(A^T) = \{A^T y : y \in \R^m\} \subseteq \R^n$，维数为 $r$；
+  \item \textbf{零空间（核空间）} $\nul(A) = \{x \in \R^n : Ax = 0\} \subseteq \R^n$，维数为 $n - r$；
+  \item \textbf{左零空间} $\nul(A^T) = \{y \in \R^m : A^T y = 0\} \subseteq \R^m$，维数为 $m - r$。
+\end{itemize}
+\end{recallBox}
+
+这四个子空间并不是零散孤立的，而是通过正交补结成严丝合缝的两对直和分解。
+
+\begin{thmBox}
+\begin{theorem}[线性代数基本定理：四大子空间正交对偶]\label{thm:four-subspaces}
+对任意矩阵 $A \in \R^{m \times n}$，恒有以下两组正交补关系与空间直和分解：
+\[
+\nul(A) = \row(A)^\perp, \qquad \nul(A^T) = \col(A)^\perp,
+\]
+\[
+\R^n = \row(A) \oplus \nul(A), \qquad \R^m = \col(A) \oplus \nul(A^T).
+\]
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记 $A$ 的各行为 $a_{1\cdot}^T, \dots, a_{m\cdot}^T \in \R^n$。由矩阵乘法点积视角，向量 $x \in \nul(A)$ 当且仅当 $Ax = 0$，即对每个 $i = 1, \dots, m$ 均有 $\inner{a_{i\cdot}}{x} = 0$。这等价于 $x$ 与 $A$ 的所有行的任意线性组合都正交，即 $x \in \row(A)^\perp$。因此 $\nul(A) = \row(A)^\perp$。
+
+把上述结论直接应用到转置矩阵 $A^T$，立刻得到 $\nul(A^T) = \row(A^T)^\perp = \col(A)^\perp$。再结合正交分解定理（定理~\ref{thm:ortho-decomp}），即得两条直和分解。
+\end{proof}
+
+图~\ref{fig:four-subspaces} 用一张经典全景图刻画了线性变换 $A: \R^n \to \R^m$ 的全部秘密：任何输入 $x \in \R^n$ 都唯一拆成 $x = x_r + x_n$（$x_r \in \row(A),\, x_n \in \nul(A)$）；乘以 $A$ 时，零空间分量 $x_n$ 被彻底压缩为 $0$，而行空间 $\row(A)$ 被 $A$ \textbf{一一满射（双射）}地映到列空间 $\col(A)$ 上！
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  subR/.style={draw=teal, very thick, fill=tealLight, rounded corners=1.2mm},
+  subN/.style={draw=slate, thick, fill=codebg, rounded corners=1.2mm},
+  subC/.style={draw=navy, very thick, fill=navyLight, rounded corners=1.2mm},
+  subLN/.style={draw=ochre, thick, fill=ochreLight, rounded corners=1.2mm},
+  arr/.style={-{Stealth[length=2.5mm]}, very thick}
+]
+% Left domain R^n
+\node[font=\sffamily\bfseries\normalsize, text=ink] at (2.1, 4.95) {输入空间 $\R^n$};
+% Row space
+\draw[subR] (0.2, 2.35) rectangle (4.0, 4.45);
+\node[font=\sffamily\bfseries, text=tealDark] at (2.1, 3.85) {行空间 $\row(A)$};
+\node[text=slate] at (2.1, 3.30) {$\dim = r$};
+\fill[tealDark] (2.85, 2.75) circle (2pt) node[left=2pt, text=tealDark] {$x_r$};
+% Null space
+\draw[subN] (0.2, 0.25) rectangle (4.0, 2.35);
+\node[font=\sffamily\bfseries, text=ink] at (2.1, 1.65) {零空间 $\nul(A)$};
+\node[text=slate] at (2.1, 1.10) {$\dim = n - r$};
+\fill[slate] (2.85, 0.65) circle (2pt) node[left=2pt, text=slate] {$x_n$};
+% Right angle symbol between row(A) and null(A)
+\draw[ink, thick] (0.2, 2.35) ++(0.32, 0) -- ++(0, 0.32) -- ++(-0.32, 0);
+\node[anchor=west, text=tealDark] at (0.62, 2.58) {\scriptsize $\perp$};
+
+% Right codomain R^m
+\node[font=\sffamily\bfseries\normalsize, text=ink] at (11.1, 4.95) {输出空间 $\R^m$};
+% Column space
+\draw[subC] (9.2, 2.35) rectangle (13.0, 4.45);
+\node[font=\sffamily\bfseries, text=navy] at (11.1, 3.85) {列空间 $\col(A)$};
+\node[text=slate] at (11.1, 3.30) {$\dim = r$};
+\fill[navy] (10.35, 2.75) circle (2pt) node[right=2pt, text=navy] {$b = A x_r$};
+% Left null space
+\draw[subLN] (9.2, 0.25) rectangle (13.0, 2.35);
+\node[font=\sffamily\bfseries, text=ochre] at (11.1, 1.65) {左零空间 $\nul(A^T)$};
+\node[text=slate] at (11.1, 1.10) {$\dim = m - r$};
+\fill[ochre] (10.35, 2.35) circle (2.2pt) node[below right=1pt, text=ochre] {$0$};
+% Right angle symbol
+\draw[ink, thick] (13.0, 2.35) ++(-0.32, 0) -- ++(0, 0.32) -- ++(0.32, 0);
+\node[anchor=east, text=navy] at (12.58, 2.58) {\scriptsize $\perp$};
+
+% Arrows between spaces
+\draw[arr, teal] (4.15, 3.80) to[bend left=10] node[above=2pt, text=tealDark] {$A$（一一对应双射）} (9.05, 3.80);
+\draw[arr, navy, dashed] (9.05, 3.20) to[bend left=8] node[below=2pt, text=navy] {$A^T$（反向双射）} (4.15, 3.20);
+\draw[arr, slate] (4.15, 0.90) -- node[below=4pt, sloped, text=slate] {$A x_n = 0$（压缩至原点）} (10.18, 2.28);
+\end{tikzpicture}}
+\caption{线性代数基本定理：矩阵 $A \in \R^{m \times n}$ 的四大基本子空间及其正交补对偶}\label{fig:four-subspaces}
+\end{figure}
+
+\subsection{AI 中的“超定 vs 欠定”二象性}
+
+把数据矩阵 $A \in \R^{m \times n}$（$m$ 个训练样本、$n$ 个待估参数）与标签向量 $b \in \R^m$ 放进图~\ref{fig:four-subspaces}，人工智能历史上前后两个时代的核心建模矛盾立刻一览无余（见表~\ref{tab:over-under}）：
+
+\begin{table}[htbp]
+\centering
+\caption{线性方程 $Aw = b$ 在人工智能中的“超定 vs 欠定”二象性}\label{tab:over-under}
+{\small
+\begin{tabularx}{\linewidth}{@{}p{24mm}p{56mm}X@{}}
+\toprule
+\textbf{维度对比} & \textbf{超定系统（$m > n$，典型 $\rank(A) = n$）} & \textbf{欠定系统（$m < n$，典型 $\rank(A) = m$）} \\
+\midrule
+AI 时代对应 & 传统统计学习：样本数远多于特征数 & 现代过参数化深度网络：参数量远大于样本数 \\
+子空间几何 & $\col(A)$ 只是 $\R^m$ 的低维切片，$\nul(A)=\{0\}$ & $\col(A) = \R^m$ 铺满空间，$\nul(A)$ 维数高达 $n-m$ \\
+精确解存在性 & 含噪观测 $b \notin \col(A)$，\textbf{通常无精确解} & 满足 $Aw=b$ 的解构成仿射空间 $w_0 + \nul(A)$，\textbf{无穷多解} \\
+核心求解策略 & 在 $\col(A)$ 中做\textbf{正交投影}（最小二乘，第~\ref{sec:proj-ls}~节） & 引入归纳偏置挑选零空间分量为 $0$ 的\textbf{最小范数解}（第 4 章伪逆） \\
+\bottomrule
+\end{tabularx}}
+\end{table}
+
+\section{正交投影与线性最小二乘}\label{sec:proj-ls}
+
+\subsection{从三点拟合直线出发}
+
+现在我们直面超定系统。假设你测得了 3 个实验数据点 $(0, 1),\, (1, 2),\, (2, 4)$，想用一条直线 $y = w_0 + w_1 x$ 去拟合它们。把三组坐标依次代入，得到超定线性方程组 $Aw = b$：
+\[
+\begin{cases}
+w_0 + 0\cdot w_1 = 1, \\
+w_0 + 1\cdot w_1 = 2, \\
+w_0 + 2\cdot w_1 = 4,
+\end{cases}
+\quad \Longleftrightarrow \quad
+\underbrace{\begin{pmatrix} 1 & 0 \\ 1 & 1 \\ 1 & 2 \end{pmatrix}}_{A}
+\underbrace{\begin{pmatrix} w_0 \\ w_1 \end{pmatrix}}_{w}
+=
+\underbrace{\begin{pmatrix} 1 \\ 2 \\ 4 \end{pmatrix}}_{b}.
+\]
+一眼可见它\textbf{无精确解}：前两式已经唯一钉死了 $w_0 = 1,\, w_1 = 1$，但代入第三式只能得到 $1 + 2 = 3 \neq 4$。用第 1 章的列线性组合视角翻译：无论你怎么调 $w_0, w_1$，向量 $Aw = w_0 (1,1,1)^T + w_1 (0,1,2)^T$ 永远被锁死在 $\R^3$ 的二维平面 $\col(A)$ 内，而观测点 $b = (1, 2, 4)^T$ 漂浮在这个平面之外！
+
+既然碰不到 $b$，最自然的退而求其次便是寻找 $\hat{w} \in \R^n$，使平面上的预测向量 $A\hat{w}$ 离目标 $b$ 的欧氏距离平方最小——这就是著名的\textbf{线性最小二乘问题（Linear Least Squares）}：
+\begin{equation}\label{eq:ls-obj}
+\hat{w} = \argmin_{w \in \R^n} \norm{Aw - b}_2^2.
+\end{equation}
+
+\subsection{正交投影最优逼近定理与投影矩阵刻画}
+
+三维空间里，从平面外一点 $b$ 到平面 $\col(A)$ 最短的线段是什么？初中几何就告诉你：\textbf{向平面作垂线}！垂足 $\hat{b} = A\hat{w}$ 就是最佳逼近点，而残差向量 $e = b - A\hat{w}$ 必须垂直于整个平面 $\col(A)$（见图~\ref{fig:ortho-proj}）。下面我们用勾股定理将这一直观变成任意高维下的严格定理。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.82\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+  % Subspace plane col(A)
+  \fill[tealLight, opacity=0.85] (-0.8, -0.75) -- (6.2, -0.75) -- (7.8, 2.25) -- (0.8, 2.25) -- cycle;
+  \draw[teal, thick] (-0.8, -0.75) -- (6.2, -0.75) -- (7.8, 2.25) -- (0.8, 2.25) -- cycle;
+  \node[anchor=north east, font=\sffamily\bfseries\small, text=tealDark] at (7.35, 2.05) {列空间 $\col(A)$};
+
+  % Origin and points (clean triangle separation)
+  \coordinate (O) at (0.8, 0.35);
+  \coordinate (Bhat) at (4.7, 1.35);
+  \coordinate (B) at (4.7, 4.25);
+  \coordinate (Aw) at (3.2, -0.30);
+
+  % Vectors
+  \draw[-{Stealth[length=2.5mm]}, very thick, navy] (O) -- (B) node[midway, above left=3pt, text=navy] {$b$（观测向量）};
+  \draw[-{Stealth[length=2.5mm]}, very thick, teal] (O) -- (Bhat) node[pos=0.52, above=3pt, sloped, text=tealDark] {$\hat{b} = A\hat{w} = Pb$};
+  \draw[-{Stealth[length=2.5mm]}, very thick, ochre] (Bhat) -- (B) node[pos=0.58, right=5pt, text=ochre] {$e = b - A\hat{w} \perp \col(A)$};
+
+  % Arbitrary point Aw and right triangle
+  \draw[-{Stealth[length=2.2mm]}, thick, slate, dashed] (O) -- (Aw);
+  \draw[thick, slate, dashed] (Aw) -- (Bhat) node[midway, below right=2pt, text=slate] {\scriptsize $\hat{b} - Aw$};
+  \draw[thick, slate, dotted] (Aw) -- (B) node[pos=0.61, left=2pt, text=slate] {\scriptsize $b - Aw$};
+
+  % Right angle mark at Bhat
+  \draw[ochre, thick] (Bhat) ++(0, 0.32) -- ++(-0.32, -0.08) -- ++(0, -0.32);
+
+  % Dots & labels
+  \fill[ink] (O) circle (2pt) node[below left=1pt] {$0$};
+  \fill[tealDark] (Bhat) circle (2.2pt);
+  \fill[navy] (B) circle (2.2pt);
+  \fill[slate] (Aw) circle (2pt) node[below=2pt, text=slate] {$Aw$};
+\end{tikzpicture}}
+\caption{线性最小二乘的几何本质：最优拟合 $\hat{b} = A\hat{w}$ 是 $b$ 在列空间 $\col(A)$ 上的正交投影，对任意 $Aw \in \col(A)$ 构成直角三角形}\label{fig:ortho-proj}
+\end{figure}
+
+\begin{thmBox}
+\begin{theorem}[正交投影最优逼近定理]\label{thm:best-approx}
+设 $U \subseteq \R^m$ 为线性子空间，给定 $b \in \R^m$，按定理~\ref{thm:ortho-decomp} 将其唯一分解为 $b = \hat{b} + e$，其中 $\hat{b} \in U$、$e \in U^\perp$。则对任意 $u \in U$，恒有
+\[
+\norm{b - u}_2^2 = \norm{e}_2^2 + \norm{\hat{b} - u}_2^2 \ge \norm{e}_2^2,
+\]
+等号成立当且仅当 $u = \hat{b}$。因此 $\hat{b}$ 是 $U$ 中离 $b$ 唯一的欧氏最近点，称为 $b$ 在 $U$ 上的\textbf{正交投影}。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对任意 $u \in U$，由于 $\hat{b} \in U$ 且 $U$ 是子空间，有 $\hat{b} - u \in U$；又 $e \in U^\perp$，故 $e \perp (\hat{b} - u)$。将差向量改写为 $b - u = (b - \hat{b}) + (\hat{b} - u) = e + (\hat{b} - u)$，直接应用勾股定理（定理~\ref{thm:cauchy-schwarz}）即得
+\[
+\norm{b - u}_2^2 = \norm{e}_2^2 + \norm{\hat{b} - u}_2^2 \ge \norm{e}_2^2.
+\]
+等号成立当且仅当 $\norm{\hat{b} - u}_2^2 = 0$，即 $u = \hat{b}$。
+\end{proof}
+
+若将每个向量 $b \in \R^m$ 映到它在 $U$ 上的正交投影 $\hat{b}$，这一映射是线性的，对应唯一的 $m \times m$ 矩阵 $P$（即 $\hat{b} = Pb$）。如何一眼认出一个矩阵是不是正交投影矩阵？只需检验两条代数性质。
+
+\begin{thmBox}
+\begin{theorem}[正交投影矩阵的充要刻画]\label{thm:proj-matrix}
+方阵 $P \in \R^{m \times m}$ 是某个子空间 $U \subseteq \R^m$ 上的正交投影矩阵，当且仅当它同时满足\textbf{幂等性}与\textbf{对称性}：
+\[
+P^2 = P \qquad \text{且} \qquad P^T = P.
+\]
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{（必要性 $\Rightarrow$）}：设 $P$ 是到 $U$ 的正交投影。对任意 $b \in \R^m$，向量 $Pb$ 已经落在 $U$ 中，再投影一次仍等于自身，即 $P(Pb) = Pb$，故 $P^2 = P$。其次，对任意 $x, y \in \R^m$，拆分为 $x = Px + (x - Px)$ 与 $y = Py + (y - Py)$，由于 $Px, Py \in U$ 且 $x - Px, y - Py \in U^\perp$，交叉内积为零，于是
+\[
+\inner{Px}{y} = \inner{Px}{Py + (y - Py)} = \inner{Px}{Py} = \inner{Px + (x - Px)}{Py} = \inner{x}{Py}.
+\]
+写成矩阵形式即 $x^T P^T y = x^T P y$ 对一切 $x, y$ 成立，故 $P^T = P$。
+
+\textbf{（充分性 $\Leftarrow$）}：设 $P^2 = P = P^T$，令子空间 $U = \col(P)$。对任意 $b \in \R^m$，分解 $b = Pb + (b - Pb)$。显然 $Pb \in U$；对 $U$ 中任意向量 $Pu$，有
+\[
+\inner{b - Pb}{Pu} = \inner{P^T(b - Pb)}{u} = \inner{Pb - P^2 b}{u} = \inner{0}{u} = 0.
+\]
+故 $b - Pb \in U^\perp$。由正交分解的唯一性，$Pb$ 正是 $b$ 在 $U$ 上的正交投影。
+\end{proof}
+
+\subsection{正规方程、可逆性判据与三点手算验证}
+
+把定理~\ref{thm:best-approx} 应用到子空间 $U = \col(A)$：最优参数 $\hat{w}$ 必须使残差 $e = b - A\hat{w}$ 落入 $\col(A)^\perp$。回顾线性代数基本定理（定理~\ref{thm:four-subspaces}），$\col(A)^\perp = \nul(A^T)$！于是几何正交条件立刻翻译成代数方程：
+\begin{equation}\label{eq:normal-eq}
+A^T (b - A\hat{w}) = 0 \quad \Longleftrightarrow \quad A^T A \hat{w} = A^T b.
+\end{equation}
+方程~\eqref{eq:normal-eq} 称为\textbf{正规方程（Normal Equations）}。下面这个定理不借用任何特征值工具，直接回答了最小二乘解何时唯一存在。
+
+\begin{thmBox}
+\begin{theorem}[正规方程的可逆性判据]\label{thm:ata-inv}
+对任意矩阵 $A \in \R^{m \times n}$，恒有 $\nul(A^T A) = \nul(A)$。因此方阵 $A^T A \in \R^{n \times n}$ 可逆当且仅当 $A$ \textbf{列满秩}（即 $\rank(A) = n$）。此时最小二乘问题~\eqref{eq:ls-obj} 有唯一解
+\[
+\hat{w} = (A^T A)^{-1} A^T b,
+\]
+且向 $\col(A)$ 的正交投影矩阵为 $P = A (A^T A)^{-1} A^T$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+先证 $\nul(A^T A) = \nul(A)$：若 $Av = 0$，两边左乘 $A^T$ 立得 $A^T A v = 0$，故 $\nul(A) \subseteq \nul(A^T A)$。反过来，若 $A^T A v = 0$，两边左乘 $v^T$ 得
+\[
+0 = v^T A^T A v = (Av)^T (Av) = \norm{Av}_2^2.
+\]
+由范数正定性必有 $Av = 0$，即 $v \in \nul(A)$。两向包含证毕。
+
+方阵 $A^T A$ 可逆 $\iff \nul(A^T A) = \{0\} \iff \nul(A) = \{0\} \iff \rank(A) = n$。当 $A^T A$ 可逆时，正规方程给出唯一解 $\hat{w} = (A^T A)^{-1} A^T b$，相应投影为 $\hat{b} = A\hat{w} = A(A^T A)^{-1} A^T b = Pb$。直接检验可知 $P^T = P$ 且 $P^2 = A(A^T A)^{-1}(A^T A)(A^T A)^{-1} A^T = P$。
+\end{proof}
+
+\begin{example}[三点拟合直线的手算闭环]\label{ex:3pt-ls}
+回到本节开头的三点 $(0,1),\, (1,2),\, (2,4)$，设计矩阵 $A = \begin{psmallmatrix} 1 & 0 \\ 1 & 1 \\ 1 & 2 \end{psmallmatrix}$ 显然列满秩（$\rank(A)=2$）。计算正规方程两端：
+\[
+A^T A = \begin{pmatrix} 1 & 1 & 1 \\ 0 & 1 & 2 \end{pmatrix}\begin{pmatrix} 1 & 0 \\ 1 & 1 \\ 1 & 2 \end{pmatrix}
+= \begin{pmatrix} 3 & 3 \\ 3 & 5 \end{pmatrix}, \qquad
+A^T b = \begin{pmatrix} 1 & 1 & 1 \\ 0 & 1 & 2 \end{pmatrix}\begin{pmatrix} 1 \\ 2 \\ 4 \end{pmatrix}
+= \begin{pmatrix} 7 \\ 10 \end{pmatrix}.
+\]
+由于 $\det(A^T A) = 3\times 5 - 3\times 3 = 6$，直接求逆得
+\[
+\hat{w} = \frac{1}{6}\begin{pmatrix} 5 & -3 \\ -3 & 3 \end{pmatrix}\begin{pmatrix} 7 \\ 10 \end{pmatrix}
+= \frac{1}{6}\begin{pmatrix} 5 \\ 9 \end{pmatrix}
+= \begin{pmatrix} 5/6 \\ 3/2 \end{pmatrix}.
+\]
+于是最佳拟合直线为 $\hat{y} = \frac{5}{6} + \frac{3}{2} x$。验证残差正交性：预测值 $\hat{b} = A\hat{w} = (\frac{5}{6},\, \frac{14}{6},\, \frac{23}{6})^T$，残差 $e = b - \hat{b} = (\frac{1}{6},\, -\frac{2}{6},\, \frac{1}{6})^T$，检查内积：
+\[
+A^T e = \begin{pmatrix} \frac{1}{6} - \frac{2}{6} + \frac{1}{6} \\[2pt] 0\cdot\frac{1}{6} - 1\cdot\frac{2}{6} + 2\cdot\frac{1}{6} \end{pmatrix}
+= \begin{pmatrix} 0 \\ 0 \end{pmatrix}, \qquad
+\norm{e}_2^2 = \frac{1 + 4 + 1}{36} = \frac{1}{6}.
+\]
+\end{example}
+
+\subsection{Gram-Schmidt 正交化与 QR 分解：为什么工程上不直接求 $(A^T A)^{-1}$？}
+
+如果矩阵 $A$ 的各列本身就构成标准正交向量组（记作 $Q \in \R^{m \times n}$，满足 $Q^T Q = I_n$），正规方程会出现奇迹：$Q^T Q \hat{w} = Q^T b$ 直接坍缩为 $\hat{w} = Q^T b$，连求逆都省了！
+
+自然地，我们可以用\textbf{格拉姆-施密特（Gram-Schmidt）正交化}，把任意列满秩矩阵 $A = [a_1, \dots, a_n]$ 的列逐一“掰直”为标准正交列 $q_1, \dots, q_n$：第 $k$ 步从 $a_k$ 中减掉它在前面所有已得正交基上的投影，再归一化：
+\begin{equation}\label{eq:gs}
+\tilde{q}_k = a_k - \sum_{j=1}^{k-1} \underbrace{\inner{q_j}{a_k}}_{r_{jk}} q_j, \qquad
+r_{kk} = \norm{\tilde{q}_k}_2 > 0, \qquad
+q_k = \frac{\tilde{q}_k}{r_{kk}}.
+\end{equation}
+把式~\eqref{eq:gs} 反写出来：$a_k = \sum_{j=1}^k r_{jk} q_j$。按第 1 章的列线性组合视角打包成矩阵乘法，就是大名鼎鼎的\textbf{精简 QR 分解（Reduced QR Factorization）}：
+\[
+A = Q R, \qquad Q \in \R^{m \times n}\;(Q^T Q = I_n), \qquad R \in \R^{n \times n}\;\text{（对角元全正的上三角阵）}.
+\]
+将 $A = QR$ 代入正规方程 $A^T A \hat{w} = A^T b$：
+\[
+R^T (Q^T Q) R \hat{w} = R^T Q^T b \implies R^T R \hat{w} = R^T Q^T b.
+\]
+因为 $R$ 的对角元全正，故 $R^T$ 可逆，两端消去 $R^T$ 立得极简的\textbf{上三角回代方程}：
+\begin{equation}\label{eq:qr-ls}
+R \hat{w} = Q^T b.
+\end{equation}
+
+\begin{example}[对三点拟合矩阵手算 QR 分解并复核]\label{ex:3pt-qr}
+仍取例~\ref{ex:3pt-ls} 的 $A = \begin{psmallmatrix} 1 & 0 \\ 1 & 1 \\ 1 & 2 \end{psmallmatrix}$ 与 $b = (1, 2, 4)^T$：
+\begin{itemize}
+  \item 第 1 列 $a_1 = (1, 1, 1)^T$：$r_{11} = \norm{a_1}_2 = \sqrt{3}$，故 $q_1 = \frac{1}{\sqrt{3}}(1, 1, 1)^T$。
+  \item 第 2 列 $a_2 = (0, 1, 2)^T$：$r_{12} = \inner{q_1}{a_2} = \frac{3}{\sqrt{3}} = \sqrt{3}$，减去投影得
+  \[
+  \tilde{q}_2 = (0, 1, 2)^T - \sqrt{3}\cdot\frac{1}{\sqrt{3}}(1, 1, 1)^T = (-1, 0, 1)^T,
+  \]
+  长度 $r_{22} = \sqrt{2}$，故 $q_2 = \frac{1}{\sqrt{2}}(-1, 0, 1)^T$。
+  \item 计算 $Q^T b = \begin{psmallmatrix} 7/\sqrt{3} \\ 3/\sqrt{2} \end{psmallmatrix}$，解上三角方程 $R\hat{w} = Q^T b$：
+  \[
+  \begin{pmatrix} \sqrt{3} & \sqrt{3} \\ 0 & \sqrt{2} \end{pmatrix}\begin{pmatrix} w_0 \\ w_1 \end{pmatrix}
+  = \begin{pmatrix} 7/\sqrt{3} \\ 3/\sqrt{2} \end{pmatrix}
+  \implies w_1 = \frac{3}{2}, \quad w_0 = \frac{7}{3} - \frac{3}{2} = \frac{5}{6},
+  \]
+  与正规方程手算结果一模一样！
+\end{itemize}
+\end{example}
+
+既然正规方程与 QR 在精确算术下结果完全相同，为什么所有现代数值库（包括 \texttt{np.linalg.lstsq}）都强烈警告\textbf{绝不要显式写 \texttt{np.linalg.inv(A.T @ A) @ A.T @ b}}？
+
+\begin{failBox}{数值精度杀手：显式构造 $A^T A$ 会把敏感度“平方放大”}
+考虑一个极简的 $3 \times 2$ 矩阵（Läuchli 矩阵），取微小正数 $\varepsilon = 10^{-8}$：
+\[
+A = \begin{pmatrix} 1 & 1 \\ \varepsilon & 0 \\ 0 & \varepsilon \end{pmatrix}, \qquad
+A^T A = \begin{pmatrix} 1 + \varepsilon^2 & 1 \\ 1 & 1 + \varepsilon^2 \end{pmatrix}.
+\]
+在双精度浮点数 \texttt{float64} 中（机器精度 $\varepsilon_{\text{mach}} \approx 2.22 \times 10^{-16}$），$A$ 本身两列清楚地线性无关；可是一旦乘出 $A^T A$，由于 $\varepsilon^2 = 10^{-16} < \varepsilon_{\text{mach}}/2$，计算机里 $1 + \varepsilon^2$ 会直接舍入成 $1.0$！原本列满秩的问题瞬间退化成奇异矩阵 $\begin{psmallmatrix}1 & 1 \\ 1 & 1\end{psmallmatrix}$，信息荡然无存！
+
+用第 3 章将严格定义的语言来说，形成 $A^T A$ 会使矩阵条件数平方放大：$\cond(A^T A) = \cond(A)^2$。\textbf{工程铁律}：求解最小二乘时，永远直接调用基于正交变换（QR/SVD）的 \texttt{np.linalg.lstsq(A, b, rcond=None)}。
+\end{failBox}
+
+\begin{extBox}{改进 Gram-Schmidt 与 Householder 镜面反射直觉}
+经典 Gram-Schmidt（CGS）在有限精度下容易因舍入误差让新向量逐渐丧失与前面基向量的正交性；稍微调整顺序、每减去一个分量就立刻更新 $\tilde{q}_k$ 的\textbf{改进 Gram-Schmidt（MGS）}会稳健不少。而 \texttt{np.linalg.qr} 底层真正采用的是精度更高的\textbf{Householder 镜面反射}：用形如 $H = I - 2 u u^T$（$\norm{u}_2 = 1$，满足 $H^T = H$ 与 $H^T H = I$）的保长正交反射矩阵，像折纸一样逐列把对角线下方元素反射清零，即使在 $\varepsilon = 10^{-8}$ 的 Läuchli 矩阵上也能保持 $10^{-15}$ 级机器精度（见习题~2.7 实测）。初读了解“工业界靠正交变换保精度”即可，不必手推反射公式。
+\end{extBox}
+
+\section{首个实战闭环：多项式回归、过拟合与岭回归初探}\label{sec:poly-ridge}
+
+\subsection{特征映射：用线性最小二乘拟合非线性曲线}
+
+现在我们把第~\ref{sec:proj-ls}~节的工具升级为真正的机器学习模型。读者常有一个误解：线性回归只能画直线。其实不然——\textbf{“线性模型”里的“线性”，指的是对未知参数 $w$ 呈线性，而对原始输入 $x$ 可以高度非线性}！
+
+给定标量输入 $x \in \R$，我们构造一个 $d$ 次\textbf{多项式特征映射（Feature Map）}：
+\[
+\phi(x) = \begin{pmatrix} 1 & x & x^2 & \cdots & x^d \end{pmatrix}^T \in \R^{d+1}.
+\]
+模型预测值 $\hat{y}(x) = w^T \phi(x) = w_0 + w_1 x + w_2 x^2 + \dots + w_d x^d$ 虽然关于 $x$ 是蜿蜒曲折的 $d$ 次曲线，但关于参数 $w$ 却是纯粹的线性组合！把 $m$ 个训练样本 $(x_1, y_1), \dots, (x_m, y_m)$ 堆叠成\textbf{范德蒙德（Vandermonde）设计矩阵}：
+\[
+A = \begin{pmatrix}
+1 & x_1 & x_1^2 & \cdots & x_1^d \\
+1 & x_2 & x_2^2 & \cdots & x_2^d \\
+\vdots & \vdots & \vdots & \ddots & \vdots \\
+1 & x_m & x_m^2 & \cdots & x_m^d
+\end{pmatrix} \in \R^{m \times (d+1)},
+\]
+拟合非线性曲线的问题就原封不动地回到了线性最小二乘 $\min_{w} \norm{Aw - y}_2^2$！
+
+\subsection{过拟合危机与岭回归（Ridge Regression）}
+
+是不是多项式次数 $d$ 越高越好呢？当我们只有 $m = 15$ 个带噪声的训练点、却硬塞进 $d = 9$ 甚至 $d = 11$ 次多项式时，灾难发生了：一方面，$x^k$ 与 $x^{k+1}$ 在区间 $[0, 1]$ 上长得极像，导致设计矩阵 $A$ 的各列近乎共线；另一方面，为了死命穿过每一个带噪声的训练点，普通最小二乘（OLS）会把多项式系数推高到惊人的正负百万级，靠巨额正负抵消在训练点间剧烈震荡——这就是机器学习的核心宿敌：\textbf{过拟合（Overfitting）}！
+
+怎么驯服发疯的系数？最经典的方法是在损失函数后面加上一项 $\ell_2$ 惩罚（约束参数不能太大），得到\textbf{岭回归（Ridge Regression）}：
+\begin{equation}\label{eq:ridge-obj}
+\min_{w \in \R^{d+1}} \; \norm{Aw - y}_2^2 + \lambda \norm{w}_2^2 \qquad (\lambda > 0),
+\end{equation}
+其中超参数 $\lambda > 0$ 控制“贴合训练数据”与“保持权重简洁平滑”之间的平衡。
+
+绝妙的是，我们\textbf{不需要微积分，也不需要第 3 章的谱定理}，用一个小技巧就能把岭回归直接变回刚学过的普通最小二乘！把两项平方和拼成一个\textbf{增广向量的欧氏范数平方}：
+\begin{equation}\label{eq:ridge-aug}
+\norm{Aw - y}_2^2 + \lambda \norm{w}_2^2
+= \norm{\underbrace{\begin{pmatrix} A \\ \sqrt{\lambda} I \end{pmatrix}}_{\tilde{A}} w - \underbrace{\begin{pmatrix} y \\ 0 \end{pmatrix}}_{\tilde{y}}}_2^2.
+\end{equation}
+立刻套用第~\ref{sec:proj-ls}~节的正规方程 $\tilde{A}^T \tilde{A} \hat{w}_\lambda = \tilde{A}^T \tilde{y}$，展开即得岭回归解析解方程：
+\begin{equation}\label{eq:ridge-normal}
+(A^T A + \lambda I) \hat{w}_\lambda = A^T y.
+\end{equation}
+而且，这个加上“山脊”$\lambda I$ 的矩阵永远不会奇异——甚至在样本数 $m < n$ 或特征完全重复时都如此！
+
+\begin{thmBox}
+\begin{theorem}[岭回归矩阵恒可逆定理]\label{thm:ridge-inv}
+对任意形状、任意秩的矩阵 $A \in \R^{m \times n}$ 及任意正则化系数 $\lambda > 0$，方阵 $A^T A + \lambda I_n$ 必然可逆，因此岭回归问题~\eqref{eq:ridge-obj} 存在唯一解析解 $\hat{w}_\lambda = (A^T A + \lambda I_n)^{-1} A^T y$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+设向量 $v \in \R^n$ 满足 $(A^T A + \lambda I_n) v = 0$。两边左乘 $v^T$ 得
+\[
+0 = v^T (A^T A + \lambda I_n) v = \norm{Av}_2^2 + \lambda \norm{v}_2^2.
+\]
+由于 $\norm{Av}_2^2 \ge 0$ 且 $\lambda > 0$，必有 $\lambda \norm{v}_2^2 = 0 \implies \norm{v}_2 = 0 \implies v = 0$。由此 $\nul(A^T A + \lambda I_n) = \{0\}$，故方阵 $A^T A + \lambda I_n$ 恒可逆。
+\end{proof}
+
+\begin{remark}[工程细节：为何常豁免截距项 $w_0$？]
+在具体实现中，截距项 $w_0$ 仅负责把拟合曲线整体上下平移，不控制曲线的弯曲剧烈程度；压缩 $w_0$ 反而会引入无谓的整体偏差。因此工程上常令惩罚矩阵 $P = \diag(0, 1, \dots, 1)$，仅惩罚非常数项权重 $w_1, \dots, w_d$，求解 $(A^T A + \lambda P)\hat{w}_\lambda = A^T y$。只要设计矩阵第 1 列是全 $1$ 向量 $\mathbf{1} \neq 0$，用与定理~\ref{thm:ridge-inv} 完全相同的能量论证可知：$(A^T A + \lambda P)v = 0 \implies \norm{Av}_2^2 + \lambda\sum_{j=1}^d v_j^2 = 0 \implies v_1 = \dots = v_d = 0$，继而 $\norm{v_0 \mathbf{1}}_2^2 = m v_0^2 = 0 \implies v_0 = 0$，矩阵依然恒可逆！
+\end{remark}
+
+\subsection{实测数据、U 型泛化曲线与可运行代码}
+
+在配套脚本 \texttt{code/vol1\_experiments.py}（函数 \texttt{exp2\_poly\_ridge}）中，我们设定真实规律为正弦曲线 $y = \sin(2\pi x)$（$x \in [0, 1]$），仅抽取 $m = 15$ 个叠加标准差 $\sigma = 0.25$ 高斯噪声的训练样本，并在 $200$ 个无噪测试点上评估均方误差（MSE）。表~\ref{tab:poly-ridge} 与图~\ref{fig:poly-ridge} 完整展示了从欠拟合、甜蜜点到严重过拟合、再到岭回归救场的真实实测曲线。
+
+\begin{table}[htbp]
+\centering
+\caption{多项式回归（OLS vs 岭回归 $\lambda = 10^{-3}$）实测对比（源自 \texttt{data/poly\_ridge.csv}）}\label{tab:poly-ridge}
+{\small
+\begin{tabular}{@{}rcccc@{}}
+\toprule
+\textbf{多项式次数 $d$} & \textbf{OLS 训练 MSE} & \textbf{OLS 测试 MSE} & \textbf{岭回归测试 MSE} & \textbf{OLS 权重范数 $\norm{w_{\text{OLS}}}_2$} \\
+\midrule
+1 & 0.2472 & 0.2288 & 0.2289 & 1.44 \\
+2 & 0.2421 & 0.2330 & 0.2329 & 2.43 \\
+3 & 0.0403 & 0.0160 & 0.0514 & 36.49 \\
+5 & 0.0347 & \textbf{0.0145} & 0.0296 & 123.05 \\
+7 & 0.0305 & 0.0211 & 0.0257 & 5,324.09 \\
+9 & 0.0111 & \textcolor{ochre}{\textbf{0.0613}} & 0.0218 & 402,933.89 \\
+11 & \textbf{0.0048} & \textcolor{ochre}{0.0484} & \textbf{0.0216} & \textcolor{ochre}{\textbf{9,940,472.74}} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.84\linewidth,
+  height=5.8cm,
+  xlabel={多项式次数 $d$},
+  ylabel={均方误差（MSE）},
+  xtick={1,2,3,5,7,9,11},
+  ymin=0, ymax=0.27,
+  grid=both,
+  grid style={line width=0.25pt, draw=codeborder},
+  legend pos=north east,
+  legend style={font=\footnotesize, fill=white, draw=codeborder},
+  tick label style={font=\scriptsize},
+  label style={font=\small\sffamily}
+]
+  \addplot[thick, dashed, mark=triangle*, mark size=2.3pt, color=slate]
+    table[x=deg, y=train_mse, col sep=comma]{data/poly_ridge.csv};
+  \addlegendentry{OLS 训练 MSE（单调逼近 0）}
+  \addplot[very thick, mark=*, mark size=2.4pt, color=ochre]
+    table[x=deg, y=test_mse, col sep=comma]{data/poly_ridge.csv};
+  \addlegendentry{OLS 测试 MSE（经典 U 型过拟合）}
+  \addplot[very thick, mark=square*, mark size=2.2pt, color=teal]
+    table[x=deg, y=ridge_test_mse, col sep=comma]{data/poly_ridge.csv};
+  \addlegendentry{岭回归测试 MSE（$\lambda = 10^{-3}$，稳健抑制）}
+  % Annotations
+  \node[anchor=center, font=\scriptsize\sffamily, text=slate, fill=white, inner sep=1.5pt] at (axis cs:1.45, 0.165) {欠拟合区};
+  \node[anchor=south, font=\scriptsize\sffamily, text=tealDark] at (axis cs:5, 0.044) {甜蜜点 $d=5$};
+  \node[anchor=south, font=\scriptsize\sffamily, text=ochre] at (axis cs:9.1, 0.074) {过拟合抬头（$\|w\|_2 \sim 10^7$）};
+\end{axis}
+\end{tikzpicture}
+\caption{多项式回归的 U 型泛化曲线与岭回归抗过拟合实测（数据直接读取自 \texttt{data/poly\_ridge.csv}）}\label{fig:poly-ridge}
+\end{figure}
+
+仔细品读表~\ref{tab:poly-ridge} 与图~\ref{fig:poly-ridge} 的三个阶段：
+\begin{enumerate}
+  \item \textbf{欠拟合（$d = 1, 2$）}：直线或抛物线根本弯不出一个完整正弦波，训练 MSE 与测试 MSE 双双高达 $0.23$ 以上。
+  \item \textbf{甜蜜点（$d = 3, 5$）}：模型容量刚好匹配真实曲线，OLS 测试 MSE 骤降至 $0.0145$。
+  \item \textbf{过拟合与岭回归救场（$d = 9, 11$）}：OLS 训练 MSE 继续跌到 $0.0048$，但测试 MSE 反而反弹回升至 $0.0613$，权重范数爆炸到 $9.94 \times 10^6$！加上极小的 $\lambda = 10^{-3}$ 岭惩罚后，即使在 $d = 11$ 阶高次多项式上，测试 MSE 也平稳压制在 $0.0216$，权重范数暴降数十万倍（仅约 $14.7$）。
+\end{enumerate}
+
+代码~\ref{lst:poly-ridge} 给出了完整的纯 NumPy 实战代码，建议你亲手运行并试着改动样本量 $m$ 与 $\lambda$ 观察曲线变化。
+
+\begin{lstlisting}[caption={多项式 OLS 与岭回归实战闭环（复现表~\ref{tab:poly-ridge} 实测数据）}, label={lst:poly-ridge}]
+import numpy as np
+
+rng = np.random.default_rng(42)
+x_tr = np.linspace(0.0, 1.0, 15)
+y_tr = np.sin(2.0 * np.pi * x_tr) + rng.normal(0.0, 0.25, size=x_tr.shape)
+x_te = np.linspace(0.0, 1.0, 200)
+y_te = np.sin(2.0 * np.pi * x_te)
+
+def vandermonde(x: np.ndarray, deg: int) -> np.ndarray:
+    return np.column_stack([x ** k for k in range(deg + 1)])
+
+def fit_ridge_augmented(A: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
+    """用增广矩阵 + lstsq 稳健求解岭回归（豁免截距项 w_0）。"""
+    n_feat = A.shape[1]
+    reg = np.sqrt(lam) * np.eye(n_feat)
+    reg[0, 0] = 0.0
+    A_aug = np.vstack([A, reg])
+    y_aug = np.concatenate([y, np.zeros(n_feat)])
+    w, *_ = np.linalg.lstsq(A_aug, y_aug, rcond=None)
+    return w
+
+for d in [1, 3, 5, 9, 11]:
+    A_tr, A_te = vandermonde(x_tr, d), vandermonde(x_te, d)
+    w_ols, *_ = np.linalg.lstsq(A_tr, y_tr, rcond=None)
+    w_rid = fit_ridge_augmented(A_tr, y_tr, lam=1e-3)
+    te_ols = float(np.mean((A_te @ w_ols - y_te) ** 2))
+    te_rid = float(np.mean((A_te @ w_rid - y_te) ** 2))
+    print(f"deg={d:2d} | OLS te={te_ols:.4f} (||w||={np.linalg.norm(w_ols):.1f})"
+          f" | Ridge te={te_rid:.4f} (||w||={np.linalg.norm(w_rid):.1f})")
+\end{lstlisting}
+
+\begin{insightBox}{下游坐标：你刚刚摸到了机器学习的两大支柱}
+在本章我们纯靠“正交投影 + $\ell_2$ 权重惩罚”推出了岭回归；到第 2 卷学完概率论与贝叶斯推断后，你会惊喜地发现：\textbf{最小二乘等价于高斯噪声下的极大似然估计（MLE），而岭回归恰好等价于给权重加上零均值高斯先验后的最大后验估计（MAP）}！到第 4 卷，图~\ref{fig:poly-ridge} 的 U 型曲线还将由“偏差-方差分解（Bias-Variance Tradeoff）”给出精确的统计解释。
+\end{insightBox}
+
+\section{本章习题}\label{sec:ch02-exercises}
+
+\exTier{A. 概念辨析与反例查错}{抓清边界条件，避免似是而非}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}]
+  \item \textbf{范数公理、斜投影与余弦相似度辨析}：
+  （1）定义 $\R^2$ 上的函数 $f(x) = (\sqrt{\abs{x_1}} + \sqrt{\abs{x_2}})^2$（即形式上的“$\ell_{1/2}$ 范数”）。它是否构成真正的范数？请用具体的二维向量 $u, v \in \R^2$ 验证它是否违反三角不等式。
+  （2）构造一个具体的 $2 \times 2$ 实矩阵 $P$，使其满足幂等性 $P^2 = P$ 但\textbf{不对称}（$P^T \neq P$），并用一个具体向量 $b$ 说明 $Pb$ 不是正交投影（即 $b - Pb$ 不垂直于 $Pb$）。
+  （3）判断正误并修正：“两个非零向量 $u, v$ 满足 $\cos\theta(u, v) = 1$ 当且仅当 $u = v$。”
+
+  \item \textbf{线性最小二乘与过拟合误区诊断}：
+  （1）设超定问题 $\min_w \norm{Aw - b}_2^2$ 中的设计矩阵 $A \in \R^{m \times n}$ 有两列完全相同（从而列不满秩）。请问：最小二乘最优参数向量 $\hat{w}$ 是否唯一？最优拟合预测向量 $\hat{b} = A\hat{w}$ 是否唯一？请结合列空间正交投影说明理由。
+  （2）在表~\ref{tab:poly-ridge} 的多项式实验中，某同学见 $d = 11$ 次普通最小二乘的训练 MSE 已经降到全场最低的 $0.0048$，便认为 $d=11$ 是最优模型。请指出该判断的两处关键疏漏，并解释为何 $\norm{w_{\text{OLS}}}_2 \approx 9.94 \times 10^6$ 是明显的过拟合危险信号。
+\end{enumerate}
+
+\exTier{B. 手算小例与基础演练}{把四大子空间与 QR 最小二乘彻底算透}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, resume]
+  \item \textbf{四大基本子空间与正交性手算}：给定矩阵
+  \[
+  A = \begin{pmatrix} 1 & 0 & 1 \\ 0 & 1 & 1 \\ 1 & 1 & 2 \end{pmatrix}.
+  \]
+  求 $\row(A)$、$\nul(A)$、$\col(A)$ 与 $\nul(A^T)$ 各自的一组基，验证它们的维数满足 $\dim\row(A) + \dim\nul(A) = 3$ 与 $\dim\col(A) + \dim\nul(A^T) = 3$，并逐对检验基向量之间的正交关系 $\row(A) \perp \nul(A)$ 与 $\col(A) \perp \nul(A^T)$。
+
+  \item \textbf{正规方程与 Gram-Schmidt QR 手算对比}：给定 4 个数据点 $(-1, 0),\, (0, 1),\, (1, 1),\, (2, 3)$，拟用直线 $y = w_0 + w_1 x$ 进行线性最小二乘拟合。
+  （1）写出设计矩阵 $A$ 与标签向量 $b$，用正规方程 $A^T A \hat{w} = A^T b$ 手算最优参数 $\hat{w}$ 与残差 $e = b - A\hat{w}$，并验证 $A^T e = 0$。
+  （2）对 $A$ 手算精简 QR 分解 $A = QR$，再解上三角方程 $R\hat{w} = Q^T b$，确认结果与第（1）问完全一致。
+\end{enumerate}
+
+\exTier{C. 实用证明与理论推导}{纯靠内积与最优性完成严格证明，零超前依赖}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, resume]
+  \item \textbf{范数等价常数与互补正交投影}：
+  （1）利用柯西-施瓦茨不等式证明：对任意 $x \in \R^n$，恒有
+  \[
+  \norm{x}_\infty \le \norm{x}_2 \le \norm{x}_1 \le \sqrt{n}\norm{x}_2,
+  \]
+  并分别举出使每个不等号取等号的非零向量 $x \in \R^n$。
+  （2）设 $P \in \R^{m \times m}$ 是正交投影矩阵（$P^2 = P = P^T$），证明 $I_m - P$ 也是正交投影矩阵，且对任意 $b \in \R^m$ 恒有能量分解等式 $\norm{b}_2^2 = \norm{Pb}_2^2 + \norm{(I_m - P)b}_2^2$。
+  \exHint{第（1）问证 $\norm{x}_1 \le \sqrt{n}\norm{x}_2$ 时，把 $\norm{x}_1$ 写成向量 $(\abs{x_1}, \dots, \abs{x_n})^T$ 与全 $1$ 向量 $(1, \dots, 1)^T$ 的内积；第（2）问直接验证 $(I-P)^2 = I-P = (I-P)^T$ 并检查 $\inner{Pb}{(I-P)b} = 0$。}
+
+  \item \textbf{岭回归解的单调收缩与拟合代价权衡}：设 $A \in \R^{m \times n}$，$y \in \R^m$。对任意 $\lambda > 0$，记 $\hat{w}_\lambda$ 为岭回归目标函数 $L_\lambda(w) = \norm{Aw - y}_2^2 + \lambda \norm{w}_2^2$ 的唯一极小值点。证明：若 $0 < \lambda_1 < \lambda_2$，则必有
+  \[
+  \norm{\hat{w}_{\lambda_2}}_2 \le \norm{\hat{w}_{\lambda_1}}_2
+  \qquad \text{且} \qquad
+  \norm{A\hat{w}_{\lambda_2} - y}_2^2 \ge \norm{A\hat{w}_{\lambda_1} - y}_2^2.
+  \]
+  也就是说，加大正则化系数 $\lambda$ 必然单调收缩权重范数，并以增大训练残差平方和为代价。
+  \exHint{全程不需要求导或特征值！利用极小值定义写出 $L_{\lambda_1}(\hat{w}_{\lambda_1}) \le L_{\lambda_1}(\hat{w}_{\lambda_2})$ 与 $L_{\lambda_2}(\hat{w}_{\lambda_2}) \le L_{\lambda_2}(\hat{w}_{\lambda_1})$，将两式相加消去残差项即可推出第一个不等式，再回代即得第二个不等式。}
+\end{enumerate}
+
+\exTier{D. 数值编程与可自检实验}{用真实代码亲眼见证数值稳定性与正则化威力}
+
+\begin{enumerate}[label=\textbf{2.\arabic*}, resume]
+  \item \textbf{Läuchli 病态矩阵上正规方程 vs 正交分解稳定性实测}：构造矩阵 $A = \begin{psmallmatrix} 1 & 1 \\ \varepsilon & 0 \\ 0 & \varepsilon \end{psmallmatrix}$，取真实参数 $w^\star = (1, 2)^T$ 及无噪观测 $b = A w^\star = (3, \varepsilon, 2\varepsilon)^T$。令 $\varepsilon$ 依次取 $10^{-3}, 10^{-5}, 10^{-7}, 10^{-8}$，分别用以下三种方法求 $\hat{w}$ 并打印误差 $\norm{\hat{w} - w^\star}_2$：
+  \begin{enumerate}[label=(\alph*)]
+    \item 显式正规方程：用 \texttt{np.linalg.solve(A.T @ A, A.T @ b)} 求解，并捕获可能出现的 \texttt{LinAlgError} 奇异报错；
+    \item Householder QR 回代：\texttt{Q, R = np.linalg.qr(A, mode="reduced")} 后解 \texttt{R @ w = Q.T @ b}；
+    \item 工业标准求解器：\texttt{np.linalg.lstsq(A, b, rcond=None)}。
+  \end{enumerate}
+  \textbf{自检标准}：验证在 $\varepsilon = 10^{-7}$ 时正规方程误差已劣化至约 $10^{-2}$ 量级、在 $\varepsilon = 10^{-8}$ 时触发奇异矩阵报错，而 Householder QR 与 \texttt{lstsq} 在全部四个 $\varepsilon$ 下误差均保持在 \texttt{< 1e-14}。
+  \exHint{可顺便自己手写一份经典/改进 Gram-Schmidt 函数跑同一组 $\varepsilon$，观察它为何也会在 $\varepsilon = 10^{-8}$ 处失真，体会 Householder 反射的价值。}
+
+  \item \textbf{高维近正交验证与岭回归 $\lambda$ 扫描实验}：
+  （1）用 \texttt{rng = np.random.default\_rng(2026)}，在维度 $d \in \{10, 100, 1000\}$ 下各生成 $5{,}000$ 对随机单位向量，计算余弦相似度样本标准差，验证其与理论值 $1/\sqrt{d}$ 的相对误差均 \texttt{< 5\%}，且在 $d = 1000$ 时 $P(\abs{\cos\theta} < 0.1) > 99\%$。
+  （2）在代码~\ref{lst:poly-ridge} 的 $m=15$ 含噪正弦数据上固定多项式次数 $d = 11$，令 $\lambda$ 扫描 $\{0, 10^{-6}, 10^{-4}, 10^{-3}, 10^{-2}, 10^{-1}, 1\}$，用\textbf{增广矩阵 + \texttt{np.linalg.lstsq}}（豁免截距 $w_0$）求解岭回归，打印每组的训练 MSE、测试 MSE 与 $\norm{w}_2$。
+  \textbf{自检标准}：验证随着 $\lambda$ 从 $10^{-6}$ 增至 $1$，$\norm{w}_2$ 单调递减而训练 MSE 单调递增（印证习题~2.6）；同时验证在 $\lambda = 10^{-3}$ 处测试 MSE 降至 \texttt{< 0.025}（约 $0.0216$），$\norm{w}_2$ 较 OLS（约 $9.94 \times 10^6$）缩小超过 $5 \times 10^5$ 倍。
+  \exHint{注意当 $\lambda = 0$ 时直接对原矩阵 $A_{\text{tr}}$ 调用 \texttt{np.linalg.lstsq}，避免构造零增广块。}
+\end{enumerate}

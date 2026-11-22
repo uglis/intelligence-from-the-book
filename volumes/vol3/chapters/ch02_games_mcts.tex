@@ -1,0 +1,610 @@
+\chapter[对抗博弈、\texorpdfstring{$\alpha$-$\beta$}{α-β} 剪枝与 MCTS]{对抗博弈搜索：Minimax、\texorpdfstring{$\alpha$-$\beta$}{α-β} 剪枝\\与蒙特卡洛树搜索}\label{ch:games}
+\chapEpigraph{国际象棋并不是真正的博弈；它是一种定义清晰的数学计算。你或许解不出答案，但理论上一定存在一套正确的走法。}{约翰·冯·诺依曼（John von Neumann）}
+
+\begin{chapIntro}{本章定位与学习路线}
+第 1 章的 A* 搜索面对的是一个“静止的”迷宫世界——只要你规划好路径，墙体不会半路移动来堵截你。但一旦进入围棋、象棋、德州扑克乃至网络安全攻防，世界里出现了\textbf{同样拥有理性的对手}：你追求收益最大化，对手则竭尽全力让你收益最小化。本章将建立\textbf{双人零和对抗博弈}的数学框架，从 Minimax 递归出发，严格证明 \textbf{$\alpha$-$\beta$ 剪枝的等价性与深度倍增定理}，再转向含随机性的 \textbf{Expectimax}，最终引出以 Hoeffding 不等式为根基的\textbf{蒙特卡洛树搜索（MCTS / UCB1）}——一条直通 AlphaZero 与现代推理大模型测试时搜索的主动脉。
+\end{chapIntro}
+
+% ======================================================================
+\section{零和对抗博弈与 Minimax 递归}\label{sec:minimax}
+% ======================================================================
+
+\subsection{对抗博弈的形式化定义}
+
+先看一个最朴素的博弈场景：井字棋（Tic-Tac-Toe）。两名棋手 \textsf{MAX}（执 $\times$，先手）与 \textsf{MIN}（执 $\circ$，后手）在 $3\times 3$ 棋盘上轮流落子。若 \textsf{MAX} 率先连成三子，终局效用为 $+1$；若 \textsf{MIN} 获胜，终局效用为 $-1$；若九格填满未分胜负，则平局效用为 $0$。无论结局如何，双方收益之和恒为零，这类博弈称为\textbf{零和博弈（Zero-Sum Game）}。
+
+\begin{defBox}
+\begin{definition}[确定性完全信息双人零和博弈]\label{def:game}
+一个确定性完全信息双人零和博弈由七元组 $(S, s_0, \text{Player}, A, T, \text{Terminal}, U)$ 描述：
+\begin{enumerate}
+  \item $S$ 为局面集合，$s_0 \in S$ 为初始局面；
+  \item $\text{Player}(s) \in \{\text{MAX}, \text{MIN}\}$ 指出当前轮到哪一方行棋；
+  \item $A(s)$ 为当前局面下的合法走法集合，$T(s, a) = s'$ 为执行走法 $a$ 后的新局面；
+  \item $\text{Terminal}(s) \in \{\text{True}, \text{False}\}$ 判定 $s$ 是否为终局；
+  \item \textbf{效用函数（Utility Function）}$U(s) \in \R$ 仅对终局状态定义，代表 \textsf{MAX} 的最终得分（而 \textsf{MIN} 的得分恰为 $-U(s)$）。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+与第 1 章的重大差别在于：\textbf{解不再是一条固定路径，而是一套策略（Policy / Contingency Plan）}——你必须为“对手可能走出的每一种应招”提前备好应对之策。在假设对手同样绝对理性的前提下，每个局面 $s$ 的\textbf{极小极大值（Minimax Value）}$V(s)$ 由自底向上的递归方程唯一确定：
+\begin{equation}\label{eq:minimax}
+  V(s) =
+  \begin{cases}
+    U(s), & \text{若 } \text{Terminal}(s) \text{ 为真}, \\[4pt]
+    \displaystyle\max_{a \in A(s)} V\bigl(T(s, a)\bigr), & \text{若 } \text{Player}(s) = \text{MAX}, \\[8pt]
+    \displaystyle\min_{a \in A(s)} V\bigl(T(s, a)\bigr), & \text{若 } \text{Player}(s) = \text{MIN}.
+  \end{cases}
+\end{equation}
+在根节点 $s_0$（轮到 \textsf{MAX}）的最优行动即 $a^* = \argmax_{a \in A(s_0)} V(T(s_0, a))$。
+
+\subsection{3 层博弈树的手工推演与指数瓶颈}
+
+图~\ref{fig:minimax-tree} 展示了一棵 3 层（3-ply：MAX $\to$ MIN $\to$ MAX $\to$ 叶节点）的具体博弈树，8 个终局叶子按从左到右的效用值分别为 $3, 5, 6, 9, 1, 2, 0, 7$。按照式~\eqref{eq:minimax} 自底向上推算：
+\begin{itemize}
+  \item \textbf{第 2 层（MAX）}：$V(C_1) = \max(3, 5) = 5$，$V(C_2) = \max(6, 9) = 9$，$V(C_3) = \max(1, 2) = 2$，$V(C_4) = \max(0, 7) = 7$；
+  \item \textbf{第 1 层（MIN）}：$V(B_1) = \min(5, 9) = 5$，$V(B_2) = \min(2, 7) = 2$；
+  \item \textbf{根节点（MAX）}：$V(A) = \max(5, 2) = 5$，因此 \textsf{MAX} 应选择走向 $B_1$！
+\end{itemize}
+注意一个极具启发性的细节：尽管右侧分支 $C_4$ 藏着高分 $7$，但在 $B_2$ 处拥有决定权的是对手 \textsf{MIN}——对手绝不会把 $7$ 拱手相让，而是果断把你拉入 $C_3$（仅得 $2$ 分）。Minimax 精确刻画了这种“\textbf{假设对手永远选对你最坏的走法}”的保守最优策略。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  maxnode/.style={
+    regular polygon, regular polygon sides=3, draw=tealDark, thick, fill=tealLight,
+    minimum size=11.5mm, inner sep=0.5pt, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  minnode/.style={
+    regular polygon, regular polygon sides=3, shape border rotate=180, draw=navy, thick, fill=navyLight,
+    minimum size=11.5mm, inner sep=0.5pt, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  leaf/.style={
+    rectangle, rounded corners=1.2mm, draw=slate, thick, fill=white,
+    minimum width=8.5mm, minimum height=6.5mm, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  edge/.style={thick, slate!80},
+  optedge/.style={very thick, teal},
+  val/.style={font=\scriptsize\sffamily\bfseries, text=tealDark}
+]
+  % Level 0 (MAX)
+  \node[maxnode] (A) at (0, 0) {$A$};
+  \node[right=2mm of A, val] {$V=5$};
+  \node[anchor=east, font=\scriptsize\sffamily\bfseries, text=teal] at (-6.7, 0) {MAX 层};
+
+  % Level 1 (MIN)
+  \node[minnode] (B1) at (-3.4, -1.7) {$B_1$};
+  \node[minnode] (B2) at ( 3.4, -1.7) {$B_2$};
+  \node[left=1.8mm of B1, val] {$V=5$};
+  \node[right=1.8mm of B2, val] {$V=2$};
+  \node[anchor=east, font=\scriptsize\sffamily\bfseries, text=navy] at (-6.7, -1.7) {MIN 层};
+
+  % Level 2 (MAX)
+  \node[maxnode] (C1) at (-5.0, -3.4) {$C_1$};
+  \node[maxnode] (C2) at (-1.8, -3.4) {$C_2$};
+  \node[maxnode] (C3) at ( 1.8, -3.4) {$C_3$};
+  \node[maxnode] (C4) at ( 5.0, -3.4) {$C_4$};
+  \node[left=1.2mm of C1, val] {$5$};
+  \node[right=1.2mm of C2, val] {$9$};
+  \node[left=1.2mm of C3, val] {$2$};
+  \node[right=1.2mm of C4, val] {$7$};
+  \node[anchor=east, font=\scriptsize\sffamily\bfseries, text=teal] at (-6.7, -3.4) {MAX 层};
+
+  % Level 3 (Leaves)
+  \node[leaf] (L1) at (-5.7, -4.9) {$3$};
+  \node[leaf] (L2) at (-4.3, -4.9) {$5$};
+  \node[leaf] (L3) at (-2.5, -4.9) {$6$};
+  \node[leaf] (L4) at (-1.1, -4.9) {$9$};
+  \node[leaf] (L5) at ( 1.1, -4.9) {$1$};
+  \node[leaf] (L6) at ( 2.5, -4.9) {$2$};
+  \node[leaf] (L7) at ( 4.3, -4.9) {$0$};
+  \node[leaf] (L8) at ( 5.7, -4.9) {$7$};
+  \node[anchor=east, font=\scriptsize\sffamily, text=slate] at (-6.7, -4.9) {终局效用};
+
+  % Edges
+  \draw[optedge] (A) -- (B1);
+  \draw[edge]    (A) -- (B2);
+  \draw[optedge] (B1) -- (C1);
+  \draw[edge]    (B1) -- (C2);
+  \draw[edge]    (B2) -- (C3);
+  \draw[edge]    (B2) -- (C4);
+  \draw[edge]    (C1) -- (L1);
+  \draw[optedge] (C1) -- (L2);
+  \draw[edge]    (C2) -- (L3);
+  \draw[edge]    (C2) -- (L4);
+  \draw[edge]    (C3) -- (L5);
+  \draw[edge]    (C3) -- (L6);
+  \draw[edge]    (C4) -- (L7);
+  \draw[edge]    (C4) -- (L8);
+\end{tikzpicture}}
+\caption{3 层对抗博弈树的 Minimax 精确求值（正三角为 MAX 节点，倒三角为 MIN 节点，粗青线标出博弈主变 $A\to B_1\to C_1\to 5$）}\label{fig:minimax-tree}
+\end{figure}
+
+Minimax 本质上是对整棵博弈树做一次深度优先遍历：若平均分支因子为 $b$、博弈树最大深度为 $m$，其空间复杂度与 DFS 一样友好，仅需 $O(bm)$；但\textbf{时间复杂度高达 $O(b^m)$}。对于国际象棋（$b\approx 35,\, m\approx 80$），$35^{80} \approx 10^{123}$ 远超可观测宇宙的原子总数；即便是极简的 $3\times 3$ 井字棋，朴素 Minimax 也需要访问高达 $\mathbf{549{,}946}$ 个节点！我们能否在不改变根节点精确值的条件下，大刀阔斧地砍掉无用的子树？
+
+% ======================================================================
+\section{\texorpdfstring{$\alpha$-$\beta$}{α-β} 剪枝：原理、等价性证明与走法排序}\label{sec:alphabeta}
+% ======================================================================
+
+\subsection{核心直觉与 $(\alpha, \beta)$ 窗口语义}
+
+回头重新审视图~\ref{fig:minimax-tree} 的从左到右遍历过程，你会发现两处肉眼可见的“白干活”：
+\begin{enumerate}
+  \item \textbf{$\beta$-剪枝（发生在 MAX 节点）}：当算法算出 $V(C_1)=5$ 并返回给父节点 $B_1$（MIN）后，$B_1$ 心里已经有底了——“无论右侧 $C_2$ 是多少，我至多让对手拿 $5$ 分”。接着进入 $C_2$（MAX），刚看到第一个叶子 $6$，$C_2$ 的值就\textbf{至少是 $6$}（因为 $C_2$ 取最大值）。此时 $C_2$ 的第二个叶子（$9$）还用看吗？\textbf{完全不用！}哪怕第二个叶子是 $1000$，$C_2$ 变大只会让 \textsf{MIN} 更加坚定地选 $C_1$；哪怕第二个叶子是 $-100$，$C_2$ 仍然至少为 $6 > 5$，$B_1$ 依旧选 $C_1$！
+  \item \textbf{$\alpha$-剪枝（发生在 MIN 节点）}：当 $B_1$ 返回 $5$ 给根节点 $A$（MAX）后，$A$ 已经稳握至少 $5$ 分的保底收益。接着探索 $B_2$（MIN），算完左子 $C_3$ 得到 $2$，于是 $B_2$ 的最终值\textbf{至多为 $2$}（因为 $B_2$ 取最小值）。此时 $B_2$ 的右子树 $C_4$（包含叶子 $0, 7$）还有必要展开吗？\textbf{整棵子树直接一刀斩断！}因为无论 $C_4$ 里藏着什么，$B_2$ 绝不会超过 $2$，绝无可能超越 $A$ 已握在手里的 $5$ 分！
+\end{enumerate}
+
+将这两个保底界限抽象成沿着递归栈向下传递的两个参数，便得到著名的 \textbf{$\alpha$-$\beta$ 剪枝}：
+\begin{itemize}
+  \item $\alpha$：\textbf{\textsf{MAX} 的当前最佳下界}——沿着根节点到当前节点的路径，\textsf{MAX} 在已有备选分支中至少能够确保拿到的最高分（初始为 $-\infty$）；
+  \item $\beta$：\textbf{\textsf{MIN} 的当前最佳上界}——沿着根节点到当前节点的路径，\textsf{MIN} 在已有备选分支中至多愿意让出的最低分（初始为 $+\infty$）。
+\end{itemize}
+当我们在 \textsf{MAX} 节点更新当前最佳值 $v$ 时，令 $\alpha \leftarrow \max(\alpha, v)$，一旦出现 $v \ge \beta$（等价于 $\alpha \ge \beta$），说明该节点对上层 \textsf{MIN} 而言“已经太高、绝不会被选用”，立刻\textbf{截断剩余分支（$\beta$-剪枝）}；对称地，在 \textsf{MIN} 节点令 $\beta \leftarrow \min(\beta, v)$，一旦出现 $v \le \alpha$（等价于 $\alpha \ge \beta$），说明该节点对上层 \textsf{MAX} 而言“已经太低、绝不会被选用”，立刻\textbf{截断剩余分支（$\alpha$-剪枝）}。
+
+图~\ref{fig:ab-tree} 将上述全部窗口传递与精准剪枝位置标注在同一棵 3 层博弈树上：8 个叶节点中直接省去了 3 个（包括整棵 $C_4$ 子树）。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  maxnode/.style={
+    regular polygon, regular polygon sides=3, draw=tealDark, thick, fill=tealLight,
+    minimum size=11.5mm, inner sep=0.5pt, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  minnode/.style={
+    regular polygon, regular polygon sides=3, shape border rotate=180, draw=navy, thick, fill=navyLight,
+    minimum size=11.5mm, inner sep=0.5pt, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  leaf/.style={
+    rectangle, rounded corners=1.2mm, draw=slate, thick, fill=white,
+    minimum width=8.5mm, minimum height=6.5mm, font=\sffamily\bfseries\footnotesize, text=ink
+  },
+  pruned/.style={
+    rectangle, rounded corners=1.2mm, draw=ochre!65, dashed, fill=ochreLight!70,
+    minimum width=8.5mm, minimum height=6.5mm, font=\sffamily\footnotesize, text=ochre!80
+  },
+  prunednode/.style={
+    regular polygon, regular polygon sides=3, draw=ochre!65, dashed, fill=ochreLight!70,
+    minimum size=11.5mm, inner sep=0.5pt, font=\sffamily\footnotesize, text=ochre!80
+  },
+  edge/.style={thick, slate!85},
+  optedge/.style={very thick, teal},
+  cutedge/.style={thick, ochre, dashed},
+  ab/.style={font=\scriptsize\sffamily, text=navy}
+]
+  % Root
+  \node[maxnode] (A) at (0, 0) {$A$};
+  \node[right=2mm of A, ab] {最终 $\alpha{=}5,\,V{=}5$};
+
+  % MIN layer
+  \node[minnode] (B1) at (-3.5, -1.75) {$B_1$};
+  \node[minnode] (B2) at ( 3.5, -1.75) {$B_2$};
+  \node[left=1.5mm of B1, ab] {$\beta{=}5$};
+  \node[right=1.5mm of B2, ab] {$\alpha{=}5,\,\beta{=}2$};
+
+  % MAX layer
+  \node[maxnode]    (C1) at (-5.1, -3.5) {$C_1$};
+  \node[maxnode]    (C2) at (-1.9, -3.5) {$C_2$};
+  \node[maxnode]    (C3) at ( 1.9, -3.5) {$C_3$};
+  \node[prunednode] (C4) at ( 5.1, -3.5) {$C_4$};
+  \node[left=1.2mm of C1, ab] {$v{=}5$};
+  \node[right=1.2mm of C2, font=\scriptsize\sffamily, text=ochre] {$v{=}6\ge\beta$};
+  \node[left=1.2mm of C3, ab] {$v{=}2$};
+
+  % Leaves
+  \node[leaf]   (L1) at (-5.8, -5.05) {$3$};
+  \node[leaf]   (L2) at (-4.4, -5.05) {$5$};
+  \node[leaf]   (L3) at (-2.6, -5.05) {$6$};
+  \node[pruned] (L4) at (-1.2, -5.05) {$9$};
+  \node[leaf]   (L5) at ( 1.2, -5.05) {$1$};
+  \node[leaf]   (L6) at ( 2.6, -5.05) {$2$};
+  \node[pruned] (L7) at ( 4.4, -5.05) {$0$};
+  \node[pruned] (L8) at ( 5.8, -5.05) {$7$};
+
+  % Edges
+  \draw[optedge] (A) -- (B1);
+  \draw[edge]    (A) -- (B2);
+  \draw[optedge] (B1) -- (C1);
+  \draw[edge]    (B1) -- (C2);
+  \draw[edge]    (B2) -- (C3);
+  \draw[cutedge] (B2) -- node[pos=0.45, fill=white, inner sep=1pt, font=\scriptsize\sffamily\bfseries, text=ochre] {$\times\;\alpha$剪枝} (C4);
+  \draw[edge]    (C1) -- (L1);
+  \draw[optedge] (C1) -- (L2);
+  \draw[edge]    (C2) -- (L3);
+  \draw[cutedge] (C2) -- node[pos=0.48, fill=white, inner sep=0.8pt, font=\scriptsize\sffamily\bfseries, text=ochre] {$\times\;\beta$剪枝} (L4);
+  \draw[edge]    (C3) -- (L5);
+  \draw[edge]    (C3) -- (L6);
+  \draw[cutedge] (C4) -- (L7);
+  \draw[cutedge] (C4) -- (L8);
+\end{tikzpicture}}
+\caption{在图~\ref{fig:minimax-tree} 上执行从左到右 $\alpha$-$\beta$ 剪枝的过程：橙色虚线精准标注 $C_2$ 处的 $\beta$-剪枝与 $B_2$ 处的 $\alpha$-剪枝，根节点仍返回精确值 $5$}\label{fig:ab-tree}
+\end{figure}
+
+\subsection{等价性严格证明与最优走法排序的 $O(b^{d/2})$ 定理}
+
+直观虽然清楚，但算法必须经受严格证明的考验：在任意深度的博弈树中，连续嵌套的 $\alpha$-剪枝与 $\beta$-剪枝会不会“互相误伤”，导致根节点返回值偏离真实 Minimax 值？1975 年 Knuth 与 Moore 给出了极其漂亮的\textbf{区间不变式归纳证明}。
+
+\begin{thmBox}
+\begin{theorem}[$\alpha$-$\beta$ 剪枝的精确等价性定理（Knuth--Moore）]\label{thm:ab-equiv}
+设任意有限博弈树节点 $s$ 的真实 Minimax 值为 $V(s)$，令 $r = \mathrm{AB}(s, \alpha, \beta)$ 为传入窗口 $\alpha < \beta$ 时 $\alpha$-$\beta$ 剪枝算法对节点 $s$ 的返回值。则以下三条性质同时成立：
+\begin{enumerate}
+  \item 若 $V(s) \le \alpha$，则 $r \le \alpha$（\textbf{低界截断 / Fail-Low}）；
+  \item 若 $V(s) \ge \beta$，则 $r \ge \beta$（\textbf{高界截断 / Fail-High}）；
+  \item 若 $\alpha < V(s) < \beta$，则 $r = V(s)$（\textbf{窗口内精确求值}）。
+\end{enumerate}
+特别地，在根节点调用 $\mathrm{AB}(s_0, -\infty, +\infty)$ 时必满足 $-\infty < V(s_0) < +\infty$，因此\textbf{$\alpha$-$\beta$ 剪枝永远返回与完整 Minimax 完全一致的精确值 $V(s_0)$！}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对以 $s$ 为根的子树高度 $h$ 施数学归纳法。
+
+\textbf{归纳基（$h=0$）}：$s$ 为终局叶节点，算法直接返回 $r = U(s) = V(s)$，三条性质显然同时成立。
+
+\textbf{归纳步（$h \ge 1$）}：假设三条性质对 $s$ 的所有子节点 $s_1, s_2, \dots, s_k$ 均成立。不妨设 $s$ 为 \textsf{MAX} 节点（\textsf{MIN} 节点完全对称），记 $v_0 = -\infty$，算法依次对 $i = 1, 2, \dots, k$ 调用 $r_i = \mathrm{AB}(s_i, \alpha_{i-1}, \beta)$，其中 $\alpha_0 = \alpha$，并更新 $v_i = \max(v_{i-1}, r_i)$、$\alpha_i = \max(\alpha_{i-1}, v_i)$，一旦在某步 $t$ 出现 $v_t \ge \beta$ 即刻终止并返回 $r = v_t$；否则遍历全部子节点后返回 $r = v_k$。注意在每次实际发生的调用中均有 $\alpha_{i-1} < \beta$，归纳假设适用。按 $V(s) = \max_{1\le i\le k} V(s_i)$ 与窗口 $(\alpha, \beta)$ 的位置分三种情形：
+
+\begin{itemize}
+  \item \textbf{情形 1（$V(s) \le \alpha$）}：对一切 $i$ 均有 $V(s_i) \le V(s) \le \alpha \le \alpha_{i-1}$。由归纳假设第 1 条，每次调用均满足 $r_i \le \alpha_{i-1}$。借简单归纳立知对所有 $i$ 有 $\alpha_i = \alpha$ 且 $v_i \le \alpha < \beta$（故不会触发 $\beta$-剪枝），最终返回 $r = v_k \le \alpha$。
+  \item \textbf{情形 2（$V(s) \ge \beta$）}：必存在某个子节点 $s_j$ 满足 $V(s_j) \ge \beta$。若算法在第 $j$ 步之前就已因某 $t < j$ 出现 $v_t \ge \beta$ 而提前剪枝，则返回 $r = v_t \ge \beta$，命题已证。否则算法顺利推进至第 $j$ 步，此时仍满足 $\alpha_{j-1} < \beta \le V(s_j)$；由归纳假设第 2 条，必有 $r_j \ge \beta$，从而 $v_j \ge r_j \ge \beta$，触发 $\beta$-剪枝并返回 $r = v_j \ge \beta$。
+  \item \textbf{情形 3（$\alpha < V(s) < \beta$）}：首先，对所有 $i$ 均有 $V(s_i) \le V(s) < \beta$，因此由归纳假设，没有任何一次调用会返回 $\ge \beta$ 的值（否则反推 $V(s_i)\ge\beta$ 矛盾），故算法不会提前截断，必定遍历全部 $k$ 个子节点。其次，取第一个达到最大值的子节点 $s_{j^*}$（满足 $V(s_{j^*}) = V(s)$）。在第 $j^*$ 步之前，所有 $i < j^*$ 均有 $V(s_i) < V(s)$，于是 $r_i < V(s)$（若 $V(s_i)\le \alpha_{i-1}$ 则 $r_i\le \alpha_{i-1}<V(s)$；若 $\alpha_{i-1}<V(s_i)<V(s)$ 则 $r_i=V(s_i)<V(s)$），故 $\alpha_{j^*-1} < V(s) = V(s_{j^*}) < \beta$。应用归纳假设第 3 条得 $r_{j^*} = V(s)$，进而 $\alpha_{j^*} = v_{j^*} = V(s)$。对后续所有 $i > j^*$，皆有 $V(s_i) \le V(s) = \alpha_{j^*} \le \alpha_{i-1}$，由归纳假设第 1 条知 $r_i \le \alpha_{i-1} = V(s)$，故 $v_i$ 始终保持在 $V(s)$ 不变。最终返回 $r = v_k = V(s)$。
+\end{itemize}
+三种情形全部闭合，归纳证明完毕。
+\end{proof}
+
+$\alpha$-$\beta$ 剪枝到底能省掉多少算力？答案剧烈依赖于\textbf{子节点的访问顺序（Move Ordering）}！
+\begin{itemize}
+  \item \textbf{最坏顺序}：若每次都按从最差到最好的顺序探索走法，剪枝条件永远无法触发，复杂度退化回 $O(b^d)$；
+  \item \textbf{理想（最优）顺序}：若每个节点总是先把最佳走法排在第一位，那么在主变（PV）节点虽需检查全部 $b$ 个分支以确认最优，但在所有非主变的对手反驳节点上，\textbf{只需检查第 1 个最强反击走法便足以立刻触发剪枝}！数学上（留作习题 2.5 证明），高度为 $d$、均匀分支因子为 $b$ 的博弈树在理想走法排序下，访问的叶节点总数精确降至
+  \begin{equation}\label{eq:ab-perfect}
+    N_{\text{leaf}}^{\text{best}}(b, d) = b^{\lceil d/2 \rceil} + b^{\lfloor d/2 \rfloor} - 1 = O\!\left(b^{d/2}\right).
+  \end{equation}
+\end{itemize}
+请体会式~\eqref{eq:ab-perfect} 的震撼含义：\textbf{有效分支因子从 $b$ 暴降至 $\sqrt{b}$！}这意味着在完全相同的计算时间预算内，你的博弈引擎可以\textbf{把前瞻搜索深度直接翻倍}！在国际象棋（$b\approx 35$）中，从看 4 步升级到看 8 步，正是业余爱好者与大师级棋力的分水岭。即便只是随机走法排序，期望复杂度也能降至约 $O(b^{3d/4})$。
+
+\subsection{真实实验：井字棋完整博弈树的剪枝倍率实测}
+
+在配套脚本 \texttt{code/vol3\_experiments.py} 中，我们对 $3\times 3$ 井字棋的空棋盘根节点运行了三组完整搜索：（1）朴素 Minimax；（2）自然格序 \texttt{[0,1,\dots,8]} 的 $\alpha$-$\beta$ 剪枝；（3）基于棋理先验（中心优先、四角次之、四边最后：\texttt{[4,0,2,6,8,1,3,5,7]}）的启发式排序 $\alpha$-$\beta$ 剪枝。表~\ref{tab:ttt-ab} 汇报了真实运行结果。
+
+\begin{table}[htbp]
+\centering
+\caption{井字棋空盘根节点的 Minimax 与 $\alpha$-$\beta$ 剪枝实测对比（脚本 \texttt{code/vol3\_experiments.py}）}\label{tab:ttt-ab}
+\small
+\begin{tabularx}{\linewidth}{@{}lcccX@{}}
+\toprule
+\textbf{搜索算法与走法顺序} & \textbf{根节点值} & \textbf{访问节点数} & \textbf{剪枝比例} & \textbf{相对 Minimax 加速比} \\
+\midrule
+朴素 Minimax & $0$（平局） & $549{,}946$ & $0.0\%$ & $1.0\times$（基准） \\
+$\alpha$-$\beta$（自然顺序 \texttt{0..8}） & $0$（平局） & $18{,}297$ & $\mathbf{96.7\%}$ & $30.1\times$ \\
+$\alpha$-$\beta$（中心--四角--四边排序） & $0$（平局） & $\mathbf{7{,}275}$ & $\mathbf{98.7\%}$ & $\mathbf{75.6\times}$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+三者返回的根节点精确值无一例外都是 $0$（严格验证定理~\ref{thm:ab-equiv}：双方完美对弈必为和棋），而仅仅加入一行极其朴素的“中心--四角优先”走法排序，节点访问量便从近 $55$ 万骤降到仅 $7{,}275$ 个——\textbf{一举剪掉 $98.7\%$ 的搜索树，实现 $75.6$ 倍加速！}在现代国际象棋引擎（如 Stockfish）中，工程界还会叠加\textbf{置换表（Transposition Table，用 Zobrist 哈希缓存已算局面）}、\textbf{迭代加深走法重排}与\textbf{杀手启发（Killer Move）}，把排序质量无限逼近理想极限。
+
+% ======================================================================
+\section{评估函数截断与随机对手 Expectimax}\label{sec:expectimax}
+% ======================================================================
+
+\subsection{深度受限评估函数与水平线效应}
+
+对于国际象棋等大型博弈，即使把分支因子开平方，也不可能搜到底层终局。标准做法是在预设深度 $d$ 处强行截断搜索，用\textbf{静态评估函数（Heuristic Evaluation Function）}$V_{\text{eval}}(s)$ 替代真实终局效用 $U(s)$。常见形式为特征的线性加权组合：
+\begin{equation}\label{eq:eval-fn}
+  V_{\text{eval}}(s) = \sum_{k=1}^{K} w_k\, \phi_k(s),
+\end{equation}
+例如国际象棋中经典的材质权重（后 $9$、车 $5$、象/马 $3$、兵 $1$）加上棋子机动性、王翼安全度等结构特征。
+
+然而固定深度截断存在一个著名陷阱——\textbf{水平线效应（Horizon Effect）}：如果深度限制为 $d=6$，而我方皇后将在第 $7$ 步（恰好在搜索“水平线”之外）被吃掉，引擎可能会通过连续送兵将军等无意义招法把丢后推迟到第 $8$ 步，从而在 $d=6$ 截断面上产生“局势平安无事”的致命幻觉。经典缓解手段是\textbf{静态搜索（Quiescence Search）}：在到达深度上限时，若当前局面仍处于激烈兑子或将军状态，继续沿着吃子/将军分支延伸搜索，直到局面恢复“平静”后再调用评估函数。
+
+\subsection{随机环境与非完美对手：Expectimax 搜索}
+
+现实世界的博弈并非总是“确定性 + 绝对理性死敌”：例如西洋双陆棋需要掷骰子，吃豆人（Pac-Man）里的幽灵按概率随机游走，或者对手偶尔会犯错。如果继续用 Minimax 假设“骰子永远掷出对我最坏的点数”，智能体就会陷入过度悲观而放弃大量高胜率机会。
+
+为此，我们在博弈树中引入第三类节点——\textbf{机会节点（Chance Node，通常用圆形表示）}，将其价值定义为所有随机分支的\textbf{数学期望}，这便是 \textbf{Expectimax 搜索}：
+\begin{equation}\label{eq:expectimax}
+  V(s) =
+  \begin{cases}
+    U(s), & \text{终局节点}, \\[4pt]
+    \displaystyle\max_{a \in A(s)} V\bigl(T(s,a)\bigr), & \text{MAX 节点}, \\[8pt]
+    \displaystyle\sum_{s'} P(s'\mid s)\, V(s'), & \text{Chance 机会节点}.
+  \end{cases}
+\end{equation}
+
+对比一个 2 步小例子：假设 \textsf{MAX} 有两个选择：动作 $L$ 稳拿 $4$ 分；动作 $R$ 进入一个均匀掷硬币机会节点，各有 $0.5$ 概率得到 $10$ 分或 $0$ 分。
+\begin{itemize}
+  \item \textbf{Minimax（最坏情况视角）}认为 $R$ 的价值是 $\min(10, 0) = 0 < 4$，于是稳健选 $L$；
+  \item \textbf{Expectimax（期望效用视角）}算出 $R$ 的价值是 $0.5\times 10 + 0.5\times 0 = 5 > 4$，于是果断选 $R$！
+\end{itemize}
+这也揭示了一条深刻的性质差异：\textbf{Minimax 只关心叶节点效用的大小序关系}，因此对任意严格单调递增变换（例如把所有效用换成 $U^3$）策略完全不变；而 \textbf{Expectimax 对效用的相对间距敏感}（风险偏好），它仅在\textbf{正仿射变换} $U \mapsto aU + b\;(a>0)$ 下保持最优策略不变！
+
+\begin{failBox}{为什么标准 $\alpha$-$\beta$ 剪枝在 Expectimax 机会节点上会失效？}
+在 Minimax 中，当 \textsf{MIN} 节点看到一个分支值为 $2$ 时，就可以断定该节点最终值绝不超过 $2$（因为取 $\min$）。但在 Expectimax 的机会节点中，哪怕前两个等概率分支分别是 $0$ 和 $0$，\textbf{只要叶节点效用没有已知的上下界}，第三个分支完全可能等于 $+10^6$，一把将整个期望拉高到 $3.3\times 10^5$！因此，在无界效用假设下，\textbf{机会节点无法提前剪枝，必须评估全部后继分支}。
+
+只有当我们额外知道所有终局效用严格落在有界区间 $[U_{\min}, U_{\max}]$ 内（例如胜负概率落在 $[0, 1]$），才能对已评估的部分分支 $i=1,\dots,m$ 构造剩余未评估分支的期望上界：
+\[
+  V(s) \le \sum_{i=1}^{m} p_i V(s_i) + \Bigl(1 - \sum_{i=1}^{m} p_i\Bigr) U_{\max},
+\]
+当该上界仍不高于上层 \textsf{MAX} 节点已持有的 $\alpha$ 时，方可安全剪去剩余随机分支（见习题 2.6）。
+\end{failBox}
+
+% ======================================================================
+\section{蒙特卡洛树搜索（MCTS）与 UCB1（直通 AlphaZero 与推理大模型）}\label{sec:mcts}
+% ======================================================================
+
+\subsection{为什么围棋击溃了固定深度 $\alpha$-$\beta$ 剪枝？}
+
+尽管 $\alpha$-$\beta$ 剪枝配合精妙的手工评估函数在 1997 年让“深蓝”击败了国际象棋世界冠军，但到了 $19\times 19$ 的围棋面前，这条路线彻底失灵了，原因有二：
+\begin{enumerate}
+  \item \textbf{分支因子灾难}：围棋平均每步合法落子数 $b \approx 250$，即使理想 $\alpha$-$\beta$ 排序把分支降到 $\sqrt{250} \approx 16$，向前看 10 步仍需展开 $16^{10} \approx 10^{12}$ 个节点；
+  \item \textbf{手工评估函数几乎不可写}：国际象棋吃掉一车一后胜负立判，而围棋中“厚势”“先手”“劫材”等全局死活关系高度非局部，极难写成式~\eqref{eq:eval-fn} 那样的线性特征。
+\end{enumerate}
+
+2006 年，Rémi Coulom 与 Kocsis、Szepesvári 提出了一套颠覆性的非对称树生长范式——\textbf{蒙特卡洛树搜索（Monte Carlo Tree Search, MCTS）}与 \textbf{UCT 算法}：不再盲目把每一层所有分支均匀铺满，也不依赖脆弱的手工评估函数，而是\textbf{把算力集中投向最有希望的分支，并通过从叶节点快速随机模拟（Rollout）到终局的胜率统计，自动估计局面价值！}
+
+\subsection{MCTS 四阶段循环与 UCB1 探索--利用平衡}
+
+MCTS 在有限计算预算内反复执行四个简洁优雅的步骤（见图~\ref{fig:mcts-cycle}），树中每个节点 $i$ 仅维护两个统计量：累计访问次数 $N_i$ 与累计胜场得分 $W_i$（胜记 $+1$、平记 $+0.5$、负记 $0$）。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={
+    rectangle, rounded corners=2mm, draw=tealLine, thick, fill=tealLight!45,
+    minimum width=36mm, minimum height=43.5mm, anchor=north west
+  },
+  hdr/.style={font=\sffamily\bfseries\footnotesize, text=tealDark},
+  nd/.style={circle, draw=navy, thick, fill=white, minimum size=6.2mm, inner sep=0pt, font=\tiny\sffamily},
+  sel/.style={circle, draw=tealDark, very thick, fill=tealLight, minimum size=6.2mm, inner sep=0pt, font=\tiny\sffamily\bfseries},
+  exp/.style={circle, draw=ochre, very thick, fill=ochreLight, minimum size=6.2mm, inner sep=0pt, font=\tiny\sffamily\bfseries},
+  bigarr/.style={-{Stealth[length=2.8mm]}, very thick, gold}
+]
+  % 4 panels cleanly spaced horizontally
+  \foreach \x/\num/\tit in {0/1/选择（Selection）, 4.15/2/扩展（Expansion）, 8.3/3/模拟（Simulation）, 12.45/4/回传（Backpropagation）} {
+    \node[box] (P\num) at (\x, 0) {};
+    \node[hdr, anchor=north] at (\x+1.8, -0.18) {\num.\;\tit};
+  }
+
+  % Panel 1: Selection (UCB1 path highlighted)
+  \node[sel] (s0) at (1.8, -1.05) {};
+  \node[sel] (s1) at (1.1, -1.95) {};
+  \node[nd]  (s2) at (2.5, -1.95) {};
+  \node[nd]  (s3) at (0.65,-2.85) {};
+  \node[sel] (s4) at (1.55,-2.85) {};
+  \draw[very thick, teal, -{Stealth[length=1.8mm]}] (s0)--(s1);
+  \draw[slate] (s0)--(s2);
+  \draw[slate] (s1)--(s3);
+  \draw[very thick, teal, -{Stealth[length=1.8mm]}] (s1)--(s4);
+  \node[font=\scriptsize\sffamily, text=slate] at (1.8, -3.95) {按 UCB1 最大逐层下行};
+
+  % Panel 2: Expansion (new ochre child added)
+  \node[sel] (e0) at (5.95, -1.05) {};
+  \node[sel] (e1) at (5.25, -1.95) {};
+  \node[nd]  (e2) at (6.65, -1.95) {};
+  \node[nd]  (e3) at (4.80, -2.85) {};
+  \node[sel] (e4) at (5.70, -2.85) {};
+  \node[exp] (e5) at (6.50, -3.22) {新};
+  \draw[thick, teal] (e0)--(e1)--(e4);
+  \draw[slate] (e0)--(e2) (e1)--(e3);
+  \draw[very thick, ochre, -{Stealth[length=1.8mm]}] (e4)--(e5);
+  \node[font=\scriptsize\sffamily, text=ochre] at (5.95, -3.95) {展开一个未尝试动作};
+
+  % Panel 3: Simulation (Rollout squiggly/dashed to terminal)
+  \node[nd]  (r0) at (10.1, -1.05) {};
+  \node[nd]  (r1) at (9.4,  -1.85) {};
+  \node[nd]  (r2) at (10.8, -1.85) {};
+  \node[exp] (r4) at (9.85, -2.42) {};
+  \node[rectangle, rounded corners=1mm, draw=ochre, fill=ochreLight, font=\scriptsize\sffamily\bfseries, text=ochre] (term) at (10.65, -3.25) {胜 / 负 / 平};
+  \draw[slate] (r0)--(r1)--(r4) (r0)--(r2);
+  \draw[thick, ochre, dashed, -{Stealth[length=1.8mm]}] (r4) -- (10.25,-2.82) -- (term);
+  \node[font=\scriptsize\sffamily, text=slate] at (10.1, -3.95) {快速策略模拟至终局};
+
+  % Panel 4: Backpropagation (upward updates)
+  \node[sel] (b0) at (14.25, -1.05) {};
+  \node[sel] (b1) at (13.55, -1.95) {};
+  \node[nd]  (b2) at (14.95, -1.95) {};
+  \node[sel] (b4) at (14.00, -2.85) {};
+  \node[exp] (b5) at (14.80, -3.22) {};
+  \draw[slate] (b0)--(b2);
+  \draw[very thick, gold, -{Stealth[length=1.8mm]}] (b5)--(b4);
+  \draw[very thick, gold, -{Stealth[length=1.8mm]}] (b4)--(b1);
+  \draw[very thick, gold, -{Stealth[length=1.8mm]}] (b1)--(b0);
+  \node[font=\scriptsize\sffamily, text=tealDark] at (14.25, -3.95) {沿途更新 $(W_i, N_i)$};
+
+  % Inter-panel transition arrows
+  \draw[bigarr] (3.65, -2.15) -- (4.10, -2.15);
+  \draw[bigarr] (7.80, -2.15) -- (8.25, -2.15);
+  \draw[bigarr] (11.95,-2.15) -- (12.40,-2.15);
+\end{tikzpicture}}
+\caption{蒙特卡洛树搜索（MCTS）单次迭代的四阶段闭环：选择 $\to$ 扩展 $\to$ 模拟 $\to$ 回传}\label{fig:mcts-cycle}
+\end{figure}
+
+\begin{enumerate}
+  \item \textbf{选择（Selection）}：从根节点出发，只要当前节点的所有合法动作都已扩展且非终局，就选出 \textbf{UCB1（Upper Confidence Bound 1）}得分最高的子节点向下走：
+  \begin{equation}\label{eq:ucb1}
+    \mathrm{UCB1}(i) = \underbrace{\frac{W_i}{N_i}}_{\text{利用项（胜率估计）}} + \underbrace{c\sqrt{\frac{\ln N}{N_i}}}_{\text{探索项（不确定性奖励）}},
+  \end{equation}
+  其中 $N$ 为当前父节点的总访问次数，$N_i$ 为子节点 $i$ 的访问次数，$c > 0$ 为探索常数（理论经典值为 $c = \sqrt{2} \approx 1.414$）。
+  \item \textbf{扩展（Expansion）}：当到达一个尚有未尝试动作的节点（且非终局）时，从中挑一个未试动作生成新子节点并挂入搜索树。
+  \item \textbf{模拟（Simulation / Rollout）}：从新扩展节点出发，使用廉价快速的默认策略（最简版即均匀随机落子）一路快速演进直至终局，观测终局结果 $w \in \{+1, 0, -1\}$。
+  \item \textbf{回传（Backpropagation）}：沿着刚才经过的路径自底向上退回根节点，沿途每个节点的访问次数 $N_i \leftarrow N_i + 1$，并按该步落子方的视角累加胜场得分 $W_i$。当总迭代次数耗尽时，根节点通常选择\textbf{访问次数 $N_i$ 最大}的子节点（鲁棒子节点，Robust Child）作为最终实战落子。
+\end{enumerate}
+
+\begin{recallBox}{UCB1 公式从哪来？直连第 2 卷 Hoeffding 不等式！}
+为什么探索项偏偏长成 $c\sqrt{\frac{\ln N}{N_i}}$ 而不是 $\frac{1}{N_i}$？回顾第 2 卷概率论中的 \textbf{Hoeffding 集中不等式}：对于 $[0,1]$ 上独立同分布、真均值为 $\mu_i$ 的 $N_i$ 次随机收益样本，样本均值 $\bar{X}_i = W_i/N_i$ 偏离真值超过 $\epsilon$ 的概率呈指数衰减：
+\[
+  \Prob\bigl(\mu_i - \bar{X}_i \ge \epsilon\bigr) \le \exp\!\bigl(-2 N_i \epsilon^2\bigr).
+\]
+如果我们希望随着父节点总探索步数 $N$ 增大，低估真实最优臂的失败概率迅速衰减为 $N^{-2c^2}$（取 $c=\sqrt{2}$ 时即为 $N^{-4}$），只需令 $\exp(-2 N_i \epsilon^2) = N^{-2c^2}$，两边取对数立即解出置信半径：
+\[
+  \epsilon = c\sqrt{\frac{\ln N}{N_i}}!
+\]
+于是 $\mathrm{UCB1}(i) = \bar{X}_i + \epsilon$ 正是真实胜率 $\mu_i$ 的\textbf{高置信度乐观上界}：访问少的分支因为分子 $\ln N$ 持续增长而分母 $N_i$ 较小，迟早会获得探索机会；而访问多且胜率高的分支则稳定霸占主搜索预算，兼顾\textbf{利用（Exploitation）}与\textbf{探索（Exploration）}！Kocsis 与 Szepesvári（2006）证明，在有限博弈树上，随着迭代次数 $N \to \infty$，UCT 选择根节点最优动作的概率收敛到 $1$。
+\end{recallBox}
+
+\begin{failBox}{编写 MCTS 时 90\% 初学者都会踩的视角符号陷阱}
+在双人零和博弈树中，相邻两层节点轮换行棋！假设根节点轮到 \textsf{MAX} 选一个子节点 $i$，那么\textbf{子节点 $i$ 里记录的 \texttt{node.player} 已经变成了 \textsf{MIN}}！当回传终局胜者 $w$ 时，子节点 $i$ 的胜场 $W_i$ 必须统计的是\textbf{“走出这一步到达 $i$ 的父节点那一方”（即 \texttt{mover = -node.player}）是否获胜}，而不是 \texttt{node.player} 是否获胜！如果你不小心把 \texttt{if w == node.player} 写进回传循环，父节点在 UCB1 阶段就会拼命挑选\textbf{对手胜率最高}的送死走法，瞬间变成“反向送分机器人”！
+\end{failBox}
+
+\subsection{真实实验：MCTS 在井字棋上的胜率收敛曲线与核心代码}
+
+为直观检验 MCTS 在“零领域知识、纯随机 Rollout”条件下的实战威力，我们在 \texttt{code/\allowbreak vol3\_experiments.py} 中让先手 MCTS（$c=1.414$）与均匀随机对手在井字棋上对弈：对每档单步模拟次数 $\text{iters} \in \{5,\allowbreak 10,\allowbreak 25,\allowbreak 50,\allowbreak 100,\allowbreak 200,\allowbreak 400\}$ 各进行 $120$ 局独立对弈，真实统计数据已写入 \texttt{data/mcts\_winrate.csv}，由图~\ref{fig:mcts-curve} 直接绘图呈现。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.86\linewidth,
+  height=6.2cm,
+  xmode=log,
+  log basis x=10,
+  xtick={5,10,25,50,100,200,400},
+  xticklabels={5,10,25,50,100,200,400},
+  ymin=65, ymax=106,
+  xlabel={\footnotesize 每步 MCTS 模拟预算（\texttt{iters}，对数刻度）},
+  ylabel={\footnotesize 对阵随机对手比率（\%）},
+  grid=both,
+  major grid style={tealLine!55, dashed},
+  legend style={at={(0.97,0.12)}, anchor=south east, font=\footnotesize\sffamily, fill=white, draw=tealLine, rounded corners=1mm},
+  tick label style={font=\scriptsize},
+  axis lines*=left,
+  mark size=2.4pt
+]
+  \addplot[color=teal, very thick, mark=*]
+    table[x=iters, y=win_pct, col sep=comma] {data/mcts_winrate.csv};
+  \addlegendentry{胜率（Win Rate）}
+
+  \addplot[color=ochre, very thick, dashed, mark=square*]
+    table[x=iters, y=nonloss_pct, col sep=comma] {data/mcts_winrate.csv};
+  \addlegendentry{不败率（Win + Draw）}
+
+  % Subtle callout sitting cleanly above the 100% plateau
+  \node[font=\scriptsize\sffamily\bfseries, text=ochre, anchor=south west] at (axis cs:24, 101.6) {25 次模拟即达成 $100\%$ 不败};
+\end{axis}
+\end{tikzpicture}
+\caption{井字棋 MCTS（$c=1.414$，纯随机模拟）对阵随机对手的实测胜率与不败率收敛曲线（数据源：\texttt{data/mcts\_winrate.csv}，每档 120 局）}\label{fig:mcts-curve}
+\end{figure}
+
+数据曲线一目了然：在完全不写任何一行“堵三连、占中心”启发式规则的前提下，仅仅每步做 $5$ 次随机模拟，胜率就已达 $72.5\%$；\textbf{预算升至 $25$ 次模拟时，胜率跃升至 $96.7\%$，不败率直接锁死在 $100.0\%$！}当模拟次数增至 $100$ 与 $400$ 时，胜率双双触及 $100.0\%$（$50$ 与 $200$ 处的轻微波动源于 $120$ 局蒙特卡洛抽样方差，且不败率全程稳居 $100.0\%$）。
+
+代码~\ref{lst:games} 浓缩了本章最核心的两大算法——带排序的 $\alpha$-$\beta$ 剪枝与四阶段 UCT-MCTS——可直接接入任意零和棋盘游戏运行。
+
+\begin{lstlisting}[caption={带启发式走法排序的 $\alpha$-$\beta$ 剪枝与四阶段 UCT-MCTS 核心 Python 实现},label={lst:games}]
+import math
+import random
+
+def alphabeta(board, player, alpha, beta, winner_fn, order=None):
+    """Exact minimax value via Alpha-Beta pruning (player: +1 MAX, -1 MIN)."""
+    w = winner_fn(board)
+    if w != 0:
+        return w
+    slots = order if order is not None else range(len(board))
+    moves = [i for i in slots if board[i] == 0]
+    if not moves:
+        return 0
+    if player == 1:
+        val = -2
+        for m in moves:
+            board[m] = 1
+            val = max(val, alphabeta(board, -1, alpha, beta, winner_fn, order))
+            board[m] = 0
+            alpha = max(alpha, val)
+            if alpha >= beta:
+                break                 # Beta-cutoff at MAX node
+        return val
+    else:
+        val = 2
+        for m in moves:
+            board[m] = -1
+            val = min(val, alphabeta(board, 1, alpha, beta, winner_fn, order))
+            board[m] = 0
+            beta = min(beta, val)
+            if alpha >= beta:
+                break                 # Alpha-cutoff at MIN node
+        return val
+
+class MCTSNode:
+    def __init__(self, state, player, winner_fn, move=None, parent=None):
+        self.state, self.player, self.move, self.parent = state, player, move, parent
+        self.children = []
+        self.untried = [i for i, v in enumerate(state) if v == 0] if winner_fn(state) == 0 else []
+        self.wins, self.visits = 0.0, 0
+
+def mcts_search(board, player, winner_fn, iters=100, c=1.414):
+    """Four-phase UCT Monte Carlo Tree Search returning the most-visited move."""
+    root = MCTSNode(board[:], player, winner_fn)
+    for _ in range(iters):
+        node = root
+        # 1. Selection via UCB1
+        while not node.untried and node.children:
+            log_n = math.log(node.visits)
+            node = max(node.children,
+                       key=lambda ch: (ch.wins / ch.visits) + c * math.sqrt(log_n / ch.visits))
+        # 2. Expansion
+        if node.untried:
+            m = node.untried.pop(random.randrange(len(node.untried)))
+            ns = node.state[:]; ns[m] = node.player
+            child = MCTSNode(ns, -node.player, winner_fn, move=m, parent=node)
+            node.children.append(child); node = child
+        # 3. Simulation (uniform random rollout)
+        sim, cur = node.state[:], node.player
+        while True:
+            w = winner_fn(sim)
+            avail = [i for i, v in enumerate(sim) if v == 0]
+            if w != 0 or not avail:
+                break
+            sim[random.choice(avail)] = cur; cur = -cur
+        # 4. Backpropagation (score from parent mover's perspective!)
+        while node is not None:
+            node.visits += 1
+            mover = -node.player
+            node.wins += 1.0 if w == mover else (0.5 if w == 0 else 0.0)
+            node = node.parent
+    return max(root.children, key=lambda ch: ch.visits).move
+\end{lstlisting}
+
+\begin{insightBox}{直通 AlphaZero 与现代推理大模型的测试时搜索（Test-Time MCTS）}
+看懂了代码~\ref{lst:games} 的 35 行 MCTS，你就已经拿到了理解当代最前沿 AI 系统的钥匙：
+\begin{enumerate}
+  \item \textbf{AlphaGo / AlphaZero}：把上述 MCTS 的两处“纯随机”替换为深度神经网络——选择阶段改用先验策略加权的 \textbf{PUCT 公式} $Q(s,a) + c_{\text{puct}} P_\theta(a\mid s)\frac{\sqrt{\sum_b N(s,b)}}{1+N(s,a)}$，并直接用价值网络 $v_\theta(s)$ 替代昂贵的随机 Rollout！
+  \item \textbf{数学与代码推理大模型的 Test-Time Compute}：把“棋盘状态”换成“部分解题推理链”，把“合法走法”换成大模型采样的下一步推理步骤，用过程奖励模型（PRM）充当评估信号并在树上运行 UCB/PUCT 搜索——这正是以算力换取“慢思考（系统 2）”的核心范式。
+\end{enumerate}
+\end{insightBox}
+
+% ======================================================================
+\section{本章习题}\label{sec:ch2-ex}
+% ======================================================================
+
+\exTier{A 组}{基础概念与复杂度核对}
+
+\textbf{2.1} \quad 设某双人零和博弈树的均匀分支因子 $b=16$。若在给定时间内，朴素 Minimax 恰好能搜索到深度 $d=6$（访问全部 $b^d$ 个叶节点），请回答：（1）在理想走法排序下，$\alpha$-$\beta$ 剪枝搜索到深度 $d=6$ 只需访问多少个叶节点？（2）若保持与朴素 Minimax 相同的叶节点预算，理想排序的 $\alpha$-$\beta$ 剪枝大约能把前瞻深度推进到第几层？
+\exHint{利用式~\eqref{eq:ab-perfect}：$b^{\lceil d/2\rceil} + b^{\lfloor d/2\rfloor} - 1$，对比 $16^6$ 与 $2\cdot 16^{d'/2} - 1$。}
+
+\textbf{2.2} \quad 考虑两类效用变换：（a）严格单调递增非线性变换 $U'(s) = U(s)^3$；（b）正仿射变换 $U''(s) = 2 U(s) + 5$。请分别说明这两种变换对 \textbf{Minimax} 最优策略与 \textbf{Expectimax} 最优策略是否保持不变，并对会改变策略的情形给出一个仅含 2 个动作、3 个叶子的反例。
+\exHint{线性期望 $\E[aU+b] = a\E[U]+b$ 保持序关系，但凸函数 $U^3$ 满足 Jensen 不等式，可能逆转期望排序。}
+
+\exTier{B 组}{手工推演与搜索追踪}
+
+\textbf{2.3} \quad 考察一棵 3 层（MAX $\to$ MIN $\to$ MAX $\to$ 叶子）均匀二叉博弈树，8 个叶节点从左到右的效用值依次为 $[4,\, 7,\, 2,\, 8,\, 6,\, 1,\, 9,\, 3]$。（1）计算各内部节点的真实 Minimax 值及根节点最优动作；（2）按\textbf{从左到右}顺序手工执行 $\alpha$-$\beta$ 剪枝，逐个标出被剪掉的叶节点以及触发剪枝的类型（$\alpha$-剪枝或 $\beta$-剪枝）；（3）若将所有节点的子节点访问顺序完全反转（改为\textbf{从右到左}），哪些叶节点会被剪枝？比较两种顺序的剪枝效率。
+\exHint{画出与图~\ref{fig:ab-tree} 同结构的二叉树，严格在每个节点旁维护 $(\alpha, \beta)$ 窗口。}
+
+\textbf{2.4} \quad 某井字棋对局中，根节点 $R$（当前轮到 \textsf{MAX}，已访问 $N=10$ 次）已完全扩展出三个子节点 $C_1, C_2, C_3$，其统计量（按 \textsf{MAX} 视角）分别为 $(W_1, N_1)=(3, 5)$、$(W_2, N_2)=(2.5, 4)$、$(W_3, N_3)=(0, 1)$。取探索常数 $c=\sqrt{2}\approx 1.414$。（1）计算三个子节点的 UCB1 得分，判断本轮 Selection 阶段应选择哪个子节点？（2）假设从该子节点扩展出新叶节点 $D$（此时轮到 \textsf{MAX}，即 $D$ 是 \textsf{MIN} 走出的招法）后，随机模拟结果为 \textsf{MAX} 获胜（$w=+1$），写出回传完成后节点 $D$、被选中的 $C_i$ 以及根节点 $R$ 更新后的 $(W, N)$ 值（特别留意视角翻转！）。
+\exHint{利用 $\ln 10 \approx 2.3026$；注意 $C_i$ 是 \textsf{MAX} 走出的动作，而 $D$ 是 \textsf{MIN} 走出的动作！}
+
+\exTier{C 组}{理论证明与边界推导}
+
+\textbf{2.5} \quad 证明：对于一棵均匀分支因子为 $b \ge 2$、高度为偶数 $d = 2k$ 的完全博弈树，在理想走法排序（每个节点首先访问最优走法或最强反驳走法）下，$\alpha$-$\beta$ 剪枝访问的叶节点总数精确等于 $2 b^k - 1 = 2 b^{d/2} - 1$。
+\exHint{区分树中的三类节点（Knuth--Moore 分类）：主变节点（Type 1，探索全部 $b$ 个子节点，首个为 Type 1，其余 $b-1$ 个为 Type 2）、剪枝节点（Type 2，仅探索第 1 个 Type 3 子节点即截断）、全展节点（Type 3，探索全部 $b$ 个 Type 2 子节点），对高度 $d$ 联立递推求解！}
+
+\textbf{2.6} \quad 在 Expectimax 博弈树中，已知所有终局叶节点效用满足有界条件 $U(s) \in [0, 10]$。设根节点 \textsf{MAX} 已评估左分支得到当前下界 $\alpha = 7.2$，正准备评估右分支的一个机会节点 $C$，该机会节点有三个等概率（各 $1/3$）后继子节点 $X_1, X_2, X_3$。若先算得 $V(X_1) = 1.5$：（1）推导 $V(C)$ 在尚未访问 $X_2, X_3$ 时的最紧精确上界与下界；（2）此时能否安全剪枝 $X_2, X_3$？若 $\alpha = 7.0$ 而继续算得 $V(X_2) = 9.0$，此时能否剪枝 $X_3$？写出一般情形下 $m$ 个等概率分支、已知前 $k$ 个值时的安全剪枝充要不等式。
+\exHint{将尚未访问分支全部乐观替换为上界 $U_{\max}=10$，计算乐观期望并与 $\alpha$ 比较。}
+
+\exTier{D 组}{代码实现与实验自检}
+
+\textbf{2.7} \quad \textbf{【代码实验：井字棋走法排序敏感性基准测试】}基于代码~\ref{lst:games} 复现井字棋空盘搜索实验，分别测试四种配置：（1）朴素 Minimax；（2）$\alpha$-$\beta$ 自然顺序 \texttt{[0,1,2,3,4,5,6,7,8]}；（3）$\alpha$-$\beta$ 中心--四角--四边顺序 \texttt{[4,0,2,6,8,1,3,5,7]}；（4）$\alpha$-$\beta$ 故意逆序（四边优先：\texttt{[1,3,5,7,0,2,6,8,4]}）。输出每种配置的根节点返回值、总访问节点数与剪枝率。
+\textbf{【数值自检基准】}四种配置的根节点返回值必须严格一致且均为 $\mathbf{0}$；前三种配置的访问节点数必须精确复现表~\ref{tab:ttt-ab} 中的 $\mathbf{549{,}946}$、$\mathbf{18{,}297}$（剪枝 $96.7\%$）与 $\mathbf{7{,}275}$（剪枝 $98.7\%$）；第（4）种四边优先逆序的节点数应显著高于 $7{,}275$，直观印证走法排序对 $\alpha$-$\beta$ 效率的决定性影响。
+\exHint{直接在递归入口处累加全局或 \texttt{nonlocal} 计数器，且在每次测试前将计数器清零。}
+
+\textbf{2.8} \quad \textbf{【代码实验：MCTS 探索常数 $c$ 消融与预算收敛曲线】}基于代码~\ref{lst:games}（或 \texttt{code/\allowbreak vol3\_experiments.py}），在井字棋中运行以下两组实验（每组条件对阵随机对手 $120$ 局）：（1）固定 $c=1.414$，扫描 $\text{iters} \in \{5,\allowbreak 10,\allowbreak 25,\allowbreak 50,\allowbreak 100,\allowbreak 200,\allowbreak 400\}$，复现胜率与不败率曲线；（2）固定 $\text{iters} = 50$，扫描探索常数 $c \in \{0.0, 0.5, 1.414, 4.0\}$，观察“纯贪心不探索（$c=0$）”与“过度探索（$c=4.0$）”对胜率的影响。
+\textbf{【数值自检基准】}实验（1）中，当 $\text{iters} \ge 25$ 时不败率应达到 $98\%\sim 100\%$（使用 \texttt{np.random.default\_rng(2026)} 时精确复现 \texttt{data/mcts\_winrate.csv}：$\text{iters}=5$ 胜率 $72.5\%$、$\text{iters}=25$ 不败率 $100.0\%$、$\text{iters}=100$ 与 $400$ 胜率 $100.0\%$）；实验（2）中，$c=0.0$ 的胜率应明显低于 $c=1.414$，直观验证 UCB1 探索项的必要性。
+\exHint{当 $c=0.0$ 时，请避免对 $N_i=0$ 除以零——代码~\ref{lst:games} 中 \texttt{Selection} 只在 \texttt{untried} 为空时运行，保证所有子节点已被访问至少 1 次。}

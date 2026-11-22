@@ -1,0 +1,733 @@
+\chapter[概率建模、条件独立与 Bayes 推断]{概率建模、条件独立与 Bayes 推断}
+\label{ch:ch1}
+
+\chapEpigraph{概率论归根结底，只是化作计算的常识。}{皮埃尔-西蒙·拉普拉斯（Pierre-Simon Laplace），《概率的哲学随笔》}
+
+\begin{chapIntro}{本章定位：从确定性线性代数走向不确定性世界}
+在第 1 卷中，我们建立了人工智能的确定性几何底座：内积、投影、实对称阵谱定理、半正定矩阵（PSD）与多元梯度下降。然而，真实世界的 AI 任务几乎从不“干净”——传感器读数带噪声、图像会被遮挡、医学检测存在假阳性、自然语言的下一词本身就具有多种合理续写。只靠确定性方程 $Ax = b$，模型无法区分“数据本身的随机波动”与“模型还没学到的规律”，更无法回答“我对这次预测有多大把握”。
+
+本章将用四步搭好 AI 概率建模的第一层地基，并直接对接后续卷次：
+\begin{enumerate}
+  \item 从条件概率与\textbf{链式法则}出发，看清大语言模型（GPT）的自回归生成为什么不是工程巧合，而是概率链式法则的精确化身；
+  \item 通过\textbf{Bayes 定理}建立“先验 $\times$ 似然 $\to$ 后验”的动态证据更新观，并用罕见病检测反例击碎直觉误区，顺势搭出你的第一个概率分类器雏形（朴素贝叶斯与对数空间防下溢）；
+  \item 彻底厘清\textbf{独立 vs 条件独立}的本质分野，借“共因结构（Fork）”与“汇合结构（Collider / Explaining Away）”两枚反例，打通第 3 卷贝叶斯网络的核心神经；
+  \item 将离散/连续随机变量、期望线性性、全期望定律与\textbf{协方差矩阵 $\Sigma \succeq 0$} 闭环起来，与第 1 卷的实对称阵谱定理无缝对接。
+\end{enumerate}
+\end{chapIntro}
+
+% =========================================================================
+\section{概率公理速忆、条件概率与链式法则}
+\label{sec:ch1-axioms-chain}
+
+\begin{recallBox}{样本空间、事件与 Kolmogorov 概率公理}
+记随机试验所有可能结果的集合为\textbf{样本空间} $\Omega$，其子集 $A \subseteq \Omega$ 称为\textbf{事件}。概率函数 $\Prob$ 为每个（可测）事件赋予一个实数，满足三条 Kolmogorov 公理：（1）\textbf{非负性} $\Prob(A) \ge 0$；（2）\textbf{规范性} $\Prob(\Omega) = 1$；（3）\textbf{可列可加性}：若事件序列 $A_1, A_2, \dots$ 两两互斥（$A_i \cap A_j = \varnothing,\; i\neq j$），则 $\Prob\!\left(\bigcup_{i=1}^\infty A_i\right) = \sum_{i=1}^\infty \Prob(A_i)$。由此立得补事件公式 $\Prob(A^c) = 1 - \Prob(A)$、单调性（$A \subseteq B \implies \Prob(A) \le \Prob(B)$）与加法公式 $\Prob(A \cup B) = \Prob(A) + \Prob(B) - \Prob(A \cap B)$。
+\end{recallBox}
+
+\subsection{条件概率：获得新信息后的样本空间坍缩}
+
+概率论真正成为人工智能武器的那一刻，并不在静态的 $\Prob(A)$，而在\textbf{观察到新证据 $B$ 之后，我们对事件 $A$ 的信念如何更新}。
+
+先看一个极小的具体场景。假设一款邮件过滤器面对的收件箱中共有 $100$ 封邮件：其中 $40$ 封是垃圾邮件（事件 $S$），$60$ 封是正常邮件。进一步统计发现，全部 $100$ 封邮件里有 $36$ 封包含关键词“免费”（事件 $F$），而这 $36$ 封里恰好有 $30$ 封是垃圾邮件（事件 $S \cap F$）。在还没打开邮件前，它属于垃圾邮件的先验概率是 $\Prob(S) = 40/100 = 0.40$；但一旦系统扫到标题里出现了“免费”，原本的 $100$ 封邮件样本空间 $\Omega$ 就瞬间\textbf{坍缩}为满足条件 $F$ 的那 $36$ 封邮件，垃圾邮件所占比例随之重新归一化为 $30/36 \approx 0.833$。
+
+这正是条件概率的全部几何直觉：把世界缩小到已发生的子集 $B$，再把 $B$ 内部的概率总和拉回 $1$。
+
+\begin{defBox}
+\begin{definition}[条件概率（Conditional Probability）]
+\label{def:ch1-cond-prob}
+设 $A, B \subseteq \Omega$ 为事件且 $\Prob(B) > 0$。在已知事件 $B$ 发生的条件下，事件 $A$ 发生的\textbf{条件概率}定义为
+\begin{equation}
+  \Prob(A \mid B) := \frac{\Prob(A \cap B)}{\Prob(B)}. \label{eq:ch1-cond-prob}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+注意一个容易被忽略却极其有用的事实：当固定条件事件 $B$（$\Prob(B) > 0$）时，映射 $A \mapsto \Prob(A \mid B)$ 本身就是一个完全合法的概率测度，满足全部三条 Kolmogorov 公理——例如 $\Prob(A^c \mid B) = 1 - \Prob(A \mid B)$，且对互斥事件 $A_1, A_2$ 有 $\Prob(A_1 \cup A_2 \mid B) = \Prob(A_1 \mid B) + \Prob(A_2 \mid B)$。凡是对普通概率 $\Prob(\cdot)$ 成立的恒等式，只要在每一项的条件栏里统一加上“$\mid B$”，依然全部成立。
+
+\subsection{乘法法则与概率链式法则}
+
+将定义式 \eqref{eq:ch1-cond-prob} 两边同乘 $\Prob(B)$，便得到\textbf{乘法法则}：$\Prob(A \cap B) = \Prob(B)\,\Prob(A \mid B) = \Prob(A)\,\Prob(B \mid A)$。将其反复嵌套到 $n$ 个事件上，就得到整个人工智能序列建模最重要的恒等式之一。
+
+\begin{thmBox}
+\begin{theorem}[概率链式法则（Chain Rule of Probability）]
+\label{thm:ch1-chain-rule}
+设事件 $A_1, A_2, \dots, A_n$ 满足 $\Prob(A_1 \cap A_2 \cap \dots \cap A_{n-1}) > 0$，则它们的联合概率可精确分解为条件概率的连乘积：
+\begin{equation}
+  \Prob(A_1 \cap A_2 \cap \dots \cap A_n)
+  = \Prob(A_1)\,\Prob(A_2 \mid A_1)\,\Prob(A_3 \mid A_1 \cap A_2)\cdots\Prob(A_n \mid A_1 \cap \dots \cap A_{n-1}).
+  \label{eq:ch1-chain-rule}
+\end{equation}
+简记联合事件为逗号分隔形式，即 $\Prob(A_1, \dots, A_n) = \prod_{t=1}^n \Prob(A_t \mid A_1, \dots, A_{t-1})$（约定 $t=1$ 时条件为空）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对右边按定义 \eqref{eq:ch1-cond-prob} 展开，得到一个逐项相消的望远镜乘积（telescoping product）：
+\[
+  \Prob(A_1)\cdot \frac{\Prob(A_1 \cap A_2)}{\Prob(A_1)}\cdot \frac{\Prob(A_1 \cap A_2 \cap A_3)}{\Prob(A_1 \cap A_2)}\cdots \frac{\Prob(A_1 \cap \dots \cap A_n)}{\Prob(A_1 \cap \dots \cap A_{n-1})}
+  = \Prob(A_1 \cap \dots \cap A_n).
+\]
+由于假设 $\Prob(A_1 \cap \dots \cap A_{n-1}) > 0$，由概率单调性可知所有中间分母 $\Prob(A_1 \cap \dots \cap A_{t-1}) \ge \Prob(A_1 \cap \dots \cap A_{n-1}) > 0$，每一步除法均有意义。
+\end{proof}
+
+\begin{insightBox}{为什么 GPT 的“预测下一个词元”能给整篇文章建模？}
+假设词表大小为 $V = 50{,}000$，要直接建模一段长为 $T = 100$ 个词元（token）的文本 $(w_1, w_2, \dots, w_T)$ 的联合分布，可能句子总数高达 $V^T = 50{,}000^{100}$——远远超过可观测宇宙的原子数量，绝无可能建表存储。
+
+然而，\textbf{不需要任何近似假设}，概率链式法则 \eqref{eq:ch1-chain-rule} 允许我们把整段文本的联合概率精确重写为：
+\[
+  \Prob(w_1, w_2, \dots, w_T) = \prod_{t=1}^T \Prob(w_t \mid w_1, w_2, \dots, w_{t-1}) = \prod_{t=1}^T \Prob(w_t \mid w_{<t}).
+\]
+现代自回归大语言模型（Autoregressive LLM，如 GPT 系列）所做的唯一一件事，就是用一个带参数 $\theta$ 的 Transformer 神经网络来拟合条件分布 $\Prob_\theta(w_t \mid w_{<t})$（第 5 卷）。因此，“给定上文预测下一个词元（Next-Token Prediction）”并非权宜之计，而是概率链式法则在语言建模上的\textbf{无损精确分解}。
+\end{insightBox}
+
+\subsection{全概率公式：分情况讨论的严格语言}
+
+实际问题中，我们往往很难直接算出某事件 $E$ 的总概率，但只要把隐藏原因拆成若干互斥且完备的情形 $H_1, \dots, H_k$，在每种情形下算 $\Prob(E \mid H_i)$ 却非常容易。
+
+\begin{thmBox}
+\begin{theorem}[全概率公式（Law of Total Probability）]
+\label{thm:ch1-total-prob}
+设事件族 $\{H_1, H_2, \dots, H_k\}$ 构成样本空间 $\Omega$ 的一个\textbf{划分}（partition），即两两互斥（$H_i \cap H_j = \varnothing,\; i\neq j$）且覆盖全空间（$\bigcup_{i=1}^k H_i = \Omega$），同时满足 $\Prob(H_i) > 0$。则对任意事件 $E \subseteq \Omega$，有
+\begin{equation}
+  \Prob(E) = \sum_{i=1}^k \Prob(E \cap H_i) = \sum_{i=1}^k \Prob(E \mid H_i)\,\Prob(H_i). \label{eq:ch1-total-prob}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由划分性质，事件 $E$ 可拆分为互斥并集 $E = E \cap \Omega = E \cap \left(\bigcup_{i=1}^k H_i\right) = \bigcup_{i=1}^k (E \cap H_i)$。对两两互斥的 $E \cap H_i$ 应用公理 3（可加性），再用乘法法则 $\Prob(E \cap H_i) = \Prob(E \mid H_i)\Prob(H_i)$ 即证。
+\end{proof}
+
+\begin{example}[两座晶圆厂的芯片良品率]
+\label{ex:ch1-chip-factory}
+某 AI 加速卡的芯片由 A 厂供应 $70\%$（$\Prob(H_A)=0.7$）、B 厂供应 $30\%$（$\Prob(H_B)=0.3$）。已知 A 厂芯片次品率为 $1\%$（$\Prob(E\mid H_A)=0.01$），B 厂次品率为 $4\%$（$\Prob(E\mid H_B)=0.04$）。随机抽检一颗芯片，其次品总概率为加权平均：
+\[
+  \Prob(E) = \Prob(E\mid H_A)\Prob(H_A) + \Prob(E\mid H_B)\Prob(H_B) = 0.01\times 0.7 + 0.04\times 0.3 = 0.019\;(1.9\%).
+\]
+若进一步反问：“现在已经测出这颗芯片是次品，它来自 B 厂的概率有多大？”这便是从“由因推果”逆转到“由果溯因”的 Bayes 推断。
+\end{example}
+
+% =========================================================================
+\section{Bayes 定理：从先验、似然到后验的证据更新}
+\label{sec:ch1-bayes}
+
+在科学与人工智能中，正向的“生成方向”通常容易描述：已知患者患病 $H$，化验呈阳性的概率 $\Prob(E\mid H)$ 可以通过临床试验测出来；已知邮件是垃圾邮件 $y=1$，里面出现“中奖”的概率 $\Prob(x\mid y=1)$ 可以统计出来。但真正要做决策时，摆在我们面前的总是\textbf{反问题}——只看到了化验单 $E$ 或邮件内容 $x$，想反推背后的隐藏假设 $H$ 或标签 $y$。Bayes 定理正是翻转条件方向的桥梁。
+
+\begin{thmBox}
+\begin{theorem}[Bayes 定理（Bayes' Theorem）]
+\label{thm:ch1-bayes}
+设 $\{H_1, \dots, H_k\}$ 是样本空间 $\Omega$ 的一个划分（$\Prob(H_i)>0$），事件 $E$ 满足 $\Prob(E)>0$，则对任意假设 $H_i$，有
+\begin{equation}
+  \Prob(H_i \mid E)
+  = \frac{\Prob(E \mid H_i)\,\Prob(H_i)}{\Prob(E)}
+  = \frac{\Prob(E \mid H_i)\,\Prob(H_i)}{\sum_{j=1}^k \Prob(E \mid H_j)\,\Prob(H_j)}.
+  \label{eq:ch1-bayes}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由乘法法则的对称性，$\Prob(H_i \mid E)\Prob(E) = \Prob(H_i \cap E) = \Prob(E \mid H_i)\Prob(H_i)$。两边除以 $\Prob(E) > 0$ 得第一等号，再将分母用全概率公式 \eqref{eq:ch1-total-prob} 展开即得第二等号。
+\end{proof}
+
+Bayes 定理的代数推导虽然只有两行，但它建立了一整套贯穿全系列（第 2、3、5、7 卷）的推断哲学。表 \ref{tab:ch1-bayes-terms} 总结了公式中四个核心对象的术语与职责。
+
+\begin{table}[htbp]
+  \centering
+  \caption{Bayes 推断的四个核心组件及其在机器学习中的对应角色}
+  \label{tab:ch1-bayes-terms}
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{28mm}p{26mm}X@{}}
+    \toprule
+    \textbf{名称} & \textbf{数学记号} & \textbf{含义与机器学习对应角色} \\
+    \midrule
+    \textbf{先验（Prior）} & $\Prob(H_i)$ & 看到证据 $E$ 之前对假设 $H_i$ 的初始信念；对应第 5 章参数估计中的先验分布 $p(\theta)$（即正则化项）。 \\
+    \textbf{似然（Likelihood）} & $\Prob(E \mid H_i)$ & 假设 $H_i$ 成立时，产生当前观测证据 $E$ 的匹配程度（注意：作为 $H_i$ 的函数，它\textbf{不一定}对 $i$ 求和为 $1$）。 \\
+    \textbf{边际证据（Evidence）} & $\Prob(E)$ & 对所有可能假设加权平均后的观测总概率，充当\textbf{归一化常数}，与具体 $H_i$ 无关。 \\
+    \textbf{后验（Posterior）} & $\Prob(H_i \mid E)$ & 吸收证据 $E$ 后更新得到的信念分布，是最终做分类与决策的直接依据。 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+在比较不同假设 $H_i$ 孰优孰劣时，由于分母 $\Prob(E)$ 对所有 $i$ 都相同，我们常常写作简洁的比例形式：
+\[
+  \underbrace{\Prob(H_i \mid E)}_{\text{后验}} \;\propto\; \underbrace{\Prob(E \mid H_i)}_{\text{似然}} \times \underbrace{\Prob(H_i)}_{\text{先验}}.
+\]
+更重要的是，Bayes 更新天然支持\textbf{序贯学习（Sequential Updating）}：若依次获得两份在给定假设 $H$ 下条件独立的证据 $E_1, E_2$，则
+\[
+  \Prob(H \mid E_1, E_2) \;\propto\; \Prob(E_1, E_2 \mid H)\Prob(H)
+  = \Prob(E_2 \mid H)\,\bigl[\Prob(E_1 \mid H)\Prob(H)\bigr]
+  \;\propto\; \Prob(E_2 \mid H)\,\Prob(H \mid E_1).
+\]
+也就是说，\textbf{吸收第一份证据后的“今天后验”，直接变成迎接第二份证据的“明天先验”}！下面这个经典反直觉案例把这一点展现得淋漓尽致。
+
+\begin{example}[罕见病筛查中的基础率谬误与序贯二次复检]
+\label{ex:ch1-rare-disease}
+设某罕见病在人群中的患病率（先验基础率）为 $\Prob(D) = 0.001$（即 $0.1\%$，千分之一）。现有一款精度看起来“极高”的检测试剂盒：
+\begin{itemize}
+  \item \textbf{灵敏度（Sensitivity / 真阳性率）}：$\Prob(+\mid D) = 0.99$（真患者有 $99\%$ 概率检出阳性）；
+  \item \textbf{特异度（Specificity / 真阴性率）}：$\Prob(-\mid \neg D) = 0.98$，故\textbf{假阳性率（FPR）}为 $\Prob(+\mid \neg D) = 1 - 0.98 = 0.02$。
+\end{itemize}
+某人无明显症状参加普查，第一次检测竟呈阳性（$+_1$）。他真正患病的后验概率是多少？直觉常让人脱口而出“接近 $98\%$”，但 Bayes 定理给出了截然不同的答案。
+
+\textbf{（1）自然频数直觉与精确计算（首次阳性）}：想象对 $100{,}000$ 人做普查。其中真正患病者约 $100$ 人，试剂盒能检出 $100\times 0.99 = 99$ 例\textbf{真阳性}；而未患病的健康人多达 $99{,}900$ 人，即便假阳性率只有区区 $2\%$，也会制造出 $99{,}900\times 0.02 = 1{,}998$ 例\textbf{假阳性}！健康人基数太大，假阳性人数足足是真阳性的 $20$ 倍。代入式 \eqref{eq:ch1-bayes} 精确计算：
+\begin{align*}
+  \Prob(D \mid +_1)
+  &= \frac{\Prob(+_1 \mid D)\Prob(D)}{\Prob(+_1 \mid D)\Prob(D) + \Prob(+_1 \mid \neg D)\Prob(\neg D)} \\
+  &= \frac{0.99 \times 0.001}{0.99 \times 0.001 + 0.02 \times 0.999}
+  = \frac{0.00099}{0.00099 + 0.01998}
+  = \frac{0.00099}{0.02097} \approx 0.04721\;(4.72\%).
+\end{align*}
+也就是说，即便 $99\%$ 灵敏度、$98\%$ 特异度的检测报了阳性，此人真正患病的概率仍\textbf{仅有 $4.72\%$}！忽视极低先验 $\Prob(D)$ 而把 $\Prob(+\mid D)$ 错当成 $\Prob(D\mid +)$，在统计学中称为\textbf{基础率谬误（Base Rate Fallacy）}。
+
+\textbf{（2）第二次条件独立复检阳性（序贯更新）}：医生当然不会就此下结论，而是换用原理独立的第二套试剂盒复检（假设给定真实健康状态 $D$ 或 $\neg D$ 时，两次检测结果条件独立），结果再次呈阳性（$+_2$）。此时把第一次的后验 $p_1 = 0.047210$ 当作新的先验，再套一次 Bayes 定理：
+\[
+  \Prob(D \mid +_1, +_2)
+  = \frac{0.99 \times p_1}{0.99 \times p_1 + 0.02 \times (1 - p_1)}
+  \approx \frac{0.046738}{0.046738 + 0.019056}
+  \approx 0.71037\;(71.04\%).
+\]
+如果第三次独立复检依然呈阳性，后验概率将进一步飙升至 $99.18\%$！用\textbf{几率（Odds）形式}看更加清晰：阳性似然比 $\mathrm{LR}_+ = \frac{\Prob(+\mid D)}{\Prob(+\mid \neg D)} = \frac{0.99}{0.02} = 49.5$，每出现一次独立阳性，患病几率 $\frac{\Prob(D)}{\Prob(\neg D)}$ 就乘以 $49.5$：
+\[
+  \frac{1}{999} \xrightarrow{\;\times 49.5\;} \frac{49.5}{999} \approx 0.04955\;(4.72\%)
+  \xrightarrow{\;\times 49.5\;} \frac{49.5^2}{999} \approx 2.4527\;(71.04\%)
+  \xrightarrow{\;\times 49.5\;} \frac{49.5^3}{999} \approx 121.41\;(99.18\%).
+\]
+以上数值均与配套脚本 \texttt{code/vol2\_experiments.py} 实测输出完全一致。
+\end{example}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[font=\footnotesize\sffamily]
+    % -------- Left Panel: Probability Tree for 1st Test --------
+    \begin{scope}[xshift=0cm, yshift=0cm]
+      \node[font=\small\sffamily\bfseries, color=tealDark] at (3.2, 3.97) {(a) 首次检测的概率树分解};
+
+      % Root node
+      \node[circle, draw=ink, fill=codebg, inner sep=2pt, font=\scriptsize\sffamily] (root) at (0.3, 1.55) {普查};
+
+      % Level 1: D and ~D
+      \node[rounded corners=2pt, draw=ochre, fill=ochreLight, minimum width=1.45cm, minimum height=0.6cm, align=center] (D) at (2.7, 2.55) {患病 $D$};
+      \node[rounded corners=2pt, draw=teal, fill=tealLight, minimum width=1.45cm, minimum height=0.6cm, align=center] (nD) at (2.7, 0.55) {健康 $\neg D$};
+
+      % Level 2: + and -
+      \node[rounded corners=2pt, draw=ochre, thick, fill=ochreLight, minimum width=1.95cm, minimum height=0.52cm, align=center] (Dp) at (5.75, 3.00) {真阳性 $D\cap +$};
+      \node[rounded corners=2pt, draw=slate, fill=codebg, minimum width=1.95cm, minimum height=0.52cm, align=center] (Dm) at (5.75, 2.10) {假阴性 $D\cap -$};
+      \node[rounded corners=2pt, draw=ochre, thick, fill=ochreLight, minimum width=1.95cm, minimum height=0.52cm, align=center] (nDp) at (5.75, 1.00) {假阳性 $\neg D\cap +$};
+      \node[rounded corners=2pt, draw=slate, fill=codebg, minimum width=1.95cm, minimum height=0.52cm, align=center] (nDm) at (5.75, 0.10) {真阴性 $\neg D\cap -$};
+
+      % Edges Level 1
+      \draw[-{Stealth[length=2mm]}, ochre, thick] (root) -- (D) node[midway, above left, xshift=3pt, yshift=-1pt, color=ochre] {$0.001$};
+      \draw[-{Stealth[length=2mm]}, teal, thick] (root) -- (nD) node[midway, below left, xshift=3pt, yshift=1pt, color=teal] {$0.999$};
+
+      % Edges Level 2
+      \draw[-{Stealth[length=2mm]}, ochre, thick] (D.east) -- (Dp.west) node[midway, above, yshift=1pt, color=ochre] {$0.99$};
+      \draw[-{Stealth[length=2mm]}, slate] (D.east) -- (Dm.west) node[midway, below, yshift=-1pt, color=slate] {$0.01$};
+      \draw[-{Stealth[length=2mm]}, ochre, thick] (nD.east) -- (nDp.west) node[midway, above, yshift=1pt, color=ochre] {$0.02$};
+      \draw[-{Stealth[length=2mm]}, slate] (nD.east) -- (nDm.west) node[midway, below, yshift=-1pt, color=slate] {$0.98$};
+
+      % Joint probabilities on right
+      \node[anchor=west, color=ochre, font=\scriptsize\sffamily\bfseries] at (6.82, 3.00) {$0.00099$};
+      \node[anchor=west, color=slate, font=\scriptsize\sffamily] at (6.82, 2.10) {$0.00001$};
+      \node[anchor=west, color=ochre, font=\scriptsize\sffamily\bfseries] at (6.82, 1.00) {$0.01998$};
+      \node[anchor=west, color=slate, font=\scriptsize\sffamily] at (6.82, 0.10) {$0.97902$};
+
+      % Bottom summary note
+      \node[anchor=north, font=\scriptsize\sffamily, color=ink, align=center, fill=codebg, draw=codeborder, rounded corners=1.5pt, inner sep=3.5pt] at (3.7, -0.45)
+        {阳性总概率 $\Prob(+)=0.00099+0.01998=0.02097$，真阳性仅占 $4.72\%$};
+    \end{scope}
+
+    % -------- Right Panel: Sequential Bayes Posterior Bar Chart --------
+    \begin{scope}[xshift=9.2cm, yshift=0.1cm]
+      \node[font=\small\sffamily\bfseries, color=tealDark] at (2.8, 3.87) {(b) 序贯复检下的后验信念跃升};
+
+      % Axes
+      \draw[-{Stealth[length=2mm]}, ink] (0, 0) -- (5.9, 0);
+      \draw[-{Stealth[length=2mm]}, ink] (0, 0) -- (0, 3.15) node[above, font=\scriptsize\sffamily] {$\Prob(D\mid \text{证据})$};
+
+      % Horizontal gridlines
+      \foreach \y/\lbl in {0.7/25\%, 1.4/50\%, 2.1/75\%, 2.8/100\%} {
+        \draw[dashed, gray!30] (0, \y) -- (5.65, \y);
+        \node[left, font=\scriptsize\sffamily, color=slate] at (-0.05, \y) {\lbl};
+      }
+
+      % Bars: scale 100% -> 2.8cm
+      % 0.10% -> 0.0028 (draw tiny visible bar 0.04cm)
+      \fill[slate!50, draw=slate] (0.5, 0) rectangle (1.3, 0.05);
+      \node[above, font=\scriptsize\sffamily\bfseries, color=slate] at (0.9, 0.08) {$0.10\%$};
+      \node[below, font=\scriptsize\sffamily, align=center] at (0.9, -0.08) {先验\\[-1pt]无检测};
+
+      % 4.72% -> 0.132cm
+      \fill[ochre!65, draw=ochre] (1.85, 0) rectangle (2.65, 0.15);
+      \node[above, font=\scriptsize\sffamily\bfseries, color=ochre] at (2.25, 0.18) {$4.72\%$};
+      \node[below, font=\scriptsize\sffamily, align=center] at (2.25, -0.08) {首次\\[-1pt]阳性 $+_1$};
+
+      % 71.04% -> 1.989cm
+      \fill[teal!70, draw=tealDark] (3.2, 0) rectangle (4.0, 1.99);
+      \node[above, font=\scriptsize\sffamily\bfseries, color=tealDark] at (3.6, 2.02) {$71.04\%$};
+      \node[below, font=\scriptsize\sffamily, align=center] at (3.6, -0.08) {二次\\[-1pt]阳性 $+_2$};
+
+      % 99.18% -> 2.777cm
+      \fill[navy!75, draw=navy] (4.55, 0) rectangle (5.35, 2.78);
+      \node[above, font=\scriptsize\sffamily\bfseries, color=navy] at (4.95, 2.80) {$99.18\%$};
+      \node[below, font=\scriptsize\sffamily, align=center] at (4.95, -0.08) {三次\\[-1pt]阳性 $+_3$};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{例 \ref{ex:ch1-rare-disease} 罕见病筛查的概率树与序贯 Bayes 更新。（a）极低基础率 $0.1\%$ 导致假阳性分支（$0.01998$）远大于真阳性分支（$0.00099$），首次阳性后验仅 $4.72\%$；（b）在条件独立复检下，每次阳性都将患病几率放大 $49.5$ 倍，第二次即跃升至 $71.04\%$，第三次逼近 $99.18\%$。}
+  \label{fig:ch1-bayes-update}
+\end{figure}
+
+\subsection{首个概率分类器雏形：朴素贝叶斯与对数空间计算}
+
+把例 \ref{ex:ch1-rare-disease} 中的“患病与否 $D$”换成“邮件是否为垃圾邮件 $y \in \{0, 1\}$”，把“两次独立检测”换成“邮件是否包含 $d$ 个特征词 $x = (x_1, x_2, \dots, x_d) \in \{0, 1\}^d$”，我们就直接得到了机器学习历史上最经典也最轻量的分类器之一——\textbf{朴素贝叶斯（Naive Bayes）}。
+
+如果直接用 Bayes 定理算后验 $\Prob(y=1 \mid x_1, \dots, x_d) \propto \Prob(y=1)\,\Prob(x_1, \dots, x_d \mid y=1)$，立刻会撞上一堵参数爆炸墙：$d$ 个二值词特征的联合分布 $\Prob(x_1, \dots, x_d \mid y)$ 需要估计 $2^d - 1$ 个参数，当词表 $d = 10{,}000$ 时完全无法学习。
+
+朴素贝叶斯做了一个大胆而“朴素”的简化假设：\textbf{给定类别标签 $y$ 时，各个词特征 $x_1, \dots, x_d$ 之间条件独立}。于是高维联合似然立刻拆成一维标量概率的连乘积：
+\begin{equation}
+  \Prob(y = c \mid x_1, \dots, x_d)
+  \;\propto\; \Prob(y = c) \prod_{j=1}^d \Prob(x_j \mid y = c), \qquad c \in \{0, 1\}.
+  \label{eq:ch1-naive-bayes}
+\end{equation}
+参数量从指数级的 $O(2^d)$ 暴降为线性级的 $O(d)$！
+
+\begin{example}[3 词垃圾邮件朴素贝叶斯手算]
+\label{ex:ch1-nb-mini}
+设垃圾邮件先验 $\Prob(y=1)=0.4$，正常邮件先验 $\Prob(y=0)=0.6$。考察三个词特征 $x_1=\text{``免费''}$、$x_2=\text{``中奖''}$、$x_3=\text{``论文''}$ 的条件概率：
+\begin{center}
+\small
+\begin{tabular}{cccc}
+  \toprule
+  类别 $y$ & $\Prob(x_1=1\mid y)$（免费） & $\Prob(x_2=1\mid y)$（中奖） & $\Prob(x_3=1\mid y)$（论文） \\
+  \midrule
+  垃圾邮件 $y=1$ & $0.80$ & $0.70$ & $0.05$ \\
+  正常邮件 $y=0$ & $0.10$ & $0.05$ & $0.60$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+现收到一封邮件，含“免费”和“中奖”、不含“论文”，即 $x = (1, 1, 0)$。由式 \eqref{eq:ch1-naive-bayes} 分别计算未归一化后验分子：
+\begin{align*}
+  \text{垃圾分子：}\quad & \Prob(y=1)\,\Prob(x_1=1\mid 1)\,\Prob(x_2=1\mid 1)\,\Prob(x_3=0\mid 1) = 0.4 \times 0.80 \times 0.70 \times 0.95 = 0.2128, \\
+  \text{正常分子：}\quad & \Prob(y=0)\,\Prob(x_1=1\mid 0)\,\Prob(x_2=1\mid 0)\,\Prob(x_3=0\mid 0) = 0.6 \times 0.10 \times 0.05 \times 0.40 = 0.0012.
+\end{align*}
+归一化后，该邮件为垃圾邮件的后验概率为 $\Prob(y=1\mid x) = \frac{0.2128}{0.2128 + 0.0012} \approx 0.9944$（$99.44\%$）。
+\end{example}
+
+\begin{failBox}{高维连乘的浮点下溢陷阱与“零概率一票否决”}
+把例 \ref{ex:ch1-nb-mini} 放到真实的 $d = 2{,}000$ 词邮件分类中，直接按式 \eqref{eq:ch1-naive-bayes} 连乘会瞬间触发两大经典工程灾难：
+\begin{enumerate}
+  \item \textbf{浮点下溢（Floating-Point Underflow）}：假设每个词概率约为 $0.01$，连乘 $1{,}000$ 项的结果是 $0.01^{1000} = 10^{-2000}$，远远低于 IEEE-754 双精度浮点数（\texttt{float64}）能表示的最小正数约 $2.2\times 10^{-308}$。计算机会把两类的分子\textbf{同时截断为精确的 \texttt{0.0}}，归一化除法 $0.0 / 0.0$ 直接炸出 \texttt{NaN}！
+  \textbf{标准修复}：永远在\textbf{对数空间（Log-Space）}中把连乘转化为连加，计算对数得分
+  \[
+    s_c = \log \Prob(y=c) + \sum_{j=1}^d \log \Prob(x_j \mid y=c), \qquad c \in \{0, 1\},
+  \]
+  若只需类别预测，直接取 $\argmax_c s_c$；若需精确后验概率，先减去 $m = \max_c s_c$ 再做指数归一化（即 \textbf{Log-Sum-Exp 稳定技巧}，第 6 章将系统展开）：$\Prob(y=c\mid x) = \frac{e^{s_c - m}}{\sum_{c'} e^{s_{c'} - m}}$。
+  \item \textbf{零概率一票否决}：若训练集里某罕见词从未在正常邮件中出现，频率估计会给出 $\Prob(x_j=1\mid y=0)=0$，导致连乘积瞬间归零（或 $\log 0 = -\infty$），抹杀其余 $1{,}999$ 个词的全部证据。解决办法是在计数分子分母上各加伪计数（\textbf{Laplace 平滑}，第 5 章将证明它恰是 Beta/Dirichlet 先验下的后验估计）。
+\end{enumerate}
+\end{failBox}
+
+% =========================================================================
+\section{独立 vs 条件独立：AI 概率图的灵魂（Explaining Away）}
+\label{sec:ch1-indep-condindep}
+
+上一节朴素贝叶斯的核心假设是“给定邮件标签后，各词特征条件独立”。但许多初学者的第一个直觉会立刻提出质疑：“‘免费’和‘中奖’在现实中明明经常一起出现，怎么能说它们条件独立呢？”
+
+这个追问直指 AI 概率建模最核心、也最容易混淆的概念边界——\textbf{边际独立（Independence）}与\textbf{条件独立（Conditional Independence）}是两件截然不同的事，它们之间\textbf{没有任何单向或双向的蕴含关系}！
+
+\begin{defBox}
+\begin{definition}[独立性与条件独立性]
+\label{def:ch1-indep}
+设 $A, B, C$ 为事件（且 $\Prob(C) > 0$）：
+\begin{enumerate}
+  \item 若满足
+  \begin{equation}
+    \Prob(A \cap B) = \Prob(A)\,\Prob(B), \label{eq:ch1-indep}
+  \end{equation}
+  则称 $A$ 与 $B$ \textbf{相互独立}（或\textbf{边际独立}），记作 $A \indep B$。当 $\Prob(B)>0$ 时，它等价于 $\Prob(A \mid B) = \Prob(A)$（知道 $B$ 不改变 $A$ 的概率）。
+  \item 若在给定 $C$ 发生的条件下满足
+  \begin{equation}
+    \Prob(A \cap B \mid C) = \Prob(A \mid C)\,\Prob(B \mid C), \label{eq:ch1-cond-indep}
+  \end{equation}
+  则称 $A$ 与 $B$ \textbf{给定 $C$ 条件独立}，记作 $A \indep B \mid C$。当 $\Prob(B \cap C)>0$ 时，它等价于 $\Prob(A \mid B, C) = \Prob(A \mid C)$（一旦已知 $C$，再告知 $B$ 不会提供关于 $A$ 的任何新信息）。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+同样地，对随机变量 $X, Y, Z$，$X \indep Y \mid Z$ 意味着对一切取值 $(x, y, z)$（满足 $p(z)>0$），均有 $p(x, y \mid z) = p(x \mid z)\,p(y \mid z)$。下面用两枚彻底算清的离散反例，把“边际相关却条件独立”与“边际独立却条件相关”两种相反机制钉进直觉里。
+
+\subsection{反例一：共因结构（Fork $A \leftarrow C \rightarrow B$）——边际相关，条件独立}
+
+回到“免费”（$A$）与“中奖”（$B$）的例子。设 $C \in \{0, 1\}$ 表示邮件是否为垃圾邮件，且 $\Prob(C=1) = \Prob(C=0) = 0.5$。假设给定邮件类型 $C$ 后，作者独立决定是否写入两个词：
+\[
+  \Prob(A=1\mid C=1) = 0.8,\quad \Prob(B=1\mid C=1) = 0.8;\qquad
+  \Prob(A=1\mid C=0) = 0.1,\quad \Prob(B=1\mid C=0) = 0.1,
+\]
+且严格满足条件独立性 $A \indep B \mid C$（即给定 $C$ 时联合概率等于条件概率之积）。由此可写出 $(A, B, C)$ 的完整联合概率，并对 $C$ 求和得到 $(A, B)$ 的边际联合分布表（表 \ref{tab:ch1-fork-table}）：
+
+\begin{table}[htbp]
+  \centering
+  \caption{共因结构 $A \leftarrow C \rightarrow B$ 下的 $(A, B)$ 边际联合概率表（由条件独立模型对 $C$ 求和所得）}
+  \label{tab:ch1-fork-table}
+  \small
+  \begin{tabular}{cccc}
+    \toprule
+    & $B = 1$（含“中奖”） & $B = 0$（不含“中奖”） & 边际行和 $\Prob(A)$ \\
+    \midrule
+    $A = 1$（含“免费”） & $0.5\times 0.64 + 0.5\times 0.01 = \mathbf{0.325}$ & $0.5\times 0.16 + 0.5\times 0.09 = 0.125$ & $0.450$ \\
+    $A = 0$（不含“免费”） & $0.5\times 0.16 + 0.5\times 0.09 = 0.125$ & $0.5\times 0.04 + 0.5\times 0.81 = 0.425$ & $0.550$ \\
+    \midrule
+    边际列和 $\Prob(B)$ & $0.450$ & $0.550$ & $1.000$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+立刻检验边际独立性：
+\[
+  \Prob(A=1, B=1) = 0.325 \;\neq\; 0.450 \times 0.450 = 0.2025 = \Prob(A=1)\,\Prob(B=1)!
+\]
+不仅如此，$\Prob(B=1 \mid A=1) = 0.325 / 0.450 \approx 0.722$，远高于先验 $\Prob(B=1) = 0.450$！为什么？因为当我们不知道 $C$ 时，看到“免费”会大幅提高“这是垃圾邮件”的后验概率，从而间接拉高“中奖”出现的概率——信息通过隐藏共因 $C$ 从 $A$ 流向了 $B$。而一旦我们\textbf{直接观测并固定了共因 $C$}（比如已知这就是垃圾邮件），$A \leftarrow C \rightarrow B$ 这条信息通道就被阻断，$A$ 和 $B$ 立刻恢复条件独立。这就是朴素贝叶斯之所以能合理建模相关词共现的数学秘密！
+
+\subsection{反例二：汇合结构（Collider $A \rightarrow C \leftarrow B$）——边际独立，条件相关（Explaining Away）}
+
+反过来更令人拍案叫绝：两个原本风马牛不相及的独立事件，一旦观测到它们的\textbf{共同结果}，就会立刻产生强烈的负相关！
+
+\begin{example}[两枚独立硬币与辩解效应（Explaining Away）]
+\label{ex:ch1-collider-coins}
+独立抛掷两枚均匀硬币，记结果为 $X_1, X_2 \in \{0, 1\}$（正面为 $1$，反面为 $0$），再定义它们的共同结果（和）$S := X_1 + X_2 \in \{0, 1, 2\}$。四个等可能样本点列表如下：
+\begin{center}
+\small
+\begin{tabular}{cccccc}
+  \toprule
+  样本点 $(X_1, X_2)$ & $(0, 0)$ & $(1, 0)$ & $(0, 1)$ & $(1, 1)$ \\
+  \midrule
+  联合概率 $\Prob(X_1, X_2)$ & $1/4$ & $1/4$ & $1/4$ & $1/4$ \\
+  观测结果 $S = X_1 + X_2$ & $0$ & $\mathbf{1}$ & $\mathbf{1}$ & $2$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\begin{itemize}
+  \item \textbf{边际上严格独立（$X_1 \indep X_2$）}：$\Prob(X_1=1, X_2=1) = \frac{1}{4} = \frac{1}{2}\times\frac{1}{2} = \Prob(X_1=1)\Prob(X_2=1)$。
+  \item \textbf{给定共同结果 $S = 1$ 后强相关（$X_1 \not\indep X_2 \mid S$）}：一旦被告知 $S = 1$，样本空间坍缩为 $\{(1,0), (0,1)\}$，二者条件概率各为 $1/2$。于是 $\Prob(X_1=1\mid S=1) = 1/2$，$\Prob(X_2=1\mid S=1) = 1/2$，但联合条件概率却为
+  \[
+    \Prob(X_1=1, X_2=1 \mid S=1) = 0 \;\neq\; \frac{1}{2}\times\frac{1}{2} = \frac{1}{4}!
+  \]
+  更直观地看：在已知 $S=1$ 的前提下，只要我告诉你第一枚硬币是正面（$X_1=1$），你就 $100\%$ 笃定第二枚必是反面（$X_2=0$）——原本完全独立的两枚硬币变成了\textbf{完全负相关}（条件协方差 $\Cov(X_1, X_2 \mid S=1) = -1/4$）。
+\end{itemize}
+\end{example}
+
+在人工智能与认知科学中，这种汇合结构（Collider）诱导的条件相关性有一个极富画面感的名字——\textbf{辩解效应（Explaining Away）}。想象你早晨推开门看到花园草地是湿的（共同结果 $W=1$），这可能源于两个原本相互独立的独立原因：昨晚下过雨（$R=1$）或自动洒水器开了（$S=1$）。在没看到草地时，天气和洒水器独立（$R \indep S$）；可一旦看到草地湿了（观测到 $W=1$），两个原因就开始“竞争解释同一份证据”——倘若你紧接着抬头发现邻居屋顶也在滴水（确认 $R=1$），“昨晚下雨”已经充分解释了草地为什么湿，于是“洒水器开过”的后验概率便应声下降（被下雨“辩解掉”了）。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=1.6cm,
+    rv/.style={circle, draw=ink, thick, minimum size=0.92cm, font=\small\sffamily\bfseries, fill=white},
+    obs/.style={circle, draw=tealDark, thick, minimum size=0.92cm, font=\small\sffamily\bfseries, fill=tealLight},
+    obsbad/.style={circle, draw=ochre, thick, minimum size=0.92cm, font=\small\sffamily\bfseries, fill=ochreLight},
+    edge/.style={-{Stealth[length=2.3mm]}, thick, ink}
+  ]
+    % -------- Panel (a): Fork --------
+    \begin{scope}[xshift=0cm]
+      \node[font=\small\sffamily\bfseries, color=tealDark] at (0, 2.35) {(a) 共因结构（Fork）：观测 $C$ 阻断通道};
+
+      \node[obs] (C1) at (0, 1.30) {$C$};
+      \node[rv] (A1) at (-2.1, -0.10) {$A$};
+      \node[rv] (B1) at (2.1, -0.10) {$B$};
+
+      \draw[edge] (C1) -- (A1);
+      \draw[edge] (C1) -- (B1);
+
+      % Blocked path indicator
+      \draw[dashed, teal, thick] (A1) to[bend right=18] node[midway, below, font=\scriptsize\sffamily\bfseries, color=tealDark] {通道被阻断：$A \indep B \mid C$} (B1);
+      \node[font=\scriptsize\sffamily, color=tealDark, align=center] at (0, 1.30) {};
+      \node[above right, font=\scriptsize\sffamily, color=tealDark] at (0.48, 1.35) {已观测（阴影）};
+      \node[below, font=\scriptsize\sffamily, color=slate, align=center] at (0, -1.05) {例：垃圾邮件 $C$ $\to$ 词 $A, B$\\未观测 $C$ 时 $A \not\indep B$，给定 $C$ 后独立};
+    \end{scope}
+
+    % Divider line
+    \draw[tealLine, dashed] (3.65, -1.65) -- (3.65, 2.55);
+
+    % -------- Panel (b): Collider --------
+    \begin{scope}[xshift=7.3cm]
+      \node[font=\small\sffamily\bfseries, color=ochre] at (0, 2.35) {(b) 汇合结构（Collider）：观测 $C$ 打开通道};
+
+      \node[obsbad] (C2) at (0, -0.10) {$C$};
+      \node[rv] (A2) at (-2.1, 1.30) {$A$};
+      \node[rv] (B2) at (2.1, 1.30) {$B$};
+
+      \draw[edge] (A2) -- (C2);
+      \draw[edge] (B2) -- (C2);
+
+      % Opened path indicator
+      \draw[ochre, thick, <->, dashed] (A2) to[bend left=18] node[midway, above, font=\scriptsize\sffamily\bfseries, color=ochre] {辩解效应打通关联：$A \not\indep B \mid C$} (B2);
+      \node[right, font=\scriptsize\sffamily, color=ochre] at (0.52, -0.10) {已观测（阴影）};
+      \node[below, font=\scriptsize\sffamily, color=slate, align=center] at (0, -1.05) {例：独立硬币 $X_1, X_2 \to$ 和 $S$\\未观测 $S$ 时 $X_1 \indep X_2$，给定 $S=1$ 后负相关};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{有向概率图中的两种对偶基本结构（阴影节点代表已被观测到的条件变量）。（a）共因结构 $A \leftarrow C \rightarrow B$ 中，观测共因 $C$ 会切断 $A, B$ 的统计联系；（b）汇合结构 $A \rightarrow C \leftarrow B$ 中，观测共同结果 $C$ 反而会打开 $A, B$ 之间的信息通道，引发 Explaining Away（辩解效应）。}
+  \label{fig:ch1-fork-collider}
+\end{figure}
+
+\begin{insightBox}{直通第 3 卷贝叶斯网络与因果推断（$d$-分离与对撞偏倚）}
+图 \ref{fig:ch1-fork-collider} 中的共因结构、汇合结构，再加上一条直链 $A \to C \to B$（观测 $C$ 同样阻断 $A$ 与 $B$，如马尔可夫链），共同构成了\textbf{有向图模型（贝叶斯网络）}仅有的三种原子路径。第 3 卷将在此基础上建立完整的 $d$-分离（$d$-separation）判定准则，只需看图就能瞬间读出高维分布中的所有条件独立关系。此外，在数据分析与大模型评估中，如果不慎按汇合节点做数据过滤（例如只统计“进入顶级高校的学生”里智商与努力程度的相关性），就会人为制造出虚假负相关，称为\textbf{对撞偏倚（Collider Bias / Berkson 悖论）}。
+\end{insightBox}
+
+% =========================================================================
+\section{随机变量、联合分布、期望线性性与协方差矩阵}
+\label{sec:ch1-rv-cov}
+
+到目前为止，我们都在用抽象事件 $A, B$ 讨论概率。要把概率论塞进 NumPy 向量和矩阵里，就需要把每个样本点 $\omega \in \Omega$ 映射为实数或实向量——这就是\textbf{随机变量（Random Variable）} $X: \Omega \to \R$ 与\textbf{随机向量} $X: \Omega \to \R^d$。
+
+\subsection{PMF、PDF、CDF 与联合/边际/条件分布}
+
+\begin{itemize}
+  \item \textbf{离散随机变量}由\textbf{概率质量函数（PMF）} $p_X(x) := \Prob(X = x)$ 刻画，满足 $p_X(x) \ge 0$ 与 $\sum_x p_X(x) = 1$。
+  \item \textbf{连续随机变量}由\textbf{概率密度函数（PDF）} $p_X(x) \ge 0$ 刻画，满足 $\int_{-\infty}^\infty p_X(x)\,dx = 1$，事件概率通过积分给出：$\Prob(a \le X \le b) = \int_a^b p_X(x)\,dx$。
+  \item 无论离散还是连续，\textbf{累积分布函数（CDF）}统一定义为 $F_X(x) := \Prob(X \le x)$，它是单调非减、右连续且满足 $F_X(-\infty)=0,\; F_X(+\infty)=1$ 的函数；对连续变量有 $p_X(x) = F_X'(x)$。
+\end{itemize}
+
+\begin{failBox}{PDF 是“密度”而非概率——它可以大于 $1$！}
+连续随机变量取任意单个精确点的概率恒为零：$\Prob(X = x_0) = \int_{x_0}^{x_0} p_X(x)\,dx = 0$。因此 $p_X(x)$ 代表的是“单位长度上的概率密度”，而非概率本身，\textbf{完全可以严格大于 $1$}！例如区间 $[0, 0.2]$ 上的均匀分布 $\mathrm{Uniform}(0, 0.2)$，其密度为 $p_X(x) = 5 > 1$（因为 $5 \times 0.2 = 1$）。同样，第 4 章在计算连续分布的微分熵时，由于 $p_X(x)$ 可以大于 $1$，会出现“微分熵可为负数”的独特现象。
+\end{failBox}
+
+当同时考察多个随机变量 $(X, Y)$ 时，我们用\textbf{联合分布} $p_{X,Y}(x,y)$ 描述它们共同的规律，并通过两种基本操作在维度间自由穿梭（以下为离散求和形式，连续情形将 $\sum$ 换为 $\int$ 即可）：
+\begin{align*}
+  \textbf{边际化（Marginalization / 消去冗余变量）：}\; & p_X(x) = \sum_y p_{X,Y}(x, y), \\
+  \textbf{条件化（Conditioning）：}\; & p_{X\mid Y}(x \mid y) = \frac{p_{X,Y}(x, y)}{p_Y(y)}.
+\end{align*}
+从工程视角看，“边际化”就是对你不关心的隐变量把所有可能取值求和/积分掉；例如例 \ref{ex:ch1-rare-disease} 中计算分母 $\Prob(+)$ 时，本质上就是在对隐藏患病状态 $D \in \{0, 1\}$ 做边际化。
+
+\subsection{期望的线性性与全期望定律}
+
+随机变量的\textbf{数学期望（Expectation）}定义为按概率加权的平均值：离散时 $\E[X] := \sum_x x\,p_X(x)$，连续时 $\E[X] := \int_{-\infty}^\infty x\,p_X(x)\,dx$（前提是绝对收敛）。更一般地，对任意函数 $g$，有无意识统计学家法则（LOTUS）：$\E[g(X)] = \sum_x g(x)\,p_X(x)$（连续情形为积分）。
+
+在全部概率计算中，最强大、最省力的两条恒等式莫过于\textbf{期望线性性}与\textbf{全期望定律}。
+
+\begin{thmBox}
+\begin{theorem}[期望的线性性与全期望定律（Tower Property）]
+\label{thm:ch1-expectation-laws}
+设 $X, Y$ 为期望存在的随机变量，$a, b, c \in \R$ 为任意常数，则：
+\begin{enumerate}
+  \item \textbf{期望线性性}（\textbf{不要求 $X$ 与 $Y$ 独立！}）：
+  \begin{equation}
+    \E[aX + bY + c] = a\,\E[X] + b\,\E[Y] + c. \label{eq:ch1-linearity}
+  \end{equation}
+  \item \textbf{全期望定律（迭代期望公式）}：记 $\E[X \mid Y]$ 为以 $Y$ 为随机自变量的条件期望函数，则
+  \begin{equation}
+    \E[X] = \E_Y\bigl[\E[X \mid Y]\bigr]. \label{eq:ch1-tower}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+我们在离散有限（或绝对收敛）情形下给出清晰证明（连续情形仅需将求和换为积分并用 Fubini 定理交换积分次序）。
+\begin{enumerate}
+  \item 利用联合分布与边际化公式：
+  \begin{align*}
+    \E[aX + bY + c]
+    &= \sum_x \sum_y (ax + by + c)\,p_{X,Y}(x, y) \\
+    &= a \sum_x x \Bigl(\sum_y p_{X,Y}(x,y)\Bigr) + b \sum_y y \Bigl(\sum_x p_{X,Y}(x,y)\Bigr) + c \sum_{x,y} p_{X,Y}(x,y) \\
+    &= a \sum_x x\,p_X(x) + b \sum_y y\,p_Y(y) + c = a\,\E[X] + b\,\E[Y] + c.
+  \end{align*}
+  注意全程只用到了联合分布的边际和，\textbf{完全没有假设} $p_{X,Y}(x,y) = p_X(x)p_Y(y)$。
+  \item 展开右侧外层对 $Y$ 的期望，再利用 $p_Y(y)\,p_{X\mid Y}(x\mid y) = p_{X,Y}(x,y)$ 交换求和次序：
+  \begin{align*}
+    \E_Y\bigl[\E[X \mid Y]\bigr]
+    &= \sum_y \Bigl(\sum_x x\,p_{X\mid Y}(x \mid y)\Bigr) p_Y(y)
+     = \sum_x x \sum_y p_{X,Y}(x, y)
+     = \sum_x x\,p_X(x) = \E[X]. \qedhere
+  \end{align*}
+\end{enumerate}
+\end{proof}
+
+期望线性性为何如此惊人？试想一个小问题：把 $n$ 份写有姓名的试卷完全随机地发给 $n$ 位同学，平均有多少人刚好拿到自己的试卷？每个人拿到自己试卷的指示变量 $I_k \in \{0, 1\}$ 彼此显然\textbf{不独立}（若前 $n-1$ 人都拿对了，第 $n$ 人必然也拿对），但借助线性性，完全不用算错排概率，只需一行：
+\[
+  \E\Bigl[\sum_{k=1}^n I_k\Bigr] = \sum_{k=1}^n \E[I_k] = \sum_{k=1}^n \frac{1}{n} = 1!
+\]
+在机器学习中，训练损失的经验均值 $\frac{1}{N}\sum_{i=1}^N \ell_i$、随机梯度下降（SGD）的梯度无偏性 $\E[\nabla \ell_{\text{batch}}] = \nabla L(\theta)$，以及第 7 卷强化学习的 Bellman 方程（全期望定律），背后全靠这两条恒等式支撑。
+
+\subsection{方差、协方差与半正定协方差矩阵 $\Sigma \succeq 0$}
+
+期望只刻画分布的“重心”，要描述数据的离散程度与变量间的线性协同关系，需要二阶矩。定义随机变量 $X$（均值 $\mu_X = \E[X]$）的\textbf{方差}、\textbf{标准差}以及 $X, Y$ 间的\textbf{协方差}分别为：
+\[
+  \Var(X) := \E\bigl[(X - \mu_X)^2\bigr] = \E[X^2] - (\E[X])^2, \qquad
+  \sigma_X := \sqrt{\Var(X)},
+\]
+\[
+  \Cov(X, Y) := \E\bigl[(X - \mu_X)(Y - \mu_Y)\bigr] = \E[XY] - \E[X]\E[Y].
+\]
+直接展开 $(X + Y - \mu_X - \mu_Y)^2$ 并用期望线性性，立刻得到\textbf{和的方差公式}：
+\begin{equation}
+  \Var(aX + bY) = a^2\Var(X) + b^2\Var(Y) + 2ab\,\Cov(X, Y). \label{eq:ch1-var-sum}
+\end{equation}
+只有当 $\Cov(X, Y) = 0$（例如 $X \indep Y$）时，交叉项才消失，方差才满足可加性 $\Var(X+Y) = \Var(X) + \Var(Y)$。
+
+\begin{failBox}{反例：不相关（$\Cov(X,Y)=0$）绝不等于独立（$X \indep Y$）！}
+若 $X \indep Y$，则 $\E[XY] = \E[X]\E[Y]$，必有 $\Cov(X,Y)=0$；但\textbf{逆命题不成立}！取 $X$ 等概率取 $\{-1, 0, 1\}$（各占 $1/3$），并令 $Y := X^2$。显然 $Y$ 完全由 $X$ 决定，二者强相关，但 $\E[X]=0$ 且 $\E[XY] = \E[X^3] = \frac{1}{3}(-1 + 0 + 1) = 0$，于是
+\[
+  \Cov(X, Y) = \E[XY] - \E[X]\E[Y] = 0 - 0 = 0!
+\]
+协方差只能捕捉\textbf{线性}相关性，对对称的非线性依赖（如抛物线 $Y=X^2$）完全“失明”。（唯一著名的例外是第 2 章的多元联合高斯分布：对联合高斯向量，零协方差与独立性等价。）
+\end{failBox}
+
+现在把目光升维到 $d$ 维随机特征向量 $X = (X_1, \dots, X_d)^T \in \R^d$，其均值向量记为 $\mu := \E[X] = (\E[X_1],\allowbreak \dots,\allowbreak \E[X_d])^T \in \R^d$。把任意两维之间的协方差排成一个 $d\times d$ 矩阵，就得到 AI 数据分析中最核心的矩阵对象——\textbf{协方差矩阵（Covariance Matrix）}：
+\begin{equation}
+  \Sigma := \Cov(X) := \E\bigl[(X - \mu)(X - \mu)^T\bigr] \in \R^{d\times d}, \qquad \Sigma_{ij} = \Cov(X_i, X_j). \label{eq:ch1-cov-mat}
+\end{equation}
+它与第 1 卷第 3 章的半正定矩阵（PSD）立刻产生完美合流！
+
+\begin{thmBox}
+\begin{proposition}[协方差矩阵的对称半正定性与线性变换律]
+\label{prop:ch1-cov-psd}
+设 $X \in \R^d$ 为具有有限二阶矩的随机向量，均值 $\mu = \E[X]$，协方差矩阵 $\Sigma = \Cov(X)$。则：
+\begin{enumerate}
+  \item $\Sigma$ 必为\textbf{实对称半正定矩阵}（$\Sigma = \Sigma^T$ 且 $\Sigma \succeq 0$）；
+  \item 对任意确定性矩阵 $A \in \R^{m\times d}$ 与向量 $b \in \R^m$，随机向量 $Y = AX + b$ 的均值与协方差矩阵为
+  \begin{equation}
+    \E[AX + b] = A\mu + b, \qquad \Cov(AX + b) = A\,\Sigma\,A^T. \label{eq:ch1-cov-affine}
+  \end{equation}
+\end{enumerate}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+（1）对称性由 $\Sigma_{ij} = \Cov(X_i, X_j) = \Cov(X_j, X_i) = \Sigma_{ji}$ 直接得证。对任意确定性向量 $v \in \R^d$，利用期望对确定性矩阵/向量的线性性：
+\[
+  v^T \Sigma v
+  = v^T \E\bigl[(X - \mu)(X - \mu)^T\bigr] v
+  = \E\bigl[v^T(X - \mu)(X - \mu)^T v\bigr]
+  = \E\Bigl[\bigl(v^T(X - \mu)\bigr)^2\Bigr]
+  = \Var(v^T X) \ge 0.
+\]
+因为平方的期望永不为负，故 $\Sigma \succeq 0$。
+
+（2）均值式 $\E[AX + b] = A\E[X] + b = A\mu + b$ 由期望线性性逐分量成立。从而 $Y - \E[Y] = A(X - \mu)$，代入协方差矩阵定义：
+\[
+  \Cov(Y) = \E\bigl[A(X-\mu)(X-\mu)^T A^T\bigr] = A\,\E\bigl[(X-\mu)(X-\mu)^T\bigr] A^T = A\Sigma A^T. \qedhere
+\]
+\end{proof}
+
+\begin{insightBox}{与第 1 卷谱定理、PCA 和第 2 章多元高斯的无缝合流}
+命题 \ref{prop:ch1-cov-psd} 的证明里藏着一句含金量极高的等式：$v^T \Sigma v = \Var(v^T X)$！它意味着：把随机数据 $X$ 投影到任意单位方向 $v$（$\|v\|_2 = 1$）上，所得一维标量的方差恰好是协方差矩阵的 Rayleigh 商 $v^T \Sigma v$。因此，第 1 卷第 4 章的\textbf{主成分分析（PCA）}——寻找使投影方差最大的正交主轴——在概率意义下正是对实对称半正定矩阵 $\Sigma$ 做谱分解 $\Sigma = Q\Lambda Q^T$，特征值 $\lambda_i \ge 0$ 就是第 $i$ 个主成分方向上的精确方差！下一章我们将看到，正是这个 $\Sigma$ 决定了多元高斯分布的椭球几何。
+\end{insightBox}
+
+\subsection{纯 NumPy 实战：序贯 Bayes 更新、对数空间朴素贝叶斯与协方差验证}
+
+代码 \ref{lst:ch1-bayes-cov} 用不到 40 行纯 NumPy 同时验证了本章三个核心机制：（1）罕见病序贯 Bayes 更新（复现 $4.72\%$ 与 $71.04\%$）；（2）对数空间 Log-Sum-Exp 朴素贝叶斯（在高维 $d=1000$ 词下对比直接连乘下溢与对数空间稳定性）；（3）经验协方差矩阵的半正定性验证（对应命题 \ref{prop:ch1-cov-psd}）。
+
+\begin{lstlisting}[caption={序贯 Bayes 更新、对数空间防下溢与经验协方差矩阵半正定性验证}, label={lst:ch1-bayes-cov}]
+import numpy as np
+
+# 1. 罕见病序贯 Bayes 更新（对齐 vol2_experiments.py）
+prior, sens, fpr = 0.001, 0.99, 0.02
+p = prior
+for step in range(1, 4):
+    p = (sens * p) / (sens * p + fpr * (1.0 - p))
+    print(f"After test {step} (+): posterior = {p:.5f} ({p*100:.2f}%)")
+
+# 2. 高维 Naive Bayes：直接连乘下溢 vs 对数空间 Log-Sum-Exp
+d = 1000
+p_feat_spam = np.full(d, 0.012)  # 每词概率约 0.012
+p_feat_ham  = np.full(d, 0.010)
+raw_spam = 0.4 * np.prod(p_feat_spam)  # 远小于 float64 最小正数 2.2e-308
+raw_ham  = 0.6 * np.prod(p_feat_ham)
+print(f"Raw product underflow: spam={raw_spam}, ham={raw_ham}")
+
+log_scores = np.array([
+    np.log(0.4) + np.sum(np.log(p_feat_spam)),
+    np.log(0.6) + np.sum(np.log(p_feat_ham)),
+])
+m = np.max(log_scores)
+probs = np.exp(log_scores - m) / np.sum(np.exp(log_scores - m))
+print(f"Log-space posterior: P(spam|x)={probs[0]:.6f}, P(ham|x)={probs[1]:.6f}")
+
+# 3. 经验协方差矩阵半正定性与仿射变换律验证
+rng = np.random.default_rng(42)
+X = rng.normal(size=(5000, 3))
+A = np.array([[2.0, -1.0, 0.5], [0.0, 1.5, 1.0]])  # 2x3 线性映射
+Y = X @ A.T + np.array([1.0, -2.0])
+S_x = np.cov(X, rowvar=False)
+S_y = np.cov(Y, rowvar=False)
+eigvals = np.linalg.eigvalsh(S_y)
+print(f"min eigval(S_y) = {eigvals.min():.6f} >= 0")
+print(f"||S_y - A S_x A^T||_F = {np.linalg.norm(S_y - A @ S_x @ A.T):.2e}")
+\end{lstlisting}
+
+在本机运行上述脚本，可以看到：\texttt{raw\_spam} 与 \texttt{raw\_ham} 双双下溢成精确的 \texttt{0.0}，而对数空间版本稳定输出精确后验 $P(\text{spam}\mid x) = 1.000000$；同时经验协方差矩阵的最小特征值严格非负，且仿射变换误差 $\|S_y - A S_x A^T\|_F < 10^{-15}$（机器精度级完全吻合）。
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch1-exercises}
+
+\exTier{A. 概念辨析与反例查错}{合上书独立作答，精准定位独立性与概率概念边界}
+
+\begin{enumerate}[label=\textbf{1.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（独立、互斥与条件独立辨析）} 判断以下四个命题正误；对错误命题给出最小反例，对正确命题简述理由：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 若两事件 $A, B$ 互斥（$A\cap B = \varnothing$）且 $\Prob(A)>0,\; \Prob(B)>0$，则 $A$ 与 $B$ 必相互独立；
+    \item 若随机变量 $X, Y$ 满足 $X \indep Y$，则对任意第三个随机变量 $Z$，必有 $X \indep Y \mid Z$；
+    \item 连续随机变量的概率密度函数 $p_X(x)$ 在任意点处恒满足 $0 \le p_X(x) \le 1$；
+    \item 对任意有限期望的随机变量 $X, Y$，即使二者强相关，仍恒有 $\E[X + Y] = \E[X] + \E[Y]$。
+  \end{enumerate}
+
+  \item \textbf{（协方差为零与线性相关性陷阱）} 设随机变量 $X$ 满足 $\Prob(X=-2)=\Prob(X=0)=\Prob(X=2)=\frac{1}{3}$，令 $Y = |X|$。请验证 $\Cov(X, Y) = 0$，但 $X$ 与 $Y$ 并不独立；并举例说明为什么“$\Var(X+Y) = \Var(X) + \Var(Y)$”也不能反推出 $X \indep Y$。
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手打通 Bayes 更新、朴素贝叶斯与辩解效应计算}
+
+\begin{enumerate}[label=\textbf{1.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（两厂芯片溯源与检测后验）} 在例 \ref{ex:ch1-chip-factory} 中（A 厂供货 $70\%$、次品率 $1\%$；B 厂供货 $30\%$、次品率 $4\%$）：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 已知随机抽检的一颗芯片是次品，求它来自 B 厂的后验概率 $\Prob(H_B \mid E)$；
+    \item 若改用一台并非完美的检测仪筛查（对真次品报警率 $95\%$，对良品误报率 $2\%$），求随机一颗芯片触发报警的总概率，以及报警芯片确实为次品的后验概率。
+  \end{enumerate}
+
+  \item \textbf{（草地湿润中的 Explaining Away 精确手算）} 设“昨晚下雨” $R \in \{0,1\}$ 与“洒水器开启” $S \in \{0,1\}$ 边际独立，先验概率分别为 $\Prob(R=1) = 0.2$、$\Prob(S=1) = 0.1$。草地湿润 $W \in \{0,1\}$ 满足：
+  \begin{align*}
+    \Prob(W=1\mid R=1, S=1) &= 0.99, & \Prob(W=1\mid R=1, S=0) &= 0.80, \\
+    \Prob(W=1\mid R=0, S=1) &= 0.90, & \Prob(W=1\mid R=0, S=0) &= 0.00.
+  \end{align*}
+  手算以下三个概率并量化辩解效应的幅度：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 仅观测到草地湿润时，洒水器开启的后验概率 $\Prob(S=1 \mid W=1)$；
+    \item 既观测到草地湿润、又确认昨晚下过雨时，洒水器开启的后验概率 $\Prob(S=1 \mid W=1, R=1)$；
+    \item 对比 $\Prob(S=1)$、$\Prob(S=1\mid W=1)$ 与 $\Prob(S=1\mid W=1, R=1)$ 的变化方向，用一句话解释其含义。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{AI 概率建模与后续卷次反复使用的核心恒等式}
+
+\begin{enumerate}[label=\textbf{1.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（全方差定律：Law of Total Variance）} 设随机变量 $X, Y$ 具有有限二阶矩，证明著名的\textbf{方差分解恒等式（全方差定律）}：
+  \[
+    \Var(X) = \E\bigl[\Var(X \mid Y)\bigr] + \Var\bigl(\E[X \mid Y]\bigr),
+  \]
+  其中 $\Var(X \mid Y) := \E[(X - \E[X \mid Y])^2 \mid Y]$。并解释两项的直观含义（类内残差方差 + 类间均值方差）。
+  \exHint{利用 $\Var(X) = \E[X^2] - (\E[X])^2$ 与全期望定律 $\E[X^2] = \E[\E[X^2\mid Y]]$，在中间加上并减去 $\E\bigl[(\E[X\mid Y])^2\bigr]$，再整理成两项即可。}
+
+  \item \textbf{（Log-Odds 形式下的朴素贝叶斯线性分类器本质）} 考虑二分类朴素贝叶斯模型 \eqref{eq:ch1-naive-bayes}，其中特征 $x = (x_1, \dots, x_d)^T \in \{0, 1\}^d$，记 $p_j := \Prob(x_j=1 \mid y=1) \in (0,1)$，$q_j := \Prob(x_j=1 \mid y=0) \in (0,1)$，先验 $\pi := \Prob(y=1) \in (0,1)$。证明其对数后验几率（log-odds）恰好是特征 $x$ 的\textbf{线性函数}：
+  \[
+    \log \frac{\Prob(y=1 \mid x)}{\Prob(y=0 \mid x)} = w^T x + b,
+  \]
+  并写出权重向量 $w \in \R^d$ 与偏置 $b \in \R$ 的显式表达式（说明为何第 6 章的逻辑回归与朴素贝叶斯拥有完全相同的线性决策边界形式）。
+  \exHint{将 $\Prob(x_j \mid y=1)$ 写成 $p_j^{x_j}(1-p_j)^{1-x_j}$，取对数比值后将含 $x_j$ 的项与常数项分离。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用纯 NumPy 跑出概率机制并通过数值断言}
+
+\begin{enumerate}[label=\textbf{1.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（高维对数空间朴素贝叶斯与 Laplace 平滑实验）} 编写纯 NumPy 函数实现二值特征朴素贝叶斯的训练（含 Laplace 平滑系数 $\alpha \ge 0$：$\hat{p}_{jc} = \frac{N_{jc} + \alpha}{N_c + 2\alpha}$）与对数空间 Log-Sum-Exp 预测：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 生成 $N_{\text{tr}}=400$ 条训练样本、$N_{\text{te}}=400$ 条测试样本、特征维度 $d=4000$ 的模拟二分类文本数据（类别 $1$ 的前 $40$ 个关键词出现概率为 $0.35$、其余为 $0.05$；类别 $0$ 所有词出现概率为 $0.05$）；
+    \item 对比 $\alpha = 0$（无平滑）与 $\alpha = 1.0$（Laplace 平滑）在测试集出现训练集未见词时的表现（是否产生 \texttt{NaN}/\texttt{-inf}），并对比直接概率连乘与对数空间预测；
+    \item 输出测试集准确率，并断言所有预测后验概率之和与 $1$ 的最大偏差小于 $10^{-12}$。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,在 $d=4000$ 维度下直接概率连乘必须复现大面积浮点下溢（超过半数测试样本两类分子同时为 \texttt{0.0}）；对数空间 + Laplace 平滑（$\alpha=1.0$）版本须无任何 \texttt{NaN}，所有样本满足 $|\Prob(y=0\mid x)+\Prob(y=1\mid x)-1| < 10^{-12}$，且测试准确率高于 $90\%$。}
+
+  \item \textbf{（蒙特卡洛验证 Explaining Away 与条件协方差）} 用 \texttt{np.random.default\_rng(2026)} 独立采样 $N = 200{,}000$ 组习题 1.4 中的 $(R, S, W)$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 经验计算边际相关系数 $\mathrm{Corr}(R, S)$ 与经验概率 $\hat{\Prob}(S=1 \mid W=1)$、$\hat{\Prob}(S=1 \mid W=1, R=1)$；
+    \item 进一步仅在子集 $W = 1$ 内计算条件相关系数 $\mathrm{Corr}(R, S \mid W=1)$，定量展示“原本无关的两变量，经由观测共同结果 $W=1$ 后变为显著负相关”。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,边际相关系数 $|\mathrm{Corr}(R, S)| < 0.01$；条件后验估计与习题 1.4 理论解析值偏差均小于 $0.005$；给定 $W=1$ 后的条件相关系数必须严格为负（落在 $[-0.86, -0.80]$ 区间内）。}
+\end{enumerate}

@@ -1,0 +1,743 @@
+\chapter[无模型强化学习：TD、SARSA 与 Q-Learning]{无模型强化学习基础：蒙特卡洛、TD(0)、SARSA 与 Q-Learning}
+\label{ch:model-free-rl}
+
+\chapEpigraph{与其试图编写一个模拟成人心智的程序，何不先编写一个模拟孩童心智的程序？如果再施以恰当的教育，我们就能得到成人的心智。}{Alan M. Turing（艾伦·图灵，1950）}
+
+\begin{chapIntro}{本章导读：从“手握地图的规划”跃入“黑暗中的试错学习”}
+在第 3 卷第 6 章中，我们已经完整建立了马尔可夫决策过程（MDP）的数学骨架，并借助价值迭代与策略迭代，在\textbf{完全已知环境转移概率 $P(s'\mid s,a)$ 与奖励函数 $R(s,a)$} 的前提下，证明了贝尔曼最优算子的压缩不动点存在且唯一。
+
+然而，真实世界几乎从不把“物理引擎源码”交到智能体手上：机器人不知晓每个关节的精确摩擦系数，围棋程序面对的是对手难以穷举的落子分布，大语言模型更不可能拥有刻画“人类满意度”的闭式转移矩阵。本章正式开启\textbf{无模型强化学习（Model-Free RL）}的大门，聚焦三个层层递进的核心问题：
+\begin{enumerate}
+  \item \textbf{无模型评估}：当只能通过与环境交互采集轨迹样本时，蒙特卡洛（MC）与时序差分（TD(0)）如何分别用“完整回报”与“单步自举”估计状态价值？两者在偏差、方差与收敛条件上有何本质差异？
+  \item \textbf{无模型控制与同/异策略分化}：在缺乏转移模型时为何必须转向动作价值 $Q(s,a)$？同策略的 \textbf{SARSA} 与异策略的 \textbf{Q-Learning} 仅在目标项相差一个 $\max$，为何会在悬崖行走中走出截然相反的轨迹？
+  \item \textbf{最大化偏差与双估计解耦}：为何带噪声的 $\max$ 算子必然系统性高估价值？\textbf{Double Q-Learning} 如何用一次优雅的解耦消除高估偏差？
+\end{enumerate}
+\end{chapIntro}
+
+\begin{recallBox}{第 3 卷第 6 章 MDP 与贝尔曼方程核心记号}
+记有限马尔可夫决策过程为五元组 $\mathcal{M} = (\mathcal{S}, \mathcal{A}, P, R, \gamma)$，其中 $\gamma \in [0, 1]$ 为折扣因子。在策略 $\pi(a \mid s)$ 下，从时刻 $t$ 起累积的折扣回报定义为
+\[
+  G_t = \sum_{k=0}^{T-t-1} \gamma^k r_{t+k} = r_t + \gamma G_{t+1} \qquad (\text{持续任务取 } T = \infty).
+\]
+状态价值函数与动作价值函数分别满足\textbf{贝尔曼期望方程}：
+\[
+  V^\pi(s) = \E_\pi[G_t \mid S_t = s] = \sum_{a \in \mathcal{A}} \pi(a \mid s)\, Q^\pi(s, a), \qquad
+  Q^\pi(s, a) = \E\!\left[r_t + \gamma V^\pi(S_{t+1}) \mid S_t = s, A_t = a\right],
+\]
+而最优动作价值函数 $Q^*(s, a) = \max_\pi Q^\pi(s, a)$ 满足\textbf{贝尔曼最优方程}：
+\[
+  Q^*(s, a) = \E\!\left[r_t + \gamma \max_{a' \in \mathcal{A}} Q^*(S_{t+1}, a') \mid S_t = s, A_t = a\right].
+\]
+\end{recallBox}
+
+\section{从已知模型到无模型交互：样本回溯的诞生}
+\label{sec:rl-model-free-gap}
+
+在已知模型的动态规划（DP）中，策略评估的每一次扫描都执行\textbf{全宽期望回溯（Full Expected Backup）}：
+\[
+  V_{k+1}(s) \leftarrow \sum_{a \in \mathcal{A}} \pi(a \mid s) \sum_{s' \in \mathcal{S}} P(s' \mid s, a)\!\left[R(s, a, s') + \gamma V_k(s')\right].
+\]
+一旦拿掉环境模型 $(P, R)$，上式立即陷入双重停摆：
+\begin{itemize}
+  \item \textbf{评估受阻}：内层对所有后继状态 $s'$ 的加权求和需要确切知道转移核 $P(s' \mid s, a)$，而智能体只能把动作 $a$ 送入黑盒环境，观测到\textbf{唯一一个}随机落点 $(r_t, s_{t+1})$。
+  \item \textbf{决策受阻}：即便天降神谕把精确的 $V^\pi(s)$ 全部写进表格，智能体仍无法执行一步前瞻的贪心策略改进 $\argmax_a \sum_{s'} P(s'\mid s,a)[R + \gamma V^\pi(s')]$，因为缺少 $P$ 就无法预知动作 $a$ 会把我们带到哪里。
+\end{itemize}
+
+无模型强化学习用一条朴素却深远的统计原则化解了第一个难题：\textbf{用经验样本回溯（Sample Backup）替代全宽期望回溯}。既然环境本身就是依照真实分布 $P(\cdot \mid s, a)$ 吐出 $(r_t, s_{t+1})$ 的完美采样器，我们便无需显式重构 $P$，只需沿着实际经历的轨迹反复向单次观测目标做小步长增量更新。图~\ref{fig:backup-diagrams} 直观对比了动态规划、蒙特卡洛与单步时序差分三种回溯结构在“采样宽度”与“回溯深度”两个维度上的根本分歧。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  state/.style={circle, draw=tealDark, thick, fill=tealLight, minimum size=6.2mm, inner sep=0pt, font=\scriptsize\sffamily},
+  act/.style={circle, draw=navy, fill=navy, minimum size=2.4mm, inner sep=0pt},
+  term/.style={rectangle, draw=ochre, thick, fill=ochreLight, minimum size=5.2mm, inner sep=0pt, font=\scriptsize\sffamily},
+  edge/.style={-{Stealth[length=1.7mm]}, thick, slate},
+  hl/.style={-{Stealth[length=1.9mm]}, very thick, teal},
+  title/.style={font=\small\sffamily\bfseries, color=tealDark}
+]
+  % Panel 1: DP Full Backup
+  \begin{scope}[xshift=0cm]
+    \node[title] at (0, 1.35) {(a) 动态规划（全宽单步）};
+    \node[state] (s0) at (0, 0.55) {$s$};
+    \node[act] (a1) at (-1.15, -0.35) {};
+    \node[act] (a2) at (1.15, -0.35) {};
+    \draw[edge] (s0) -- (a1) node[midway, left, font=\tiny, color=slate] {$a_1$};
+    \draw[edge] (s0) -- (a2) node[midway, right, font=\tiny, color=slate] {$a_2$};
+    \foreach \x/\lbl in {-1.75/$s'_1$, -0.55/$s'_2$} {
+      \node[state] (n) at (\x, -1.45) {\lbl};
+      \draw[edge] (a1) -- (n);
+    }
+    \foreach \x/\lbl in {0.55/$s'_3$, 1.75/$s'_4$} {
+      \node[state] (n) at (\x, -1.45) {\lbl};
+      \draw[edge] (a2) -- (n);
+    }
+    \node[font=\scriptsize, color=slate, align=center] at (0, -2.25) {需遍历全部 $a, s'$（依赖已知 $P$）\\自举一步 $V(s')$};
+  \end{scope}
+
+  % Panel 2: TD(0) Sample Backup
+  \begin{scope}[xshift=5.6cm]
+    \node[title] at (0, 1.35) {(b) 时序差分 TD(0)（单样本单步）};
+    \node[state] (t0) at (0, 0.55) {$s_t$};
+    \node[act] (ta) at (0, -0.35) {};
+    \node[state] (t1) at (0, -1.45) {$s_{t+1}$};
+    \draw[hl] (t0) -- (ta) node[midway, right, font=\scriptsize, color=teal] {$a_t \sim \pi$};
+    \draw[hl] (ta) -- (t1) node[midway, right, font=\scriptsize, color=ochre] {$r_t$};
+    \node[font=\scriptsize, color=slate, align=center] at (0, -2.25) {仅采一条单步转移（无模型）\\用当前估计 $V(s_{t+1})$ 自举};
+  \end{scope}
+
+  % Panel 3: MC Sample Backup
+  \begin{scope}[xshift=11.4cm]
+    \node[title] at (0, 1.35) {(c) 蒙特卡洛 MC（单样本全轨迹）};
+    \node[state] (m0) at (0, 0.55) {$s_t$};
+    \node[act] (ma0) at (0, -0.05) {};
+    \node[state] (m1) at (0, -0.75) {$s_{t+1}$};
+    \node[font=\scriptsize, color=slate] (dots) at (0, -1.56) {$\vdots$};
+    \node[term] (mt) at (0, -2.36) {$T$};
+    \draw[hl] (m0) -- (ma0);
+    \draw[hl] (ma0) -- (m1) node[midway, right, font=\scriptsize, color=ochre] {$r_t$};
+    \draw[edge] (m1.south) -- (dots.north);
+    \draw[edge] (dots.south) -- (mt.north);
+    \node[font=\scriptsize, color=slate, align=center] at (0, -3.10) {采完整回合至终止（无模型）\\无自举，直接用真实回报 $G_t$};
+  \end{scope}
+\end{tikzpicture}}
+\caption{三种价值更新机制的回溯图对比。空心圆代表状态，实心小圆代表动作，方形代表回合终止。强化学习的方法光谱本质上是在“是否采样（宽 vs 窄）”与“是否自举（浅 vs 深）”所张成的二维平面上权衡偏差、方差与计算代价。}
+\label{fig:backup-diagrams}
+\end{figure}
+
+\section{蒙特卡洛策略评估：无偏但高方差的基准}
+\label{sec:rl-mc}
+
+\subsection{首次访问与每次访问蒙特卡洛}
+
+面对一个未知模型但可反复重启的\textbf{回合制（Episodic）}环境，估算固定策略 $\pi$ 的状态价值 $V^\pi(s) = \E_\pi[G_t \mid S_t = s]$ 最直接的办法便是依照大数定律：反复运行策略 $\pi$ 收集大量完整回合 $\tau^{(1)}, \dots, \tau^{(M)}$，统计每次经过状态 $s$ 之后实际收获的折扣回报 $G_t$，然后取经验均值。这一思路称为\textbf{蒙特卡洛（Monte Carlo, MC）策略评估}。
+
+如果同一个状态 $s$ 在单条轨迹中被多次访问，存在两种自然变体：
+\begin{defBox}
+\begin{definition}[首次访问与每次访问 MC 评估]
+给定由策略 $\pi$ 独立生成的 $M$ 条完整回合，对任意状态 $s \in \mathcal{S}$：
+\begin{itemize}
+  \item \textbf{首次访问 MC（First-Visit MC）}：在每条回合中，仅取状态 $s$ \emph{第一次}出现时的时刻 $t$ 对应的回报 $G_t$ 计入样本集 $\mathcal{G}_{\mathrm{first}}(s)$，估计值 $\hat{V}_{\mathrm{FV}}(s) = \frac{1}{|\mathcal{G}_{\mathrm{first}}(s)|}\sum_{G \in \mathcal{G}_{\mathrm{first}}(s)} G$。
+  \item \textbf{每次访问 MC（Every-Visit MC）}：将回合中状态 $s$ \emph{每一次}出现对应的回报 $G_t$ 全部计入样本集 $\mathcal{G}_{\mathrm{every}}(s)$，取其算术平均 $\hat{V}_{\mathrm{EV}}(s)$。
+\end{itemize}
+若按增量形式在线更新，设第 $k$ 次采样到状态 $s$ 的回报为 $G^{(k)}$，则算术平均等价于增量式
+\begin{equation}
+  V(s) \leftarrow V(s) + \alpha_k \!\left(G^{(k)} - V(s)\right),
+  \label{eq:mc-inc}
+\end{equation}
+其中取 $\alpha_k = 1/k$ 给出精确经验均值；在非平稳环境或后续控制任务（策略 $\pi$ 随时间演化）中，常改用固定常数步长 $\alpha \in (0, 1)$，使旧回报权重按 $(1-\alpha)^m$ 指数遗忘。
+\end{definition}
+\end{defBox}
+
+\begin{thmBox}
+\begin{theorem}[首次访问 MC 的无偏性与均方一致性]
+\label{thm:mc-unbiased}
+设回合间相互独立，且在策略 $\pi$ 下状态 $s$ 的折扣回报方差有限：$\Var_\pi(G_t \mid S_t = s) = \sigma^2(s) < \infty$。记 $N_M(s)$ 为前 $M$ 条回合中至少访问过一次 $s$ 的回合数，在条件 $N_M(s) = n \ge 1$ 下，首次访问 MC 估计 $\hat{V}_n(s) = \frac{1}{n}\sum_{j=1}^n G^{(j)}$ 满足：
+\[
+  \E\!\left[\hat{V}_n(s)\right] = V^\pi(s), \qquad
+  \Var\!\left(\hat{V}_n(s)\right) = \frac{\sigma^2(s)}{n} \xrightarrow{n \to \infty} 0.
+\]
+\end{theorem}
+\begin{proof}
+在每条访问过状态 $s$ 的回合 $j$ 中，设 $T_j = \inf\{t \ge 0 : S_t^{(j)} = s\}$ 为首次击中时刻。由于 $T_j$ 是关于轨迹自然滤子 $\mathcal{F}_t = \sigma(S_0, A_0, \dots, S_t)$ 的停时，由马尔可夫过程的强马尔可夫性，条件于 $\{T_j < \infty\}$ 时，从 $T_j$ 起截取的后缀轨迹与“直接从 $S_0 = s$ 出发”的轨迹同分布，因此
+\[
+  \E\!\left[G^{(j)} \mid T_j < \infty\right] = \E_\pi\!\left[G_0 \mid S_0 = s\right] = V^\pi(s), \qquad
+  \Var\!\left(G^{(j)} \mid T_j < \infty\right) = \sigma^2(s).
+\]
+又因不同回合的随机轨迹彼此独立，故 $G^{(1)}, \dots, G^{(n)}$ 为独立同分布（i.i.d.）随机变量。由期望的线性性与独立和方差的可加性立得
+\[
+  \E\!\left[\hat{V}_n(s)\right] = \frac{1}{n}\sum_{j=1}^n V^\pi(s) = V^\pi(s), \qquad
+  \Var\!\left(\hat{V}_n(s)\right) = \frac{1}{n^2}\sum_{j=1}^n \sigma^2(s) = \frac{\sigma^2(s)}{n}.
+\]
+当 $n \to \infty$ 时，均方误差 $\mathrm{MSE}(\hat{V}_n(s)) = \Var(\hat{V}_n(s)) \to 0$，且由强大数定律知 $\hat{V}_n(s) \xrightarrow{\text{a.s.}} V^\pi(s)$。
+\end{proof}
+\end{thmBox}
+
+\begin{remark}[每次访问 MC 为何在有限样本下可能有偏？]
+在同一回合中，若轨迹按 $s \to s \to \text{终止}$ 连续访问两次 $s$，第一次访问的回报 $G_0 = r_0 + \gamma G_1$ 与第二次访问的回报 $G_1$ 不仅高度相关，而且每个回合贡献的样本数 $K_j$ 本身就是与回报相关的随机变量！由于 $\E\big[\frac{\sum_{j=1}^M \sum_{i=1}^{K_j} G_{j,i}}{\sum_{j=1}^M K_j}\big] \neq \frac{\E[\sum_i G_{1,i}]}{\E[K_1]}$，每次访问 MC 在有限样本下通常存在轻微的比率偏差（Ratio Bias）。不过 Singh 与 Sutton（1996）证明了它仍是渐近一致的，且均方误差同样以 $O(1/M)$ 收敛；在实现上甚至省去了记录“本回合是否已访问过 $s$”的集合开销。
+\end{remark}
+
+\begin{example}[三状态带环小链的 MC 手算对比]
+考虑含终止态 $\mathsf{T}$ 的微型 MDP，折扣因子 $\gamma = 1$。策略 $\pi$ 产生了两条回合：
+\begin{itemize}
+  \item 回合 1：$s_A \xrightarrow{r=0} s_A \xrightarrow{r=2} s_B \xrightarrow{r=4} \mathsf{T}$。对应各步回报：$G_0 = 6$（$s_A$ 首次），$G_1 = 6$（$s_A$ 二次），$G_2 = 4$（$s_B$）。
+  \item 回合 2：$s_A \xrightarrow{r=1} s_B \xrightarrow{r=0} \mathsf{T}$。对应各步回报：$G_0 = 1$（$s_A$ 首次），$G_1 = 0$（$s_B$）。
+\end{itemize}
+按\textbf{首次访问 MC}：$\hat{V}_{\mathrm{FV}}(s_A) = \frac{6 + 1}{2} = 3.5$，$\hat{V}_{\mathrm{FV}}(s_B) = \frac{4 + 0}{2} = 2.0$。按\textbf{每次访问 MC}：$\hat{V}_{\mathrm{EV}}(s_A) = \frac{6 + 6 + 1}{3} \approx 4.33$，$\hat{V}_{\mathrm{EV}}(s_B) = 2.0$。注意在回合 1 中，$s_A$ 的两次回报完全耦合在同一条好运轨迹上，使每次访问估计明显偏向更高分。
+\end{example}
+
+尽管首次访问 MC 拥有无可挑剔的无偏性，它在工程实践中却暴露出两大致命短板：
+\begin{enumerate}
+  \item \textbf{必须苦等回合结束}：只有走到终止状态才能反推 $G_t$，因此完全无法直接用于永不终止的持续任务（如机器人平衡、高频交易），在长视野任务中学习反馈也极其迟缓。
+  \item \textbf{方差沿时间步雪崩累积}：$G_t = r_t + \gamma r_{t+1} + \dots + \gamma^{T-t-1} r_{T-1}$ 叠加了未来所有随机动作与随机环境转移的噪声；即便 $s_t$ 之后的某一步只是碰巧遭遇了一次罕见暴击，也会连带污染前面几十个状态的梯度与价值估计。
+\end{enumerate}
+
+\section{时序差分学习 TD(0) 与随机逼近理论}
+\label{sec:rl-td0}
+
+\subsection{TD(0) 更新律与自举思想}
+
+Sutton（1988）提出的\textbf{时序差分（Temporal-Difference, TD）学习}被誉为强化学习领域最具原创性的核心思想——它把动态规划的\textbf{自举（Bootstrapping）}与蒙特卡洛的\textbf{样本驱动}完美焊接在一起。
+
+观察贝尔曼期望方程 $V^\pi(s_t) = \E_\pi\!\left[r_t + \gamma V^\pi(s_{t+1}) \mid s_t\right]$。为了在仅仅走完\textbf{一步} $(s_t, a_t, r_t, s_{t+1})$ 后就立即更新 $V(s_t)$，我们不必等到回合结束去获取真实回报 $G_t$，只需用当前手头的价值估计 $V(s_{t+1})$ 顶替未知的剩余期望回报 $\E[G_{t+1} \mid s_{t+1}]$：
+
+\begin{defBox}
+\begin{definition}[TD(0) 目标、TD 误差与更新规则]
+在每观测到单步转移 $(s_t, a_t, r_t, s_{t+1})$ 后，\textbf{单步时序差分算法 TD(0)} 定义\textbf{TD 目标（TD Target）}与\textbf{TD 误差（TD Error）}如下：
+\begin{equation}
+  y_t^{\mathrm{TD}} = r_t + \gamma V(s_{t+1}), \qquad
+  \delta_t = y_t^{\mathrm{TD}} - V(s_t) = r_t + \gamma V(s_{t+1}) - V(s_t),
+  \label{eq:td-error}
+\end{equation}
+其中若 $s_{t+1}$ 为终止状态，严格规定 $V(s_{t+1}) \equiv 0$。随后立即执行增量更新：
+\begin{equation}
+  V(s_t) \leftarrow V(s_t) + \alpha_t \,\delta_t = V(s_t) + \alpha_t \!\left[r_t + \gamma V(s_{t+1}) - V(s_t)\right].
+  \label{eq:td0-update}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+对比式~\eqref{eq:mc-inc} 与式~\eqref{eq:td0-update}，两者形式如出一辙，唯一差别是用“一步真实奖励 $+$ 折扣后继估计” $r_t + \gamma V(s_{t+1})$ 替换了“完整轨迹真实回报” $G_t$。这种“用估计去更新估计”的机制正是\textbf{自举（Bootstrapping）}。有趣的是，TD 误差 $\delta_t$ 不仅支配算法收敛，神经科学研究（Schultz, Dayan \& Montague, 1997）还发现灵长类动物中脑多巴胺神经元的脉冲发放模式，竟与“意外奖励预测误差” $\delta_t$ 高度吻合。
+
+\subsection{偏差--方差权衡的严格刻画}
+
+“用尚未准确的 $V(s_{t+1})$ 充当教学目标，难道不会越学越歪吗？”——这是初学者面对 TD(0) 时最敏锐的质疑。下面的命题精确量化了 MC 与 TD(0) 在偏差与方差上的消长关系。
+
+\begin{thmBox}
+\begin{proposition}[MC 目标与 TD(0) 目标的偏差--方差比较]
+\label{prop:mc-td-bv}
+设当前价值估计表为确定性函数 $V: \mathcal{S} \to \R$，策略 $\pi$ 固定，从状态 $S_t = s$ 出发执行一步转移 $(A_t, R_t, S_{t+1})$ 并继续演化得到完整回报 $G_t = R_t + \gamma G_{t+1}$。则：
+\begin{enumerate}
+  \item \textbf{偏差对比}：MC 目标 $G_t$ 严格无偏，即 $\E_\pi[G_t \mid S_t = s] - V^\pi(s) = 0$；而 TD(0) 目标 $y_t^{\mathrm{TD}} = R_t + \gamma V(S_{t+1})$ 的条件偏差为
+  \begin{equation}
+    \operatorname{Bias}\!\left(y_t^{\mathrm{TD}} \mid S_t = s\right)
+    = \E_\pi\!\left[R_t + \gamma V(S_{t+1}) \mid S_t = s\right] - V^\pi(s)
+    = \gamma\, \E_\pi\!\left[V(S_{t+1}) - V^\pi(S_{t+1}) \mid S_t = s\right].
+    \label{eq:td-bias}
+  \end{equation}
+  只有当后继状态的价值估计无误（$V = V^\pi$）时，TD 目标的偏差才归零。
+  \item \textbf{方差分解}：当 $V$ 接近真实价值 $V^\pi$ 时，理想单步目标 $y_t^* = R_t + \gamma V^\pi(S_{t+1})$ 与完整回报 $G_t$ 的条件方差满足精确恒等式：
+  \begin{equation}
+    \Var_\pi\!\left(G_t \mid S_t = s\right)
+    = \Var_\pi\!\left(R_t + \gamma V^\pi(S_{t+1}) \mid S_t = s\right)
+    + \gamma^2\, \E_\pi\!\left[\Var_\pi(G_{t+1} \mid S_{t+1}) \mid S_t = s\right].
+    \label{eq:mc-td-var}
+  \end{equation}
+  因第二项恒非负，只要后续轨迹存在随机性，单步 TD 目标的方差便严格小于 MC 回报的方差。
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+第一部分直接由贝尔曼期望方程 $V^\pi(s) = \E_\pi[R_t + \gamma V^\pi(S_{t+1}) \mid S_t = s]$ 相减即得：
+\[
+  \E_\pi\!\left[R_t + \gamma V(S_{t+1}) \mid S_t = s\right] - V^\pi(s)
+  = \E_\pi\!\left[\gamma\big(V(S_{t+1}) - V^\pi(S_{t+1})\big) \mid S_t = s\right].
+\]
+第二部分对随机变量 $G_t = R_t + \gamma G_{t+1}$ 应用全方差公式（条件于 $\mathcal{F}_{t,1} = (S_t, A_t, R_t, S_{t+1})$，在给定 $S_t = s$ 下）：
+\begin{align*}
+  \Var_\pi(G_t \mid S_t = s)
+  &= \Var_\pi\!\Big(\E_\pi[G_t \mid S_t = s, A_t, R_t, S_{t+1}] \;\Big|\; S_t = s\Big) \\
+  &\quad + \E_\pi\!\Big[\Var_\pi(G_t \mid S_t = s, A_t, R_t, S_{t+1}) \;\Big|\; S_t = s\Big].
+\end{align*}
+利用马尔可夫性，条件于 $(S_t, A_t, R_t, S_{t+1})$ 时 $R_t$ 为常量，且 $G_{t+1}$ 的条件分布仅依赖于 $S_{t+1}$，故
+\[
+  \E_\pi[R_t + \gamma G_{t+1} \mid S_t = s, A_t, R_t, S_{t+1}] = R_t + \gamma V^\pi(S_{t+1}),
+\]
+\[
+  \Var_\pi(R_t + \gamma G_{t+1} \mid S_t = s, A_t, R_t, S_{t+1}) = \gamma^2 \Var_\pi(G_{t+1} \mid S_{t+1}).
+\]
+代回全方差公式，即证式~\eqref{eq:mc-td-var}。
+\end{proof}
+\end{thmBox}
+
+式~\eqref{eq:mc-td-var} 清楚地揭示了 MC 与 TD(0) 的分工：MC 忍受了后续全部步长的方差总和 $\gamma^2 \E[\Var(G_{t+1}\mid S_{t+1})]$ 以换取绝对零偏；TD(0) 则在训练初期承受由初值不准带来的自举偏差，但因为每一步只引入\textbf{单次转移}的随机性，方差大幅锐减。随着迭代推进，$V$ 向 $V^\pi$ 逼近，由式~\eqref{eq:td-bias} 可见 TD 偏差也在以几何级数自我消融。
+
+\begin{example}[Sutton 经典双状态批处理反例：批量 MC 与批量 TD(0) 的本质分歧]
+\label{ex:batch-mc-td}
+设一个未知的马尔可夫过程包含两个非终止状态 $A, B$，折扣因子 $\gamma = 1$。我们只观测到如下 8 条完整回合：
+\begin{center}
+\small
+回合 1：$A \xrightarrow{0} B \xrightarrow{0} \mathsf{T}$；\qquad
+回合 2--7（共 6 条）：$B \xrightarrow{1} \mathsf{T}$；\qquad
+回合 8：$B \xrightarrow{0} \mathsf{T}$。
+\end{center}
+假设我们把这 8 条数据当作固定训练集，反复执行批量更新直至收敛，问 $V(A)$ 与 $V(B)$ 分别应等于多少？
+\begin{itemize}
+  \item \textbf{批量 MC 的答案}：状态 $B$ 共出现 8 次，其中 6 次回报为 $1$、2 次为 $0$，故 $V_{\mathrm{MC}}(B) = \frac{6}{8} = \mathbf{0.75}$。状态 $A$ 仅在回合 1 出现 1 次，其完整回报为 $0 + 0 = 0$，故 $V_{\mathrm{MC}}(A) = \mathbf{0}$。批量 MC 最小化的是\emph{训练集观测回报的均方误差}。
+  \item \textbf{批量 TD(0) 的答案}：从数据拟合出最大似然经验 MDP——从 $A$ 出发以概率 $1$ 零奖励转移到 $B$（$\hat{P}(B\mid A) = 1$），从 $B$ 出发有 $6/8 = 0.75$ 的概率获奖励 $1$ 终止、$2/8$ 获奖励 $0$ 终止。解该经验 MDP 的贝尔曼方程，得 $V_{\mathrm{TD}}(B) = \mathbf{0.75}$，且
+  \[
+    V_{\mathrm{TD}}(A) = 0 + 1 \cdot V_{\mathrm{TD}}(B) = \mathbf{0.75}.
+  \]
+\end{itemize}
+当真实环境满足马尔可夫性质时，$A$ 之所以在回合 1 拿了 0 分，纯粹是因为到了 $B$ 之后倒霉抽中了 $1/4$ 的坏结局，而并非 $A$ 本身毫无价值。TD(0) 利用马尔可夫结构将 $B$ 上积累的 8 次统计证据“无缝传导”给了仅被观测 1 次的 $A$，因此在马尔可夫环境中往往比 MC 具有高得多的数据效率！
+\end{example}
+
+\subsection{Robbins--Monro 随机逼近条件与 TD(0) 收敛性}
+
+无论是式~\eqref{eq:mc-inc} 还是式~\eqref{eq:td0-update}，其本质都是\textbf{在带随机噪声的观测中求解不动点方程 $F(v) = v$}。步长序列 $\{\alpha_t\}_{t=0}^\infty$ 该如何设计，才能保证迭代既不会“半途停摆”，又不会被噪声“永远晃晕”？1951 年 Robbins 与 Monro 给出了支配整个随机优化与强化学习收敛理论的黄金法则。
+
+\begin{thmBox}
+\begin{theorem}[Robbins--Monro 随机逼近条件]
+\label{thm:robbins-monro}
+考虑标量随机迭代 $\theta_{t+1} = \theta_t + \alpha_t (\mu + \xi_t - \theta_t)$，其中 $\mu \in \R$ 为未知真值，噪声序列 $\{\xi_t\}$ 独立同分布，满足 $\E[\xi_t] = 0$ 且 $0 < \Var(\xi_t) = \sigma^2 < \infty$，步长 $\alpha_t \in (0, 1)$。则 $\E[(\theta_t - \mu)^2] \to 0$ 的充分必要条件是步长序列同时满足
+\begin{equation}
+  \sum_{t=0}^{\infty} \alpha_t = \infty \qquad \text{且} \qquad \sum_{t=0}^{\infty} \alpha_t^2 < \infty.
+  \label{eq:rm-cond}
+\end{equation}
+典型例子为 $\alpha_t = \frac{c}{(t + t_0)^p}$，其中 $\frac{1}{2} < p \le 1$（例如 $\alpha_t = \frac{1}{t+1}$ 满足调和级数发散而平方级数收敛于 $\pi^2/6$）。
+\end{theorem}
+\begin{proof}
+令误差 $e_t = \theta_t - \mu$，则递推化为 $e_{t+1} = (1 - \alpha_t) e_t + \alpha_t \xi_t$。由于 $\xi_t$ 独立于 $e_t$ 且零均值，两边取平方再取期望得
+\begin{equation}
+  \E[e_{t+1}^2] = (1 - \alpha_t)^2 \E[e_t^2] + \alpha_t^2 \sigma^2.
+  \label{eq:rm-mse-rec}
+\end{equation}
+\textbf{必要性}：首先，若 $\sum_{t=0}^\infty \alpha_t < \infty$，则由不等式 $1 - x \ge e^{-2x}$（对充分小的 $x > 0$）知 $\prod_{t=t_0}^\infty (1 - \alpha_t)^2 > 0$，于是初值误差的贡献 $e_0^2 \prod_{k=0}^{t-1}(1-\alpha_k)^2$ 无法衰减至 $0$（当 $e_0 \neq 0$ 时 $\E[e_t^2]$ 有严格正下界）。其次，若 $\alpha_t \not\to 0$，由式~\eqref{eq:rm-mse-rec} 知 $\E[e_{t+1}^2] \ge \alpha_t^2 \sigma^2 \not\to 0$。（一般情形下，将式~\eqref{eq:rm-mse-rec} 展开后，只有当 $\sum \alpha_t^2 < \infty$ 才能使累积噪声项 $\sigma^2 \sum_{k=0}^{t-1} \alpha_k^2 \prod_{j=k+1}^{t-1}(1-\alpha_j)^2$ 趋于 $0$——更严格地，对标量线性递推只需 $\alpha_t \to 0$ 与 $\sum \alpha_t = \infty$ 即可均方收敛，而几乎必然收敛 $\theta_t \xrightarrow{\text{a.s.}} \mu$ 以及一般非线性随机逼近的均方/几乎必然收敛需要更强的平方可和条件 $\sum \alpha_t^2 < \infty$。）
+
+\textbf{充分性}：设条件~\eqref{eq:rm-cond} 成立。由 $\sum \alpha_t^2 < \infty$ 知 $\alpha_t \to 0$，故对任意给定 $\varepsilon > 0$，存在 $N$ 使得对一切 $t \ge N$ 有 $\sum_{k=N}^{\infty} \alpha_k^2 < \frac{\varepsilon}{2\sigma^2}$。对 $t > N$ 反复展开式~\eqref{eq:rm-mse-rec}，并利用 $1 - \alpha \le e^{-\alpha}$ 与 $(1-\alpha_j)^2 \le 1$：
+\[
+  \E[e_t^2]
+  = \E[e_N^2] \prod_{k=N}^{t-1} (1 - \alpha_k)^2
+  + \sigma^2 \sum_{k=N}^{t-1} \alpha_k^2 \prod_{j=k+1}^{t-1}(1 - \alpha_j)^2
+  \le \E[e_N^2] \exp\!\left(-2\sum_{k=N}^{t-1}\alpha_k\right)
+  + \sigma^2 \sum_{k=N}^{\infty} \alpha_k^2.
+\]
+由于 $\sum_{k=N}^\infty \alpha_k = \infty$，第一项当 $t \to \infty$ 时趋于 $0$，故存在 $T > N$ 使得对一切 $t \ge T$ 第一项小于 $\varepsilon/2$，从而 $\E[e_t^2] < \varepsilon$。因此 $\lim_{t \to \infty} \E[(\theta_t - \mu)^2] = 0$。
+\end{proof}
+\end{thmBox}
+
+直观记忆这两条条件堪称毫不费力：\textbf{$\sum \alpha_t = \infty$ 保证步子总长足够大，无论初始猜测离真值多远都能走得到；$\sum \alpha_t^2 < \infty$ 保证步子最终足够小，让每步观测噪声的方差累加起来依然有限，从而稳稳停在真值处}。将此框架推广到贝尔曼算子 $\mathcal{T}^\pi$（它在 $\ell_\infty$ 范数下是 $\gamma$-压缩映射），Jaakkola、Jordan 与 Singh（1994）以及 Tsitsiklis（1994）证明：在表格型表示下，只要每个状态被无限次访问且步长序列 $\alpha_t(s)$ 对每个 $s$ 均满足 Robbins--Monro 条件，TD(0) 便以概率 1 收敛至精确的状态价值函数 $V^\pi$。
+
+\section{无模型控制：动作价值函数与 $\varepsilon$-贪心探索}
+\label{sec:rl-control-q}
+
+学会评估给定策略 $\pi$ 后，我们的终极目标是\textbf{控制（Control）}——在未知环境中找到最优策略 $\pi^*$。回顾广义策略迭代（GPI）的两大交替步骤：策略评估与策略改进。在无模型设定下，两道新障碍随之浮现：
+
+\begin{enumerate}
+  \item \textbf{为什么 $V(s)$ 不够用，必须学习 $Q(s, a)$？} 若只知道状态价值 $V^\pi(s)$，贪心改进需要计算
+  \[
+    \pi'(s) = \argmax_{a \in \mathcal{A}} \sum_{s' \in \mathcal{S}} P(s' \mid s, a)\!\left[R(s, a, s') + \gamma V^\pi(s')\right],
+  \]
+  这再次要求已知模型 $(P, R)$。但如果我们直接缓存并学习\textbf{动作价值函数 $Q(s, a)$}，策略改进就退化为一次纯局部、完全无模型的查表取最大值操作：
+  \[
+    \pi'(s) = \argmax_{a \in \mathcal{A}} Q(s, a).
+  \]
+  \item \textbf{为什么纯粹贪心会困死在局部次优解？} 如果智能体从第一步起就死板地执行 $\argmax_a Q(s,a)$，那么任何从未尝试过、初值为 $0$ 的动作（哪怕真实奖励高达 $+100$），只要当前最优动作的估计值大于 $0$，就将\textbf{永生不被探索}！这正是强化学习最核心的\textbf{探索与利用权衡（Exploration--Exploitation Trade-off）}。
+\end{enumerate}
+
+化解这一矛盾最简洁且久经考验的方案是 \textbf{$\varepsilon$-贪心（$\varepsilon$-Greedy）策略}：对给定动作价值表 $Q$ 和探索率 $\varepsilon \in (0, 1)$，记动作空间大小 $m = |\mathcal{A}|$，则
+\begin{equation}
+  \pi_\varepsilon(a \mid s) =
+  \begin{cases}
+    1 - \varepsilon + \dfrac{\varepsilon}{m}, & \text{若 } a = a^*(s) := \argmax_{a'} Q(s, a'), \\[6pt]
+    \dfrac{\varepsilon}{m}, & \text{否则}.
+  \end{cases}
+  \label{eq:eps-greedy}
+\end{equation}
+凡是对所有 $(s, a)$ 均满足 $\pi(a \mid s) \ge \varepsilon / m$ 的策略，统称为\textbf{$\varepsilon$-软策略（$\varepsilon$-Soft Policy）}。在继续之前，我们必须严格验证一个关键问题：强制保留 $\varepsilon$ 比例的随机探索后，策略改进定理是否依然成立？
+
+\begin{thmBox}
+\begin{theorem}[$\varepsilon$-软策略改进定理]
+\label{thm:eps-soft-imp}
+设 $\pi$ 为任意 $\varepsilon$-软策略，$\pi'$ 是关于 $Q^\pi$ 构造的 $\varepsilon$-贪心策略（即式~\eqref{eq:eps-greedy} 中取 $a^*(s) = \argmax_a Q^\pi(s, a)$）。则对一切状态 $s \in \mathcal{S}$，均有
+\[
+  V^{\pi'}(s) \ge V^\pi(s).
+\]
+\end{theorem}
+\begin{proof}
+对任意状态 $s \in \mathcal{S}$，直接计算在状态 $s$ 改用 $\pi'$ 一步、此后仍遵循 $\pi$ 的期望价值：
+\begin{align*}
+  Q^\pi(s, \pi'(s))
+  &= \sum_{a \in \mathcal{A}} \pi'(a \mid s)\, Q^\pi(s, a) \\
+  &= \frac{\varepsilon}{m} \sum_{a \in \mathcal{A}} Q^\pi(s, a) + (1 - \varepsilon) \max_{a \in \mathcal{A}} Q^\pi(s, a).
+\end{align*}
+因为 $\pi$ 是 $\varepsilon$-软策略，故对每个动作 $a$ 均有 $w(a) := \frac{\pi(a \mid s) - \varepsilon/m}{1 - \varepsilon} \ge 0$，且 $\sum_{a \in \mathcal{A}} w(a) = \frac{1 - \varepsilon}{1 - \varepsilon} = 1$。任何凸组合都不可能超过最大值，于是
+\[
+  \max_{a \in \mathcal{A}} Q^\pi(s, a) \ge \sum_{a \in \mathcal{A}} w(a)\, Q^\pi(s, a)
+  = \frac{1}{1 - \varepsilon}\!\left(\sum_{a \in \mathcal{A}} \pi(a \mid s) Q^\pi(s, a) - \frac{\varepsilon}{m}\sum_{a \in \mathcal{A}} Q^\pi(s, a)\right).
+\]
+将此不等式代回上式，恰好消去 $\frac{\varepsilon}{m}\sum_a Q^\pi(s, a)$，立即得到
+\[
+  Q^\pi(s, \pi'(s)) \ge \sum_{a \in \mathcal{A}} \pi(a \mid s)\, Q^\pi(s, a) = V^\pi(s).
+\]
+随后与经典策略改进定理完全相同地沿贝尔曼期望算子 $\mathcal{T}^{\pi'}$ 递推展开：
+\[
+  V^\pi(s) \le \E_{\pi'}\!\left[r_t + \gamma V^\pi(S_{t+1}) \mid S_t = s\right]
+  \le \E_{\pi'}\!\left[r_t + \gamma r_{t+1} + \gamma^2 V^\pi(S_{t+2}) \mid S_t = s\right]
+  \le \cdots \le V^{\pi'}(s). \qedhere
+\]
+\end{proof}
+\end{thmBox}
+
+然而，若 $\varepsilon$ 永远保持固定正数，策略改进只会收敛到“所有 $\varepsilon$-软策略中的最优者”，而非真正的全局最优确定性策略 $\pi^*$。要兼顾“充分探索”与“最终纯粹最优”，策略序列必须满足 \textbf{GLIE（Greedy in the Limit with Infinite Exploration，无限探索下的极限贪心）} 条件：
+\begin{enumerate}
+  \item 所有状态--动作对都被访问无限多次：$\lim_{k \to \infty} N_k(s, a) = \infty$；
+  \item 策略在极限意义下收敛至贪心策略：$\lim_{k \to \infty} \pi_k(a \mid s) = \mathbf{1}\!\left[a = \argmax_{a'} Q_k(s, a')\right]$。
+\end{enumerate}
+最常见的 GLIE 退火方案是在第 $k$ 个回合令 $\varepsilon_k = 1/k$（因为 $\sum_{k=1}^\infty 1/k = \infty$ 保证每个动作以概率 1 被采样无限次，而 $\lim_{k\to\infty} \varepsilon_k = 0$ 保证最终归于纯粹贪心）。
+
+\section{同策略 SARSA 与异策略 Q-Learning}
+\label{sec:rl-sarsa-q}
+
+现在我们将 TD(0) 的单步自举思想直接搬到动作价值函数 $Q(s, a)$ 上。一个极其微妙的分岔口立刻出现：在当前状态 $s_t$ 执行动作 $a_t$、拿到奖励 $r_t$ 并落入 $s_{t+1}$ 之后，\textbf{构造自举目标时，后继状态 $s_{t+1}$ 的动作究竟应该取“我们接下来实际要做的探索动作 $a_{t+1}$”，还是取“假设自己将来完全理智时的最优动作 $\max_{a'} Q(s_{t+1}, a')$”？}
+
+这两个看似微小的选择，分别催生了强化学习史上最著名的双子星——\textbf{同策略（On-Policy）的 SARSA} 与 \textbf{异策略（Off-Policy）的 Q-Learning}。
+
+\begin{defBox}
+\begin{definition}[SARSA 与 Q-Learning 更新规则]
+设智能体按行为策略 $\mu$（通常取当前 $Q$ 表的 $\varepsilon$-贪心策略 $\pi_\varepsilon$）与环境交互：
+\begin{itemize}
+  \item \textbf{SARSA（同策略 TD 控制）}：在到达 $s_{t+1}$ 后，先由同一策略 $\pi_\varepsilon(\cdot \mid s_{t+1})$ 采样出下一步实际要执行的动作 $a_{t+1}$，利用五元组 $(s_t, a_t, r_t, s_{t+1}, a_{t+1})$ 更新：
+  \begin{equation}
+    Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha_t \!\left[r_t + \gamma Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)\right].
+    \label{eq:sarsa}
+  \end{equation}
+  算法名正是五元组首字母 \texttt{S-A-R-S-A} 的缩写。
+  \item \textbf{Q-Learning（异策略 TD 控制，Watkins, 1989）}：无需预先采样 $a_{t+1}$，直接用后继状态的贪心最大值作为目标更新：
+  \begin{equation}
+    Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha_t \!\left[r_t + \gamma \max_{a' \in \mathcal{A}} Q(s_{t+1}, a') - Q(s_t, a_t)\right].
+    \label{eq:qlearning}
+  \end{equation}
+  随后智能体仍按 $\pi_\varepsilon(\cdot \mid s_{t+1})$ 与环境继续交互。
+\end{itemize}
+对两种算法，若 $s_{t+1}$ 为终止状态，自举项（$\gamma Q$ 或 $\gamma \max Q$）均严格置零。
+\end{definition}
+\end{defBox}
+
+\begin{insightBox}{同策略 vs 异策略的数学实质：逼近的究竟是哪个贝尔曼算子？}
+\begin{itemize}
+  \item \textbf{SARSA（同策略）}：产生数据的行为策略与被评估的目标策略是\textbf{同一个} $\pi_\varepsilon$。在固定 $\varepsilon > 0$ 下，SARSA 逼近的是 $\pi_\varepsilon$ 的\textbf{贝尔曼期望不动点 $Q^{\pi_\varepsilon}$}。这意味着 SARSA 拥有“自知之明”——它在评估每一步的好坏时，已经把“我下一步有 $\varepsilon$ 的概率手滑乱走”这一风险老老实实地计入了账本！
+  \item \textbf{Q-Learning（异策略）}：行为策略是带探索的 $\pi_\varepsilon$，而被学习的目标策略是纯粹贪心的 $\pi_{\mathrm{greedy}}(s) = \argmax_a Q(s, a)$。无论行为策略多么随机（只要覆盖所有状态--动作对），式~\eqref{eq:qlearning} 的期望更新方向始终直指\textbf{贝尔曼最优算子} $(\mathcal{T}^* Q)(s, a) = \E[r + \gamma \max_{a'} Q(s', a')]$！因此 Watkins 与 Dayan（1992）证明：只要每个 $(s, a)$ 被访问无限次且步长满足 Robbins--Monro 条件，\textbf{哪怕行为策略的 $\varepsilon$ 永远不衰减，Q-Learning 依然以概率 1 收敛到精确的最优动作价值 $Q^*$}。
+\end{itemize}
+\end{insightBox}
+
+为了把两者的差异从公式落到直观数字上，不妨亲手算一笔“悬崖边的账”。
+
+\begin{example}[悬崖边单步更新的数值分化]
+设智能体站在悬崖正上方的格子 $s_1$，向右走到 $s_2$（仍在悬崖正上方）获步长惩罚 $r = -1$；而在 $s_2$ 共有 4 个动作：向东（沿悬崖边前行）估值为 $-11$，向北（远离悬崖）估值为 $-15$，向西为 $-13$，而向南一步便坠入悬崖，当前估值为 $Q(s_2, \text{南}) = -100$。取 $\gamma = 1, \varepsilon = 0.1$。
+\begin{itemize}
+  \item \textbf{Q-Learning 看 $s_2$}：它只看最优动作 $\max_{a'} Q(s_2, a') = Q(s_2, \text{东}) = -11$，因此给出目标 $y^{\mathrm{Q}} = -1 + (-11) = \mathbf{-12}$。坠崖风险被 $\max$ 算子彻底屏蔽——因为纯粹贪心策略绝不会主动往南跳！
+  \item \textbf{SARSA 看 $s_2$}：它的下一步动作 $a_{t+1}$ 要从 $\varepsilon$-贪心策略中抽取。有 $0.925$ 的概率选东（$-11$），各有 $0.025$ 的概率选北（$-15$）、西（$-13$）与南（$-100$）！因此 SARSA 目标的期望值为
+  \[
+    \E[y^{\mathrm{SARSA}}] = -1 + \big(0.925(-11) + 0.025(-15) + 0.025(-13) + 0.025(-100)\big) = \mathbf{-14.375}.
+  \]
+\end{itemize}
+这凭空多出来的 $-2.375$ 罚分会在反向回溯中逐格叠加：沿着 10 格长的悬崖边走一趟，每一步都有 $2.5\%$ 概率跌落 $-100$ 的深渊，期望额外代价高达约 $-25$ 分，远不如干脆多绕 4 步路（仅耗 $-4$ 分）走远离悬崖的顶部安全通道！表~\ref{tab:sarsa-vs-q} 系统汇总了两者的结构对比。
+\end{example}
+
+\begin{table}[htbp]
+\centering
+\caption{SARSA 与 Q-Learning 的核心理论与行为对比}
+\label{tab:sarsa-vs-q}
+\small
+\begin{tabularx}{\linewidth}{@{}p{28mm}XX@{}}
+\toprule
+\textbf{对比维度} & \textbf{SARSA（同策略 On-Policy）} & \textbf{Q-Learning（异策略 Off-Policy）} \\
+\midrule
+自举目标 $y_t$ & $r_t + \gamma Q(s_{t+1}, a_{t+1})$，$a_{t+1} \sim \pi_\varepsilon$ & $r_t + \gamma \max_{a'} Q(s_{t+1}, a')$ \\
+逼近算子与不动点 & 贝尔曼期望算子 $\mathcal{T}^{\pi_\varepsilon} \to Q^{\pi_\varepsilon}$ & 贝尔曼最优算子 $\mathcal{T}^* \to Q^*$ \\
+收敛到 $Q^*$ 条件 & 需 GLIE（$\varepsilon_t \to 0$）+ Robbins--Monro & 只需无限访问全部 $(s,a)$ + Robbins--Monro \\
+固定 $\varepsilon$ 下行为 & 主动规避探索失误风险（在线回报更高） & 紧贴理论最优路径（训练期偶发惨痛跌落） \\
+数据复用潜力 & 严格要求当前策略样本，难以直接复用旧数据 & 天然支持经验回放池（直接孕育第 2 章 DQN） \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{最大化偏差与 Double Q-Learning}
+\label{sec:rl-double-q}
+
+Q-Learning 凭借 $\max_{a'} Q(s_{t+1}, a')$ 赢得了异策略收敛到 $Q^*$ 的桂冠，但它暗藏着一个在带噪环境或神经网络近似下极具破坏力的统计缺陷——\textbf{最大化偏差（Maximization Bias / Overestimation Bias）}。
+
+\subsection{Jensen 不等式证明：为何 $\max$ 必然高估价值？}
+
+直觉上，如果你有 10 台期望中奖额完全为 $0$ 的老虎机，但由于有限次试玩存在随机波动，各台机器的经验均值有正有负，此时你挑出“经验均值最高的那一台”并把它的样本均值当作真实收益汇报，这个数字几乎必然显著大于 $0$——你其实是在给\textbf{正向噪声}颁奖。下面的定理把这一直觉写成了无懈可击的数学必然。
+
+\begin{thmBox}
+\begin{theorem}[最大化偏差定理（Jensen 不等式）]
+\label{thm:max-bias}
+设在某状态 $s$ 下，对各动作 $a \in \{1, \dots, K\}$ 的动作价值随机估计为 $\hat{Q}(s, a)$，且满足无偏性 $\E[\hat{Q}(s, a)] = q(s, a)$。则取最大值的期望必然不低于真实最大价值：
+\begin{equation}
+  \E\!\left[\max_{1 \le a \le K} \hat{Q}(s, a)\right] \ge \max_{1 \le a \le K} \E\!\left[\hat{Q}(s, a)\right] = \max_{1 \le a \le K} q(s, a).
+  \label{eq:max-bias}
+\end{equation}
+更进一步，当所有真实价值均为 $0$、且 $\hat{Q}(s, 1), \hat{Q}(s, 2) \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, \sigma^2)$ 时，精确高估偏差为
+\[
+  \E\!\left[\max\!\big(\hat{Q}(s,1), \hat{Q}(s,2)\big)\right] = \frac{\sigma}{\sqrt{\pi}} \approx 0.564\,\sigma > 0.
+\]
+\end{theorem}
+\begin{proof}
+\textbf{初等直接证明}：对任意固定的 $j \in \{1, \dots, K\}$，随机变量间逐样本成立 $\max_{1 \le a \le K} \hat{Q}(s, a) \ge \hat{Q}(s, j)$。对两边取期望，由期望单调性得
+\[
+  \E\!\left[\max_{1 \le a \le K} \hat{Q}(s, a)\right] \ge \E\!\left[\hat{Q}(s, j)\right] = q(s, j).
+\]
+由于左端与指标 $j$ 无关，对右端关于 $j \in \{1, \dots, K\}$ 取最大值，立即得到式~\eqref{eq:max-bias}。（从凸分析视角看，函数 $f(x_1, \dots, x_K) = \max_a x_a$ 是仿射函数的逐点上确界，因而是 $\R^K$ 上的凸函数，故式~\eqref{eq:max-bias} 正是多元 Jensen 不等式 $\E[f(X)] \ge f(\E[X])$ 的特例。）
+
+\textbf{双动作高斯精确算例}：利用恒等式 $\max(X_1, X_2) = \frac{1}{2}(X_1 + X_2 + |X_1 - X_2|)$。令 $D = X_1 - X_2$，因 $X_1, X_2 \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, \sigma^2)$，故 $D \sim \mathcal{N}(0, 2\sigma^2)$。利用对称性直接积分：
+\[
+  \E[\max(X_1, X_2)]
+  = \frac{1}{2}\E[|D|]
+  = \frac{1}{2} \cdot 2 \int_0^{\infty} x \cdot \frac{1}{\sqrt{4\pi\sigma^2}} e^{-x^2/(4\sigma^2)}\,\mathrm{d}x
+  = \frac{1}{2\sigma\sqrt{\pi}} \left[-2\sigma^2 e^{-x^2/(4\sigma^2)}\right]_0^{\infty}
+  = \frac{\sigma}{\sqrt{\pi}}. \qedhere
+\]
+\end{proof}
+\end{thmBox}
+
+当动作数 $K$ 增大时，独立标准正态最大值期望增长速度为 $\Theta(\sqrt{2 \ln K})$！在经典的两状态反例（Sutton \& Barto, Fig. 6.5）中：起点 $A$ 有两个动作——“向右”立即以确定的 $0$ 奖励终止；“向左”零奖励进入状态 $B$，而状态 $B$ 有 $K = 10$ 个动作，每个动作都以 $\mathcal{N}(-0.1, 1^2)$ 的随机奖励终止。显然状态 $B$ 的真实最优价值是 $-0.1 < 0$，“向右”才是绝对最优策略。但 Q-Learning 在 $B$ 中对 10 个带噪估计取 $\max$，算出严重虚高的正估值 $\max_a \hat{Q}(B, a) > 0$，并通过自举将虚假繁荣传回 $Q(A, \text{左})$，导致算法在早期绝大多数时候执迷不悟地往陷阱里走！
+
+\subsection{Double Q-Learning：解耦“动作选择”与“价值评估”}
+
+最大化偏差的病根在于\textbf{用同一份带噪数据既做“裁判选冠军”又做“会计发奖金”}：同一个 $\hat{Q}$ 既决定 $a^* = \argmax_{a'} \hat{Q}(s', a')$，又提供估值 $\hat{Q}(s', a^*)$。Hasselt（2010）提出的 \textbf{Double Q-Learning} 用外科手术般的精准将这两项职能彻底拆开：
+
+\begin{defBox}
+\begin{definition}[Double Q-Learning 更新算法]
+同时维护两张独立初始化、用互不重叠样本更新的动作价值表 $Q_A$ 与 $Q_B$。行为策略基于两表之和 $Q_A(s, \cdot) + Q_B(s, \cdot)$ 执行 $\varepsilon$-贪心。每观测到单步转移 $(s_t, a_t, r_t, s_{t+1})$，以 $0.5$ 概率随机抛硬币选择其中一张表更新：
+\begin{itemize}
+  \item \textbf{更新 $Q_A$}：用 $Q_A$ \emph{选择}后继最优动作，用 $Q_B$ \emph{评估}该动作的价值：
+  \begin{equation}
+    a^* = \argmax_{a' \in \mathcal{A}} Q_A(s_{t+1}, a'), \qquad
+    Q_A(s_t, a_t) \leftarrow Q_A(s_t, a_t) + \alpha_t \!\left[r_t + \gamma Q_B(s_{t+1}, a^*) - Q_A(s_t, a_t)\right].
+    \label{eq:double-q-a}
+  \end{equation}
+  \item \textbf{更新 $Q_B$}：完全对称地用 $Q_B$ 选择动作、用 $Q_A$ 评估价值：
+  \begin{equation}
+    b^* = \argmax_{a' \in \mathcal{A}} Q_B(s_{t+1}, a'), \qquad
+    Q_B(s_t, a_t) \leftarrow Q_B(s_t, a_t) + \alpha_t \!\left[r_t + \gamma Q_A(s_{t+1}, b^*) - Q_B(s_t, a_t)\right].
+    \label{eq:double-q-b}
+  \end{equation}
+\end{itemize}
+\end{definition}
+\end{defBox}
+
+为何这样就能治愈正向高估？因为 $Q_A$ 与 $Q_B$ 使用独立样本更新，若 $a^*$ 取自 $\argmax_{a'} Q_A(s', a')$，则给定 $Q_A$ 时独立估计表 $Q_B$ 对 $a^*$ 完全无偏：
+\[
+  \E\!\left[Q_B(s', a^*) \mid Q_A\right] = q(s', a^*) \le \max_{a' \in \mathcal{A}} q(s', a').
+\]
+再对 $Q_A$ 取全期望，立刻有 $\E[Q_B(s', a^*)] = \E[q(s', a^*)] \le \max_{a'} q(s', a')$！正向高估偏差彻底消失（取而代之的是在动作价值相近时轻微、无害的保守低估，不会引发自举爆炸）。这一思想将在第~\ref{ch:dqn-pg-ac} 章无缝升级为深度强化学习标配 \textbf{Double DQN}。
+
+\section{实测验证：悬崖行走中的 SARSA 与 Q-Learning 分化}
+\label{sec:exp-cliff}
+
+现在我们在强化学习最经典的检验场——\textbf{$4 \times 12$ 悬崖行走（CliffWalking）}网格世界中，亲自验证同策略与异策略的戏剧性分化。环境配置见脚本 \texttt{code/\allowbreak vol6\_experiments.py} 中的 \texttt{exp1\_cliff\_\allowbreak sarsa\_vs\_q()}：
+\begin{itemize}
+  \item 网格高 $H=4$、宽 $W=12$，起点在左下角 $S = (3, 0)$，终点在右下角 $G = (3, 11)$；底部中间 10 格 $(3, 1)$ 至 $(3, 10)$ 为万丈悬崖。
+  \item 动作空间 $\mathcal{A} = \{\text{上}, \text{下}, \text{左}, \text{右}\}$。普通每走一步（含抵达终点）获奖励 $-1.0$；一旦踩入悬崖格，立刻承受 $-100.0$ 巨额罚分并被送回起点 $(3, 0)$（回合继续，\texttt{done=False}）；到达终点 $(3, 11)$ 则回合结束（\texttt{done=True}）。
+  \item 超参数：$\gamma = 1.0, \alpha = 0.5, \varepsilon = 0.1$，每回合最多 200 步，共训练 500 回合，跨 20 组随机种子取平均。
+\end{itemize}
+
+\begin{lstlisting}[caption={SARSA 与 Q-Learning 在悬崖行走中的核心对比循环（摘自 \texttt{vol6\_experiments.py}）}]
+for ep in range(episodes):
+    s = 3 * W + 0
+    a = pick(s)  # eps-greedy(eps=0.1)
+    tot = 0.0
+    for _ in range(200):
+        ns, rew, done = step(s, a)
+        tot += rew
+        if mode == "sarsa":
+            na = pick(ns)  # 同策略：先采样下一步真实动作 na
+            target = rew + (0.0 if done else gamma * Q[ns, na])
+            Q[s, a] += alpha * (target - Q[s, a])
+            s, a = ns, na
+        else:              # 异策略 Q-Learning：用 max 构造最优目标
+            target = rew + (0.0 if done else gamma * np.max(Q[ns]))
+            Q[s, a] += alpha * (target - Q[s, a])
+            s = ns
+            a = pick(s)
+        if done:
+            break
+\end{lstlisting}
+
+图~\ref{fig:cliff-grid} 画出了两种算法各自学会的典型路径，而图~\ref{fig:cliff-curve} 直接读取实测记录文件 \texttt{data/rl\_cliff.csv}（每 10 回合滑动平均、20 种子均值），完整呈现了在线训练曲线与离线贪心评估的惊人反差：
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[scale=0.92]
+  % Grid cells
+  \foreach \r in {0,1,2,3} {
+    \foreach \c in {0,1,...,11} {
+      \draw[tealLine, thin] (\c, 3-\r) rectangle (\c+1, 4-\r);
+    }
+  }
+  % Cliff cells (row 3, col 1..10 -> y=0..1)
+  \fill[ochreLight] (1, 0) rectangle (11, 1);
+  \draw[ochre, thick] (1, 0) rectangle (11, 1);
+  \node[font=\sffamily\bfseries\small, color=ochre] at (6, 0.5) {悬崖区域（跌落奖励 $-100$，立即重置回起点 $S$）};
+
+  % Start & Goal
+  \fill[tealLight] (0, 0) rectangle (1, 1);
+  \draw[tealDark, thick] (0, 0) rectangle (1, 1);
+  \node[font=\sffamily\bfseries\normalsize, color=tealDark] at (0.5, 0.5) {$S$};
+
+  \fill[navyLight] (11, 0) rectangle (12, 1);
+  \draw[navy, thick] (11, 0) rectangle (12, 1);
+  \node[font=\sffamily\bfseries\normalsize, color=navy] at (11.5, 0.5) {$G$};
+
+  % SARSA Safe Path (top detour)
+  \draw[teal, line width=2.0pt, -{Stealth[length=2.6mm]}, rounded corners=4pt]
+    (0.35, 0.75) -- (0.35, 3.55) -- (11.65, 3.55) -- (11.65, 0.85);
+  \node[font=\sffamily\bfseries\scriptsize, color=tealDark, fill=white, inner sep=1.8pt]
+    at (6.0, 3.55) {SARSA 安全路径（远离悬崖，步长 $\ge 17$，在线均分 $-26.22$）};
+
+  % Q-Learning Optimal Path (cliff edge)
+  \draw[ochre, line width=2.0pt, dashed, -{Stealth[length=2.6mm]}, rounded corners=3pt]
+    (0.68, 0.75) -- (0.68, 1.48) -- (11.32, 1.48) -- (11.32, 0.85);
+  \node[font=\sffamily\bfseries\scriptsize, color=ochre, fill=white, inner sep=1.8pt]
+    at (6.0, 1.88) {Q-Learning 最优路径（紧贴崖边，精确 13 步，贪心均分 $-13.0$）};
+
+  % Row indices
+  \foreach \r in {0,1,2,3} {
+    \node[font=\scriptsize, color=slate] at (-0.35, 3.5-\r) {行 \r};
+  }
+\end{tikzpicture}}
+\caption{$4 \times 12$ 悬崖行走（CliffWalking）路径分化示意图。SARSA 因在更新中计入 $\varepsilon=0.1$ 探索跌崖的代价，学会沿着顶行绕远的安全路线；Q-Learning 直接逼近最优动作价值 $Q^*$，学会紧贴悬崖边缘的 13 步最短路径。}
+\label{fig:cliff-grid}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.90\linewidth, height=6.4cm,
+    xlabel={训练回合数（Episode）},
+    ylabel={在线回合总回报（10 回合均值，20 种子）},
+    xmin=0, xmax=500, ymin=-110, ymax=-10,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.98,0.12)}, anchor=south east, font=\scriptsize, fill=white, draw=tealLine},
+    clip=true
+  ]
+    \addplot[teal, very thick, mark=*, mark size=1.6pt]
+      table[x=ep, y=sarsa, col sep=comma]{data/rl_cliff.csv};
+    \addlegendentry{SARSA（后 100 轮在线均值 $-26.22$，贪心评估 $-23.9$）}
+
+    \addplot[ochre, very thick, dashed, mark=square*, mark size=1.5pt]
+      table[x=ep, y=qlearning, col sep=comma]{data/rl_cliff.csv};
+    \addlegendentry{Q-Learning（后 100 轮在线均值 $-51.90$，贪心评估 $-13.0$）}
+
+    \draw[dotted, navy, thick] (axis cs:0, -13.0) -- (axis cs:500, -13.0);
+    \node[font=\scriptsize\sffamily, color=navy, anchor=north east] at (axis cs:495, -13.5) {理论最优回报 $-13.0$};
+  \end{axis}
+\end{tikzpicture}
+\caption{悬崖行走实测在线学习曲线（读取自 \texttt{data/rl\_cliff.csv}；注：首点 \texttt{ep=10} 处两者分别从 $-310.08$ 与 $-300.46$ 快速爬升，纵轴截断于 $[-110, -10]$ 以清晰展示稳态分化）。在线交互时 SARSA 远胜 Q-Learning，而关掉探索做贪心评估时 Q-Learning 拿下精确理论最优 $-13.0$。}
+\label{fig:cliff-curve}
+\end{figure}
+
+实测数字揭示了教科书级、却在工程选型中常被误读的深刻规律：
+\begin{enumerate}
+  \item \textbf{在线训练期（带 $\varepsilon = 0.1$ 探索）}：前 10 回合两者都在反复试错摔崖（\texttt{ep=10} 均分分别为 $-310.08$ 与 $-300.46$）。但到第 90 回合起分化彻底定型：最后 100 回合的平均在线回报，\textbf{SARSA 稳定在 $-26.22$}，而 \textbf{Q-Learning 跌落在 $-51.90$}！原因一目了然——Q-Learning 坚持贴着悬崖走，在 10 步紧邻深渊的行走中，每步都有 $2.5\%$ 的概率因 $\varepsilon$-探索失足跌落 $-100$；SARSA 则自觉退守远离悬崖的上方安全走廊，几乎不再坠崖。
+  \item \textbf{离线部署期（关掉探索，纯贪心 $\argmax_a Q(s, a)$）}：战局瞬间逆转！\textbf{Q-Learning 的贪心评估回报在全部 20 组种子上均精准达到理论最优值 $-13.0$}（上 1 步 $+$ 右 11 步 $+$ 下 1 步），而 \textbf{SARSA 的贪心评估均值仅为 $-23.9$}（绕顶行安全路至少耗 17 步，且在恒定高步长 $\alpha=0.5$ 与不衰减 $\varepsilon=0.1$ 下部分种子在上方安全区还带有迂回噪声）。
+\end{enumerate}
+
+由此可以提炼出一条极具实战价值的选型原则：\textbf{如果训练过程本身必须在昂贵的真实物理世界（如真机机器人、在线推荐/医疗策略）中承担探索代价，同策略的保守安全特性（SARSA 类）至关重要；如果允许在无成本模拟器中尽情摔跤、最终只把学成的最优策略部署上线，则异策略的 Q-Learning 更具优势。}
+
+\begin{failBox}{表格型 TD/Q-Learning 实现中最隐蔽的两大 Bug}
+\begin{enumerate}
+  \item \textbf{忘记屏蔽终止状态的自举项}：在上面的代码中，\texttt{target = rew + (0.0 if done else gamma * np.max(Q[ns]))} 里的条件掩码 \texttt{0.0 if done else ...} 绝非可有可无！许多实现会漏写 \texttt{if done}，把终止状态 \texttt{ns} 对应的 $Q[\text{ns}]$ 也加进目标。虽然初始全零时看似侥幸无事，但一旦使用函数逼近（神经网络对终止态输出非零值）或环境将回合结束时的状态重置为起点，漏掉终止掩码会直接制造虚假的永动机循环，导致 $Q$ 值迅速发散。
+  \item \textbf{探索率 $\varepsilon$ 设得过小或永不退火}：若 $\varepsilon$ 从一开始就设得极小（如 $0.01$），智能体在尚未找到终点前容易把少数负奖励动作越压越低，或在多臂环境中过早锁死于次优路径；反之，若在需要高在线回报的同策略任务中一直保持大 $\varepsilon$ 不衰减，即便已收敛到最优安全路线，也会持续支付不必要的探索税。标准工程实践是采用线性或指数退火（如在训练前 80\% 步数内从 $\varepsilon_0 = 1.0$ 平滑降至 $\varepsilon_{\min} = 0.05$ 或 $0.01$）。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{$n$-步 TD、资格迹 TD($\lambda$) 与期望 SARSA}
+MC（完整回报，零偏高方差）与 TD(0)（单步自举，有偏低方差）并非非此即彼的二元对立，而是同一条连续谱系的两个端点！
+\begin{itemize}
+  \item \textbf{$n$-步时序差分（$n$-Step TD）}：向前真实走 $n$ 步再自举，定义 $n$-步回报
+  \[
+    G_t^{(n)} = r_t + \gamma r_{t+1} + \cdots + \gamma^{n-1} r_{t+n-1} + \gamma^n V(s_{t+n}).
+  \]
+  当 $n=1$ 时退化为 TD(0)；当 $n \to \infty$ 时退化为 MC。实证表明，在绝大多数任务中，中等步数（如 $n \in [4, 16]$）往往同时击败 $n=1$ 与 $n=\infty$。
+  \item \textbf{TD($\lambda$) 与资格迹（Eligibility Traces）}：与其硬选某个固定的 $n$，不如对所有 $n$-步回报做几何加权平均，定义\textbf{$\lambda$-回报（前向视角）}：
+  \[
+    G_t^\lambda = (1 - \lambda) \sum_{n=1}^{\infty} \lambda^{n-1} G_t^{(n)}, \qquad \lambda \in [0, 1].
+  \]
+  在工程实现中，它可通过\textbf{资格迹（后向视角）}每步在线增量完成：维护迹向量 $e_t(s) = \gamma \lambda e_{t-1}(s) + \mathbf{1}[s = s_t]$，并用当前单步误差 $\delta_t$ 同时更新所有近期访问过的状态：$V(s) \leftarrow V(s) + \alpha \delta_t e_t(s)$。这正是第~\ref{ch:dqn-pg-ac} 章广义优势估计 GAE($\lambda$) 的直系血亲！
+  \item \textbf{期望 SARSA（Expected SARSA）}：将 SARSA 目标中的随机采样项 $Q(s_{t+1}, a_{t+1})$ 替换为对当前策略 $\pi$ 的精确期望
+  \[
+    y_t^{\mathrm{ExpSARSA}} = r_t + \gamma \sum_{a' \in \mathcal{A}} \pi(a' \mid s_{t+1}) Q(s_{t+1}, a').
+  \]
+  它彻底消除了因 $a_{t+1}$ 随机抽样引入的额外方差，因而允许使用更大步长 $\alpha$ 且更稳定；更美妙的是，当目标策略 $\pi$ 取贪心策略时，期望 SARSA 直接退化为 Q-Learning——由此统一了同策略与异策略的表格控制算法。
+\end{itemize}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章完成了从“已知模型动态规划”到“无模型交互学习”的决定性跨越：
+\begin{itemize}
+  \item \textbf{评估侧}：蒙特卡洛（MC）用完整回报给出无偏但高方差的估计；TD(0) 用单步自举 $r_t + \gamma V(s_{t+1})$ 大幅压低方差，并能利用马尔可夫结构实现在线持续学习；Robbins--Monro 条件（$\sum \alpha_t = \infty, \sum \alpha_t^2 < \infty$）为一切随机逼近算法的收敛托底。
+  \item \textbf{控制侧}：无模型决策要求直接学习动作价值 $Q(s, a)$，并借助 $\varepsilon$-贪心与 GLIE 平衡探索与利用；SARSA 诚实评估包含探索风险的当前策略，Q-Learning 则异策略直指最优价值 $Q^*$，两者在悬崖行走中完美演绎了“在线安全（$-26.22$）”与“贪心最优（$-13.0$）”的权衡；Double Q-Learning 则通过解耦选择与评估，根除了 Jensen 不等式注定的正向高估偏差。
+\end{itemize}
+
+然而，本章的所有算法都建立在一张有限大小的查表 $Q[s, a]$ 之上。当状态变成 $84 \times 84 \times 4$ 的游戏像素画面、或是机械臂的连续关节角度与速度向量时，查表彻底失效。下一章，我们将把神经网络引入强化学习，直面价值近似中的“致命三元组”与 DQN 稳定化技术，并推导另一条通往现代大模型后训练的康庄大道——\textbf{策略梯度定理与 Actor-Critic}。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{巩固 MC/TD 更新公式、SARSA 与 Q-Learning 差异}
+
+\begin{enumerate}
+  \item[\textbf{6.1.1}] \textbf{单条轨迹的 MC 与 TD(0) 逐步手算}：考虑含状态 $\{s_1, s_2, \mathsf{T}\}$ 的回合制任务，初值 $V(s_1) = 0, V(s_2) = 0$，折扣因子 $\gamma = 0.9$，固定步长 $\alpha = 0.5$。观测到第一条回合：
+  \[
+    s_1 \xrightarrow{r=2} s_2 \xrightarrow{r=4} \mathsf{T}.
+  \]
+  \begin{enumerate}
+    \item 分别计算该回合结束后，首次访问 MC（用恒定步长 $\alpha=0.5$）与 TD(0)（按时间步在线更新）给出的新价值表 $V(s_1), V(s_2)$。
+    \item 若紧接着观测到完全相同的第二条回合，再次计算 TD(0) 的更新结果，观察奖励信息是如何沿时间逆向“逐回合传导”给 $s_1$ 的。
+  \end{enumerate}
+  \exHint{注意 TD(0) 在处理第 1 步 $s_1 \to s_2$ 时，$V(s_2)$ 尚未被第 2 步更新，仍为初值 $0$；到第 2 条回合时，$V(s_2)$ 的非零信息才第一次通过自举传给 $V(s_1)$。}
+
+  \item[\textbf{6.1.2}] \textbf{SARSA、Q-Learning 与期望 SARSA 单步目标对比}：观测到转移 $(s_t, a_t, r_t, s_{t+1}) = (s_1, \text{右}, -1, s_2)$；其中状态 $s_2$ 含 3 个动作，当前表值为 $Q(s_2, a_1) = 10$、$Q(s_2, a_2) = 2$、$Q(s_2, a_3) = -20$，采用 $\varepsilon = 0.15$ 的 $\varepsilon$-贪心策略，$\gamma = 0.9$。
+  \begin{enumerate}
+    \item 分别写出 Q-Learning 目标、期望 SARSA 目标的精确数值；
+    \item 写出 SARSA 目标的可能取值分布，并计算其期望与方差。
+  \end{enumerate}
+  \exHint{由式~\eqref{eq:eps-greedy}，$m=3$ 时最优动作 $a_1$ 概率为 $1 - 0.15 + 0.05 = 0.90$，另两个动作各为 $0.05$；验证 SARSA 目标的期望恰好等于期望 SARSA 目标，而方差严格为正。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与统计分析}{深入掌握 Robbins--Monro、最大化偏差与无偏性证明}
+
+\begin{enumerate}
+  \item[\textbf{6.1.3}] \textbf{Robbins--Monro 步长家族的边界检验}：考虑递减步长序列 $\alpha_t = (t + 1)^{-p}$（$t \ge 0$）。
+  \begin{enumerate}
+    \item 证明当且仅当 $\frac{1}{2} < p \le 1$ 时，$\{\alpha_t\}$ 同时满足 Robbins--Monro 条件~\eqref{eq:rm-cond}。
+    \item 对标量常值均值估计 $\theta_{t+1} = \theta_t + \alpha(\mu + \xi_t - \theta_t)$，若采用\textbf{固定常数步长} $\alpha \in (0, 1)$（不满足 $\sum \alpha_t^2 < \infty$），求 $\lim_{t \to \infty} \E[(\theta_t - \mu)^2]$ 的精确闭合表达式，并解释为何它在非平稳环境中反而受青睐。
+  \end{enumerate}
+  \exHint{(b) 中对式~\eqref{eq:rm-mse-rec} 取极限 $v_\infty = (1-\alpha)^2 v_\infty + \alpha^2 \sigma^2$，解得稳态均方误差 $v_\infty = \frac{\alpha}{2-\alpha}\sigma^2$。}
+
+  \item[\textbf{6.1.4}] \textbf{均匀噪声下的最大化偏差与 Double Q 对比}：设状态 $s$ 下有 $K$ 个动作，其真实价值全为 $0$，但估计值独立同分布于均匀分布 $\hat{Q}(s, a) \sim \mathrm{Uniform}(-1, 1)$。
+  \begin{enumerate}
+    \item 计算单表最大值的精确期望 $\E[\max_{1 \le a \le K} \hat{Q}(s, a)]$（以 $K$ 表示），并讨论 $K \to \infty$ 时的极限。
+    \item 若按 Double Q-Learning 维护两组独立同分布于 $\mathrm{Uniform}(-1, 1)$ 的估值表 $Q_A, Q_B$，试求期望 $\E\big[Q_B(s, \argmax_a Q_A(s, a))\big]$。
+  \end{enumerate}
+  \exHint{利用最大值累积分布函数 $F_{\max}(x) = \big(\frac{x+1}{2}\big)^K$（$x \in [-1, 1]$）求导得密度函数并积分，结果应为 $\frac{K-1}{K+1}$；而独立评估的期望恒为 $0$。}
+\end{enumerate}
+
+\exTier{C 层：算法构造与反例辨析}{辨识环境建模假设、探索退火与异策略边界}
+
+\begin{enumerate}
+  \item[\textbf{6.1.5}] \textbf{批量 MC 与批量 TD(0) 的非马尔可夫反例}：在例~\ref{ex:batch-mc-td} 中我们看到，当环境满足马尔可夫性时，批量 TD(0) 给出比批量 MC 更合理的估计 $V(A) = 0.75$。请构造一个\textbf{违反马尔可夫性}（即 $B$ 的未来奖励实际上取决于是否经由 $A$ 到达 $B$）的隐状态过程，使得两条数据生成机制完全吻合例~\ref{ex:batch-mc-td} 的 8 条观测，但此时批量 MC 的答案 $V(A) = 0$ 才是准确的，而 TD(0) 会系统性出错。
+  \exHint{设真实状态是“是否携带标记”，从 $A$ 到达 $B$ 时必然触发“损坏标记”导致之后必得 $0$ 分，而直接生于 $B$ 的轨迹有 $6/7$ 概率得 $1$ 分；观测器无法区分两种 $B$ 时，马尔可夫假设破裂。}
+
+  \item[\textbf{6.1.6}] \textbf{GLIE 与步长耦合的探索陷阱}：某同学在实现 SARSA 时，为了加快收敛，将探索率设为指数衰减 $\varepsilon_k = 0.5^k$（$k=1,2,\dots$ 为回合数）。请利用 Borel--Cantelli 引理说明，为何这种指数衰减探索率\textbf{违反 GLIE 条件}，会导致算法以正概率永远遗漏某个未探索过的最优动作。
+  \exHint{因 $\sum_{k=1}^\infty 0.5^k = 1 < \infty$，若定义事件 $E_k = \{\text{第 } k \text{ 回合在某状态下发生随机探索}\}$，由第一 Borel--Cantelli 引理知，以概率 1 只有有限多个 $E_k$ 会发生。}
+\end{enumerate}
+
+\exTier{D 层：编程实战与前沿桥接}{复现 Double Q 抑制高估并向函数逼近过渡}
+
+\begin{enumerate}
+  \item[\textbf{6.1.7}] \textbf{编程实验：在悬崖行走与双状态带噪 MDP 上对比三种表格算法}：基于 \texttt{code/vol6\_experiments.py} 中的 \texttt{exp1\_cliff\_sarsa\_vs\_q()}，请完成以下两项扩展：
+  \begin{enumerate}
+    \item 在悬崖行走中实现 \textbf{Expected SARSA}，分别测试 $\alpha \in \{0.1, 0.5, 0.9\}$ 下的后 100 轮在线平均回报，验证它在高步长 $\alpha=0.9$ 下为何比标准 SARSA 更稳健；
+    \item 编写 Sutton--Barto 的双状态 $A/B$（状态 $B$ 含 $K=10$ 个奖励服从 $\mathcal{N}(-0.1, 1)$ 的动作）测试环境，比较标准 Q-Learning 与 Double Q-Learning 在前 300 回合中选择“向左”动作的比例曲线。
+  \end{enumerate}
+  \exHint{在双状态实验中，Q-Learning 在前 50 回合选“向左”的比例通常会飙升至 $60\%$ 以上，而 Double Q-Learning 会稳定维持在 $50\%$ 以下并迅速逼近最优探索下限 $\varepsilon/2$。}
+
+\par\pagebreak[4]
+  \item[\textbf{6.1.8}] \textbf{前瞻思考：从查表走向线性逼近的第一个裂缝}：假设状态空间过大，我们用线性函数 $V_w(s) = w^\top \phi(s)$ 逼近价值函数，并仿照 TD(0) 写出所谓\textbf{半梯度 TD(0)（Semi-Gradient TD(0)）}更新：
+  \[
+    w \leftarrow w + \alpha \!\left[r_t + \gamma V_w(s_{t+1}) - V_w(s_t)\right] \nabla_w V_w(s_t).
+  \]
+  请指出：为什么上式不是最小化均方贝尔曼误差 $\frac{1}{2}\big(r_t + \gamma V_w(s_{t+1}) - V_w(s_t)\big)^2$ 的\emph{真实梯度}？若对目标项 $V_w(s_{t+1})$ 也求梯度（即全残差梯度），会多出哪一项？这一观察如何预示第~\ref{ch:dqn-pg-ac} 章的“目标网络”与“致命三元组”？
+  \exHint{真实梯度对整个平方项求导会产生 $\nabla_w V_w(s_t) - \gamma \nabla_w V_w(s_{t+1})$；半梯度法刻意把 $V_w(s_{t+1})$ 当作常量截断梯度（在 PyTorch 中即 \texttt{.detach()}），这在异策略与非线性近似结合时会打破压缩映射保证。}
+\end{enumerate}

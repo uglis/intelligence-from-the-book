@@ -1,0 +1,1285 @@
+% !TeX root = ../main.tex
+\renewcommand{\chapWatermarkNum}{\thechapter}
+\ctexset{chapter={name={附录\ ,}, number=\Alph{chapter}}}
+\renewcommand{\chaptermark}[1]{\markboth{附录 \thechapter\quad #1}{}}
+\chapter{全卷 48 道分层习题完整精解}
+\label{app:solutions}
+\chapEpigraph{我们只能看到眼前很短的距离，但我们已经能看见那里有许多需要去做的工作。}{艾伦·图灵（Alan M. Turing），《计算机器与智能》（1950）}
+
+\begin{chapIntro}{本附录使用建议}
+本附录收录第 1--6 章全部 48 道分层习题（1.1--6.8）的完整解答，所有算术推演、算法追踪与代码基准均经独立 Python 脚本交叉验算：
+\begin{itemize}
+  \item \textbf{A 层（基础概念与复杂度核对）}：给出明确正误判定、闭式估算及最小显式反例；
+  \item \textbf{B 层（手工推演与算法追踪）}：保留精确分数、四位小数及完整队列/窗口/方程组追踪表；
+  \item \textbf{C 层（理论证明与反例构造）}：给出零跳步的严格数学证明与构造性反例验证；
+  \item \textbf{D 层（代码实现与实验自检）}：给出核心算法实现片段、排错要点以及固定随机种子下的实测数值自检基准。
+\end{itemize}
+\end{chapIntro}
+
+% =========================================================================
+\section{第 1 章习题精解（1.1--1.8）}
+% =========================================================================
+
+\subsection*{习题 1.1\quad 四种无信息搜索性质与 IDS 节点开销估算}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{完备性与最优性判定}（树搜索版，$b=4<\infty$，所有步代价均为 $1$，图含环路）：
+  \begin{itemize}
+    \item \textbf{BFS}：\textbf{完备且最优}。分支因子有限保证按层展开必在深度 $d=6$ 触达目标；等权边保证最浅解即代价最小解。
+    \item \textbf{DFS（树搜索）}：\textbf{既不完备也不最优}。由于状态图含环路且树搜索无闭集判重，DFS 可能在某条环路分支中无限深入而永不回溯；即便偶然碰到目标，也可能落入远深于 $d=6$ 的次优路径。
+    \item \textbf{IDS}：\textbf{完备且最优}。每一轮深度受限搜索（$\ell = 0,1,\dots,6$）在到达深度上限 $\ell$ 时强制回溯，因此绝不会被环路困死；首次发现目标必在最浅深度 $\ell = d = 6$，结合等权条件即保证最优。
+    \item \textbf{UCS}：\textbf{完备且最优}。每步代价均严格为正（$\varepsilon = 1 > 0$）且分支因子有限，按累计代价 $g(n)$ 从最小堆弹出等价于等权情形下的逐层扩展，必返回代价最小的最优解。
+  \end{itemize}
+  \item \textbf{IDS 相比 BFS 多生成的节点比例估算}：
+  由式~\eqref{eq:ids-nodes}，BFS 生成至深度 $d$ 的节点数为
+  \[
+    N_{\text{BFS}}(b, d) = \sum_{k=0}^{d} b^k = \frac{b^{d+1}-1}{b-1} \approx \frac{b}{b-1}\, b^d,
+  \]
+  而 IDS 生成的总节点数为
+  \[
+    N_{\text{IDS}}(b, d) = \sum_{k=0}^{d} (d+1-k)\, b^k \approx \frac{b^2}{(b-1)^2}\, b^d.
+  \]
+  两者渐近比值为 $\frac{N_{\text{IDS}}}{N_{\text{BFS}}} \approx \frac{b}{b-1} = \frac{4}{3} \approx 1.3333$，因此 IDS 相比 BFS 多生成的节点比例约为
+  \[
+    \frac{b}{b-1} - 1 = \frac{1}{b-1} = \frac{1}{3} \approx \mathbf{33.3\%}.
+  \]
+  \textbf{精确核验}：将 $b=4,\, d=6$ 直接代入精确求和式，得 $N_{\text{BFS}}(4,6) = 5{,}461$，$N_{\text{IDS}}(4,6) = 7{,}279$，精确超出比例为 $(7279 - 5461)/5461 = 1818/5461 \approx \mathbf{33.29\%}$，与渐近估计 $33.3\%$ 吻合至小数点后一位。
+\end{enumerate}
+
+\subsection*{习题 1.2\quad 无信息搜索与启发函数正误辨析}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{错误。} BFS 仅保证找到\textbf{步数最少}的解，而不保证边权总和最小。\textbf{最小反例}：3 节点有向图 $S \xrightarrow{10} G$ 与 $S \xrightarrow{1} A \xrightarrow{1} G$，所有边权严格为正，但 BFS 在第 1 层即找到代价为 $10$ 的路径 $S\to G$，错失总代价为 $2$ 的最优路径 $S\to A\to G$。
+  \item \textbf{错误。} 在带权图 UCS 中，目标状态首次被生成入队时可能走的是一条高代价直连边，尚未从优先队列弹出的较短前缀路径可能经由其他节点以更低总代价抵达目标。\textbf{最小反例}同（a）：展开 $S$ 时同时生成 $G\,(g=10)$ 与 $A\,(g=1)$，若入队即终止会误返回代价 $10$。只有当目标节点\textbf{从堆顶弹出}时才能保证最优。
+  \item \textbf{正确。} 对任意状态 $n$，真实剩余代价 $h^*(n) \ge 0$，故 $0 \le h(n)=0 \le h^*(n)$（满足可采纳性，且 $h(G)=0$）；对任意非负权边 $(u, v)$，恒有 $h(u)=0 \le c(u,v) + 0 = c(u,v) + h(v)$（满足一致性）。事实上 $h\equiv 0$ 时 A* 退化为 UCS。
+  \item \textbf{错误。} 两个可采纳启发式之和可能高估真实剩余代价。\textbf{最小反例}：设某状态 $S$ 的真实最短距离 $h^*(S)=5$，取 $h_1(n) = h_2(n) = h^*(n)$（显然二者均可采纳），则 $h(S) = h_1(S)+h_2(S) = 10 > 5 = h^*(S)$，违反可采纳性。保持可采纳的通用组合方式应取逐点最大值 $\max\{h_1, h_2\}$（仅当子问题完全不交时才允许叠加）。
+\end{enumerate}
+
+\subsection*{习题 1.3\quad 5 节点带权图一致性检验与图搜索 A* 手工追踪}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{一致性检验}：已知 $h(G)=0$，逐一核验全部 7 条有向边的三角不等式 $h(u) \le c(u,v) + h(v)$：
+  \begin{align*}
+    S\to A:\;& 6 \le 1 + 5 = 6\;\checkmark, &
+    S\to B:\;& 6 \le 4 + 3 = 7\;\checkmark, &
+    A\to B:\;& 5 \le 2 + 3 = 5\;\checkmark, \\
+    A\to C:\;& 5 \le 5 + 2 = 7\;\checkmark, &
+    B\to C:\;& 3 \le 1 + 2 = 3\;\checkmark, &
+    C\to G:\;& 2 \le 3 + 0 = 3\;\checkmark, \\
+    B\to G:\;& 3 \le 6 + 0 = 6\;\checkmark.
+  \end{align*}
+  所有边均严格满足三角不等式且 $h(G)=0$，因此\textbf{$h$ 是一致启发函数}（从而也必然可采纳）。
+  \item \textbf{图搜索 A* 逐步追踪}（$f$ 相同时按字母序弹出；优先队列以 $n(g{+}h{=}f)$ 表示，下标“旧”表示已被更优路径松弛的过时条目）：
+
+  \begin{center}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}c c c c X@{}}
+  \toprule
+  \textbf{步序} & \textbf{弹出节点} & $(g, h, f)$ & \textbf{松弛与入队动作} & \textbf{操作后 \texttt{Open} 与 \texttt{Closed}} \\
+  \midrule
+  0 & --- & --- & 初始化起点 $S$ & \texttt{Open}: $\{S(0{+}6{=}6)\}$;\; \texttt{Closed}: $\varnothing$ \\
+  1 & $S$ & $(0,6,6)$ & $A(1{+}5{=}6),\; B(4{+}3{=}7)$ 入队 & \texttt{Open}: $\{A(6),\, B(7)\}$;\; \texttt{Closed}: $\{S\}$ \\
+  2 & $A$ & $(1,5,6)$ & 松弛 $B$: $g=3<4\Rightarrow B(3{+}3{=}6)$；$C(6{+}2{=}8)$ 入队 & \texttt{Open}: $\{B(6),\, B_{\text{旧}}(7),\, C(8)\}$;\; \texttt{Closed}: $\{S,A\}$ \\
+  3 & $B$ & $(3,3,6)$ & 松弛 $C$: $g=4<6\Rightarrow C(4{+}2{=}6)$；$G(9{+}0{=}9)$ 入队 & \texttt{Open}: $\{C(6),\, B_{\text{旧}}(7),\, C_{\text{旧}}(8),\, G(9)\}$;\; \texttt{Closed}: $\{S,A,B\}$ \\
+  4 & $C$ & $(4,2,6)$ & 松弛 $G$: $g=7<9\Rightarrow G(7{+}0{=}7)$ 入队 & \texttt{Open}: $\{B_{\text{旧}}(7),\, G(7),\, C_{\text{旧}}(8),\, G_{\text{旧}}(9)\}$;\; \texttt{Closed}: $\{S,A,B,C\}$ \\
+  5 & $G$ & $(7,0,7)$ & 跳过已闭集的 $B_{\text{旧}}(7)$，弹出 $G$ 命中目标 & 终止返回 \\
+  \bottomrule
+  \end{tabularx}
+  \end{center}
+  最终返回的最优路径为 $\mathbf{S \to A \to B \to C \to G}$，最小总代价为 $\mathbf{C^* = 7}$。注意弹出序列的 $f$ 值序列为 $6, 6, 6, 6, 7$，严格单调非降，印证了一致性推论。
+\end{enumerate}
+
+\subsection*{习题 1.4\quad 8 数码启发值计算与最短移动序列}
+目标布局 $\begin{psmallmatrix}1&2&3\\4&5&6\\7&8&\square\end{psmallmatrix}$，当前布局 $\begin{psmallmatrix}1&5&2\\4&3&6\\7&8&\square\end{psmallmatrix}$（行、列索引均从 $0$ 起计）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{错位滑块数 $h_1$ 与曼哈顿距离 $h_2$}（均不含空格 $\square$）：
+  \begin{itemize}
+    \item 处于错位的数字滑块仅为 $5, 2, 3$（其余 $1, 4, 6, 7, 8$ 均已就位），故 $\mathbf{h_1 = 3}$。
+    \item 逐个计算错位滑块的曼哈顿距离：
+      数字 $5$ 从 $(0,1)\to(1,1)$，距离 $1$；
+      数字 $2$ 从 $(0,2)\to(0,1)$，距离 $1$；
+      数字 $3$ 从 $(1,1)\to(0,2)$，距离 $|1-0|+|1-2| = 2$；其余均为 $0$。
+      累加得 $\mathbf{h_2 = 1 + 1 + 2 = 4}$。
+  \end{itemize}
+  \item \textbf{最短移动序列与真实步数 $h^*$}：
+  空格 $\square$ 从右下角 $(2,2)$ 出发，依次向\textbf{上、左、上、右、下、下}移动 6 步（等价于依次滑动数字 $6 \to 3 \to 5 \to 2 \to 3 \to 6$）：
+  \begin{align*}
+    \begin{bmatrix}1&5&2\\4&3&6\\7&8&\square\end{bmatrix}
+    &\xrightarrow{\text{上}(6)}
+    \begin{bmatrix}1&5&2\\4&3&\square\\7&8&6\end{bmatrix}
+    \xrightarrow{\text{左}(3)}
+    \begin{bmatrix}1&5&2\\4&\square&3\\7&8&6\end{bmatrix}
+    \xrightarrow{\text{上}(5)}
+    \begin{bmatrix}1&\square&2\\4&5&3\\7&8&6\end{bmatrix} \\
+    &\xrightarrow{\text{右}(2)}
+    \begin{bmatrix}1&2&\square\\4&5&3\\7&8&6\end{bmatrix}
+    \xrightarrow{\text{下}(3)}
+    \begin{bmatrix}1&2&3\\4&5&\square\\7&8&6\end{bmatrix}
+    \xrightarrow{\text{下}(6)}
+    \begin{bmatrix}1&2&3\\4&5&6\\7&8&\square\end{bmatrix}.
+  \end{align*}
+  \textbf{最短性论证}：滑块 $5$ 与 $2$ 位于第 $0$ 行，要把它们归位，空格必须从第 $2$ 行向上至少到达第 $0$ 行再返回第 $2$ 行，仅垂直方向就至少需要 $2 + 2 = 4$ 步；同时为解开 $(2,5,3)$ 轮换，空格必须向左至少到达第 $1$ 列再回到第 $2$ 列，水平方向至少需要 $1 + 1 = 2$ 步。故任意解步数必 $\ge 4 + 2 = 6$，从而 $\mathbf{h^* = 6}$。显然严格成立：
+  \[
+    h_1 = 3 \;<\; h_2 = 4 \;<\; h^* = 6.
+  \]
+\end{enumerate}
+
+\subsection*{习题 1.5\quad 一致启发式最大值封闭性与加权 A* 次优界证明}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{证明 $h_{\max}(n) = \max\{h_1(n), h_2(n)\}$ 是一致的}：
+  \begin{proof}
+  首先，因为 $h_1, h_2$ 均一致，对任意目标状态 $G$ 有 $h_1(G) = h_2(G) = 0$，故 $h_{\max}(G) = \max\{0, 0\} = 0$。其次，任取状态空间中的一条有向边 $(u, v)$，由 $h_1, h_2$ 的一致性及最大值的定义，有
+  \begin{align*}
+    h_1(u) &\le c(u, v) + h_1(v) \le c(u, v) + \max\{h_1(v), h_2(v)\} = c(u, v) + h_{\max}(v), \\
+    h_2(u) &\le c(u, v) + h_2(v) \le c(u, v) + \max\{h_1(v), h_2(v)\} = c(u, v) + h_{\max}(v).
+  \end{align*}
+  既然 $h_1(u)$ 与 $h_2(u)$ 均不超过右端同一实数 $c(u, v) + h_{\max}(v)$，取两者的最大值立即得到
+  \[
+    h_{\max}(u) = \max\{h_1(u), h_2(u)\} \le c(u, v) + h_{\max}(v).
+  \]
+  由此证得 $h_{\max}$ 满足一致性（且同时支配 $h_1$ 与 $h_2$）。
+  \end{proof}
+  \item \textbf{证明加权 A*（$w \ge 1$）树搜索返回代价满足 $C \le w C^*$}：
+  \begin{proof}
+  采用反证法，仿照定理~\ref{thm:astar-tree} 的框架。假设树搜索版加权 A* 在出队判定目标时，返回了某个目标节点 $G_2$，其路径代价满足 $C = g(G_2) > w C^*$。由于 $h$ 可采纳，必有 $h(G_2) = 0$，于是 $G_2$ 的出队键值为
+  \[
+    f_w(G_2) = g(G_2) + w\, h(G_2) = C > w C^*.
+  \]
+  另一方面，任取一条从起点 $s_0$ 到最优目标 $G^*$ 的最优路径 $P^* = (s_0 = n_0 \to n_1 \to \dots \to n_k = G^*)$，其总代价为 $C^*$。在 $G_2$ 即将被弹出的瞬间，沿着 $P^*$ 必存在第一个尚未展开的节点 $n_j$（$0 \le j \le k$），它正位于优先队列 \texttt{Open} 中，且沿着最优前缀抵达，故 $g(n_j) = g^*(n_j) \ge 0$。结合 $w \ge 1$、$h$ 的可采纳性 $h(n_j) \le h^*(n_j)$ 以及最优子结构 $g^*(n_j) + h^*(n_j) = C^*$，放缩可得
+  \[
+    f_w(n_j) = g^*(n_j) + w\, h(n_j) \le w\, g^*(n_j) + w\, h^*(n_j) = w\big(g^*(n_j) + h^*(n_j)\big) = w C^* < C = f_w(G_2).
+  \]
+  既然 \texttt{Open} 中存在节点 $n_j$ 的键值严格小于 $G_2$，最小堆不可能先弹出 $G_2$，矛盾！因此加权 A* 返回的目标代价必满足 $C \le w C^*$。
+  \end{proof}
+\end{enumerate}
+
+\subsection*{习题 1.6\quad 可采纳不一致启发式迫使节点重开 2 次的 4 节点构造}
+直接采用第 1.2 节 \texttt{failBox} 中的 4 节点有向图：$V = \{S, A, B, G\}$，边集为
+\[
+  S \xrightarrow{1} A,\qquad A \xrightarrow{1} B,\qquad S \xrightarrow{3} B,\qquad B \xrightarrow{3} G,
+\]
+真实剩余代价为 $h^*(S)=5,\; h^*(A)=4,\; h^*(B)=3,\; h^*(G)=0$（最优路径 $S\to A\to B\to G$，$C^*=5$）。取启发函数
+\[
+  h(S) = 4,\qquad h(A) = 4,\qquad h(B) = 0,\qquad h(G) = 0.
+\]
+逐点检查均有 $0 \le h(n) \le h^*(n)$ 且 $h(G)=0$，故 $h$ \textbf{非负且完全可采纳}（但在边 $A\to B$ 上违反一致性：$h(A)=4 > c(A,B)+h(B)=1+0=1$）。
+
+在\textbf{允许重开闭集节点}的图搜索 A*（发现更小 $g$ 值时更新 \texttt{g\_best} 并重新入队）下的完整追踪如下表所示，节点 $B$ 被迫弹出展开\textbf{共 2 次}：
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}c c c c X@{}}
+\toprule
+\textbf{步序} & \textbf{弹出节点} & $(g, h, f)$ & \textbf{状态与重开动作} & \textbf{操作后 \texttt{Open} 与 \texttt{g\_best}} \\
+\midrule
+1 & $S$（第 1 次） & $(0,4,4)$ & 压入 $A(1{+}4{=}5),\; B(3{+}0{=}3)$ & \texttt{Open}: $\{B(3),\, A(5)\}$;\; $g(A){=}1, g(B){=}3$ \\
+2 & \textbf{$B$（第 1 次）} & $(3,0,3)$ & 压入 $G(6{+}0{=}6)$（$B$ 首次入闭集） & \texttt{Open}: $\{A(5),\, G(6)\}$;\; $g(G){=}6$ \\
+3 & $A$（第 1 次） & $(1,4,5)$ & 经 $A\to B$ 得 $g'=2 < 3$，\textbf{重开 $B$} 入队 $B(2{+}0{=}2)$ & \texttt{Open}: $\{B(2),\, G(6)\}$;\; $g(B){=}2$ \\
+4 & \textbf{$B$（第 2 次）} & $(2,0,2)$ & 经 $B\to G$ 得 $g'=5 < 6$，松弛 $G(5{+}0{=}5)$ & \texttt{Open}: $\{G(5),\, G_{\text{旧}}(6)\}$;\; $g(G){=}5$ \\
+5 & $G$（第 1 次） & $(5,0,5)$ & 命中目标，返回最优路径 $S\to A\to B\to G$ & 总代价 $C^*=5$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+由此可见，当启发式仅可采纳而不一致时，允许重开虽能挽回最优性，却以重复展开节点为代价（最坏情形在 $n$ 节点图上甚至可能造成指数级重开）。
+
+\subsection*{习题 1.7\quad 代码实验：$25\times 25$ 迷宫加权 A* 权衡基准}
+\textbf{核心实现逻辑}：基于代码~\ref{lst:astar} 与 \texttt{code/\allowbreak vol3\_experiments.py} 中的 $25\times 25$ U 型陷阱网格，将优先队列键值改为 \texttt{(ng + w * h, h, ng, v)}，并通过 \texttt{if g > g\_best[u]: continue} 支持必要时的状态重开：
+\begin{lstlisting}
+def weighted_astar(grid, start, goal, w=1.0):
+    H, W = grid.shape
+    h_fn = lambda v: abs(v[0] - goal[0]) + abs(v[1] - goal[1])
+    h0 = h_fn(start)
+    pq = [(w * h0, h0, 0.0, start)]
+    g_best = {start: 0.0}
+    expanded = 0
+    while pq:
+        f, h_tie, g, u = heapq.heappop(pq)
+        if g > g_best[u]:
+            continue
+        expanded += 1
+        if u == goal:
+            return g, expanded
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = u[0] + dr, u[1] + dc
+            if 0 <= nr < H and 0 <= nc < W and grid[nr, nc] == 0:
+                v, ng = (nr, nc), g + 1.0
+                if ng < g_best.get(v, float("inf")):
+                    g_best[v] = ng
+                    hv = h_fn(v)
+                    heapq.heappush(pq, (ng + w * hv, hv, ng, v))
+    return float("inf"), expanded
+\end{lstlisting}
+\textbf{实测自检基准}（与理论界 $C \le 34 w$ 逐项对照）：
+\begin{center}
+\small
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+\textbf{权重 $w$} & \textbf{返回路径代价 $C$} & \textbf{理论次优上界 $34 w$} & \textbf{展开节点数} & \textbf{相对 $w=1$ 节点缩减} \\
+\midrule
+$1.0$ & $\mathbf{34}$（精确最优） & $34.0$ & $\mathbf{233}$ & $0.0\%$（基准） \\
+$1.5$ & $36$ & $51.0$ & $194$ & $-16.7\%$ \\
+$2.0$ & $36$ & $68.0$ & $164$ & $-29.6\%$ \\
+$3.0$ & $36$ & $102.0$ & $163$ & $-30.0\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+$w=1.0$ 精确复现路径代价 $34$ 与展开节点数 $233$；$w \in \{1.5, 2.0, 3.0\}$ 仅牺牲 $2$ 步（$+5.9\%$）路径长度，便将展开节点数最高压低 $30.0\%$，且全部远优于理论最坏上界 $34 w$。
+
+\subsection*{习题 1.8\quad 代码实验：8 数码 A* 求解器与启发式支配实测}
+\textbf{核心实现逻辑}：将 $3\times 3$ 棋盘编码为长度 $9$ 的不可变元组 \texttt{tuple} 作为哈希键，利用预计算的 \texttt{goal\_pos} 字典 $O(1)$ 查询每个数字的目标行列，优先队列键采用 \texttt{(ng + hv, hv, ng, v)}（因为 $h_0, h_1, h_2$ 均满足一致性，使用 \texttt{closed} 集合无需重开）：
+\begin{lstlisting}
+GOAL = (1, 2, 3, 4, 5, 6, 7, 8, 0)
+GOAL_POS = {v: divmod(i, 3) for i, v in enumerate(GOAL)}
+
+def h1_misplaced(s):
+    return sum(1 for i, v in enumerate(s) if v != 0 and v != GOAL[i])
+
+def h2_manhattan(s):
+    return sum(abs(i // 3 - GOAL_POS[v][0]) + abs(i % 3 - GOAL_POS[v][1])
+               for i, v in enumerate(s) if v != 0)
+\end{lstlisting}
+\textbf{实测自检基准}（起点 \texttt{(8, 6, 7, 2, 5, 4, 3, 0, 1)} $\to$ 终点 \texttt{GOAL}，采用 \texttt{(f, h)} 平局打破）：
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{启发函数} & \textbf{找到的最优步数} & \textbf{展开节点数} & \textbf{相对 UCS 加速比} \\
+\midrule
+$h_2$（曼哈顿距离之和） & $\mathbf{31}$ & $\mathbf{6{,}844}$ & $\mathbf{26.5\times}$ \\
+$h_1$（错位滑块数） & $\mathbf{31}$ & $121{,}527$ & $1.49\times$ \\
+$h_0 \equiv 0$（UCS） & $\mathbf{31}$ & $181{,}439$ & $1.00\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+三种算法均精确返回最优解 $31$ 步，且展开节点数严格满足 $N(h_2) = 6{,}844 \ll N(h_1) = 121{,}527 \ll N(h_0) = 181{,}439$，直观印证了第 1.3 节“启发式支配关系”的威力。
+
+% =========================================================================
+\section{第 2 章习题精解（2.1--2.8）}
+% =========================================================================
+
+\subsection*{习题 2.1\quad $\alpha$-$\beta$ 剪枝叶节点数与前瞻深度倍增估算}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{理想排序下深度 $d=6$ 的叶节点数}：
+  朴素 Minimax 访问的全部叶节点数为 $16^6 = 16{,}777{,}216$。代入式~\eqref{eq:ab-perfect}，当 $b=16,\, d=6$ 时：
+  \[
+    N_{\text{leaf}}^{\text{best}}(16, 6) = 16^{\lceil 6/2 \rceil} + 16^{\lfloor 6/2 \rfloor} - 1 = 2 \times 16^3 - 1 = 2 \times 4{,}096 - 1 = \mathbf{8{,}191}.
+  \]
+  仅占朴素 Minimax 叶节点数的 $8{,}191 / 16{,}777{,}216 \approx 0.0488\%$（剪枝率高达 $99.95\%$）！
+  \item \textbf{相同叶节点预算下的最大前瞻深度 $d'$}：
+  预算上限为 $B = 16^6 = 16{,}777{,}216$，逐层检验式~\eqref{eq:ab-perfect}：
+  \begin{itemize}
+    \item $d' = 10$：$N_{\text{leaf}}^{\text{best}}(16, 10) = 2 \times 16^5 - 1 = 2{,}097{,}151 \le 16^6$（远在预算内）；
+    \item $d' = 11$：$N_{\text{leaf}}^{\text{best}}(16, 11) = 16^6 + 16^5 - 1 = 17{,}825{,}791 \approx 1.0625 \times 16^6$（仅微超 $6.25\%$）；
+    \item $d' = 12$：$N_{\text{leaf}}^{\text{best}}(16, 12) = 2 \times 16^6 - 1 = 33{,}554{,}431 \approx 2 \times 16^6$。
+  \end{itemize}
+  按连续方程 $2 \cdot 16^{d'/2} = 16^6$ 估算得 $d' = 12 - 2\log_{16} 2 = 11.5$。因此，在严格不超过 $16^6$ 个叶节点的预算下可稳妥搜索至深度 $\mathbf{d' = 10}$（若放宽约 $6\%$ 预算即可触达 $\mathbf{d' = 11}$，渐近意义上接近把深度翻倍至 $2d$）。
+\end{enumerate}
+
+\subsection*{习题 2.2\quad 效用变换下的 Minimax 与 Expectimax 策略不变性}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{严格单调递增非线性变换 $U'(s) = U(s)^3$}：
+  \begin{itemize}
+    \item \textbf{Minimax：保持最优策略不变。} 因为 $\max$ 与 $\min$ 运算只依赖实数的序关系，对任意实数 $x, y$ 恒有 $x > y \iff x^3 > y^3$，故博弈树中每一个节点的胜出分支完全相同。
+    \item \textbf{Expectimax：不保持最优策略不变！} 由于在 $[0, +\infty)$ 上 $U^3$ 是严格凸函数，会不成比例地放大高额收益，逆转期望排序。\textbf{最小反例（2 个动作、3 个叶子）}：
+    \begin{itemize}
+      \item 动作 $A_1$：确定性进入 1 个叶节点，效用 $U = 2$；
+      \item 动作 $A_2$：进入等概率（各 $0.5$）机会节点，两个叶节点效用分别为 $U = 0$ 与 $U = 3$。
+    \end{itemize}
+    原效用下：$\E[U \mid A_1] = 2 > 0.5\times 0 + 0.5\times 3 = 1.5 = \E[U \mid A_2]$，最优动作选 $\mathbf{A_1}$；
+    经 $U' = U^3$ 变换后：$\E[U' \mid A_1] = 2^3 = 8 < 0.5\times 0^3 + 0.5\times 3^3 = 13.5 = \E[U' \mid A_2]$，最优动作逆转为 $\mathbf{A_2}$！
+  \end{itemize}
+  \item \textbf{正仿射变换 $U''(s) = 2 U(s) + 5$}：
+  \begin{itemize}
+    \item \textbf{Minimax：保持最优策略不变}（因为 $a=2>0$ 严格单调递增）。
+    \item \textbf{Expectimax：同样保持最优策略不变。} 由期望的线性性，对任意机会节点均有 $\E[2U + 5] = 2\E[U] + 5$；归纳可知树中每个节点的期望值都精确变为原来的 $2V + 5$，又因乘以正数 $2$ 并加常数 $5$ 严格保序，所有 \textsf{MAX} 节点的最优动作完全不变。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 2.3\quad 3 层二叉博弈树的 Minimax 与正反序 $\alpha$-$\beta$ 剪枝}
+将 3 层二叉树记为：根节点 $R$（\textsf{MAX}），第 1 层左右节点 $B_1, B_2$（\textsf{MIN}），第 2 层节点 $C_1, C_2, C_3, C_4$（\textsf{MAX}），8 个叶节点依次为 $C_1:[4,7],\; C_2:[2,8],\; C_3:[6,1],\; C_4:[9,3]$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{各内部节点真实 Minimax 值}：
+  \[
+    V(C_1) = \max(4,7)=7,\quad V(C_2) = \max(2,8)=8,\quad V(C_3) = \max(6,1)=6,\quad V(C_4) = \max(9,3)=9;
+  \]
+  \[
+    V(B_1) = \min(7,8)=7,\quad V(B_2) = \min(6,9)=6;\qquad V(R) = \max(7,6)=\mathbf{7}.
+  \]
+  根节点最优动作为\textbf{向左走向 $B_1$}。
+  \item \textbf{从左到右执行 $\alpha$-$\beta$ 剪枝}：
+  \begin{enumerate}[label=\roman*., leftmargin=1.6em]
+    \item $R(-\infty, +\infty) \to B_1(-\infty, +\infty) \to C_1(-\infty, +\infty)$：依次访问叶子 $4, 7$，回传 $V(C_1)=7$。
+    \item 回到 $B_1$（\textsf{MIN}）：更新 $\beta = \min(+\infty, 7) = 7$，进入 $C_2(-\infty, 7)$。$C_2$（\textsf{MAX}）访问叶子 $2$（$\alpha=2<7$），再访问叶子 $8$（$\alpha=8\ge 7$，但 $8$ 已是 $C_2$ 最后一个子节点，无剩余兄弟可剪），回传 $V(C_2)=8$；$B_1$ 回传 $\min(7,8)=7$。
+    \item 回到 $R$（\textsf{MAX}）：更新 $\alpha = \max(-\infty, 7) = 7$，进入 $B_2(7, +\infty)$。
+    \item $B_2$ 进入 $C_3(7, +\infty)$：访问叶子 $6$ 与 $1$，回传 $V(C_3)=6$。
+    \item 回到 $B_2$（\textsf{MIN}）：更新 $\beta = \min(+\infty, 6) = 6$。此时满足 $\alpha = 7 \ge \beta = 6$，\textbf{触发 $\alpha$-剪枝（$\alpha$-cutoff）}！整棵 $C_4$ 子树（叶节点 \textbf{9 与 3，共 2 个叶子}）全部被安全剪除！$B_2$ 返回 $6$，$R$ 返回 $7$。
+  \end{enumerate}
+  \item \textbf{反转顺序（从右到左）执行 $\alpha$-$\beta$ 剪枝}：
+  \begin{enumerate}[label=\roman*., leftmargin=1.6em]
+    \item $R(-\infty,+\infty)\to B_2(-\infty,+\infty)\to C_4(-\infty,+\infty)$：访问叶子 $3, 9$，回传 $V(C_4)=9$；$B_2$ 更新 $\beta=9$。
+    \item $B_2$ 进入 $C_3(-\infty, 9)$：访问叶子 $1$（$\alpha=1<9$）、叶子 $6$（$\alpha=6<9$），回传 $6$；$B_2$ 回传 $\min(9,6)=6$。
+    \item 回到 $R$（\textsf{MAX}）：更新 $\alpha = 6$，进入 $B_1(6, +\infty)$。
+    \item $B_1$ 进入 $C_2(6, +\infty)$：访问叶子 $8$（$\alpha=8$）、叶子 $2$，回传 $8$；$B_1$ 更新 $\beta=8$。因 $\alpha=6 < \beta=8$，无法剪枝！
+    \item $B_1$ 进入 $C_1(6, 8)$：访问叶子 $7$（$\alpha=7 < \beta=8$，仍无法剪枝！），再访问叶子 $4$，回传 $7$；$B_1$ 回传 $7$，$R$ 回传 $7$。
+  \end{enumerate}
+  \textbf{效率对比}：从左到右访问 $6$ 个叶子、剪掉 $2$ 个叶子（剪枝率 $25\%$）；从右到左访问全部 $8$ 个叶子、\textbf{剪枝数为 $0$}！原因在于左序恰巧在根节点 $R$ 优先探索了最优分支 $B_1$（立刻抬高 $\alpha=7$）并在 $B_2$ 优先探索了最强反驳 $C_3$（压低 $\beta=6$），而右序在 $R$ 和 $B_1$ 均先访问了较差分支，导致窗口始终过于宽松。
+\end{enumerate}
+
+\subsection*{习题 2.4\quad MCTS 的 UCB1 选择计算与视角翻转回传}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{三个子节点的 UCB1 得分}：已知 $N = 10$，$\ln 10 \approx 2.302585$，$c = \sqrt{2} \approx 1.414214$。代入式~\eqref{eq:ucb1}：
+  \begin{align*}
+    \mathrm{UCB1}(C_1) &= \frac{3}{5} + \sqrt{2}\sqrt{\frac{\ln 10}{5}} = 0.6000 + 0.9597 = \mathbf{1.5597}, \\
+    \mathrm{UCB1}(C_2) &= \frac{2.5}{4} + \sqrt{2}\sqrt{\frac{\ln 10}{4}} = 0.6250 + 1.0730 = \mathbf{1.6980}, \\
+    \mathrm{UCB1}(C_3) &= \frac{0}{1} + \sqrt{2}\sqrt{\frac{\ln 10}{1}} = 0.0000 + 2.1460 = \mathbf{2.1460}.
+  \end{align*}
+  （若用截断值 $c=1.414$ 计算，三者分别为 $1.5596,\; 1.6978,\; 2.1456$，排序完全一致。）因为 $\mathrm{UCB1}(C_3)$ 最大，本轮 Selection 阶段选择子节点 $\mathbf{C_3}$——尽管其当前胜率为 $0$，但仅访问 $1$ 次，巨大不确定性奖励促使其获得探索机会。
+  \item \textbf{回传（Backpropagation）更新结果}：
+  务必谨记每个节点存储的胜场 $W$ 对应\textbf{走出该步进入此节点的落子方}（\texttt{mover = -node.player}）。模拟结果为 \textsf{MAX} 获胜（$w = +1$）：
+  \begin{itemize}
+    \item \textbf{新叶节点 $D$}：由 \textsf{MIN} 从 $C_3$ 落子生成（到达 $D$ 后轮到 \textsf{MAX}，即 \texttt{mover = MIN}）。本局 \textsf{MAX} 胜意味着 \textsf{MIN} 败，故 $W_D$ 累加 $0$（绝非 $+1$！），更新为 $\mathbf{(W_D, N_D) = (0,\; 1)}$；
+    \item \textbf{子节点 $C_3$}：由 \textsf{MAX} 从 $R$ 落子生成（\texttt{mover = MAX}）。\textsf{MAX} 获胜故 $W_3$ 累加 $+1$，更新后得 $(W_3, N_3) = (0+1,\, 1+1) = \mathbf{(1,\, 2)}$；
+    \item \textbf{根节点 $R$}：访问次数更新为 $\mathbf{N_R = 10 + 1 = 11}$。（注：根节点无父节点，其 $W_R$ 永不参与 UCB1 计算；在代码~\ref{lst:games} 的 \texttt{mover = -node.player} 统一循环下，$R$ 的落子方为 \textsf{MIN}，故 $W_R$ 不增，若仅统计 \textsf{MAX} 总胜场则加 $1$，两者对搜索行为完全等价。）
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 2.5\quad 理想走法排序下 $\alpha$-$\beta$ 叶节点数 $2 b^{d/2} - 1$ 的严格证明}
+\begin{proof}
+采用 Knuth 与 Moore（1975）的三类节点递推法。在理想走法排序（每个节点总是先访问最优走法或最强反驳走法）下，博弈树中被 $\alpha$-$\beta$ 实际访问的节点严格划分为三类（假设终局叶节点值互异，或按标准 $\alpha \ge \beta$ 剪枝）：
+\begin{enumerate}[label=\textbf{Type \arabic*:}, leftmargin=4.2em]
+  \item \textbf{主变节点（PV Node，初始窗口 $(-\infty, +\infty)$，最终返回真实值 $v^*$）}：根节点为 Type 1。第 1 个子节点是最优走法（窗口继承 $(-\infty, +\infty)$，仍是 \textbf{Type 1}），回传后把本节点边界收紧为 $v^*$（如 \textsf{MAX} 节点令 $\alpha=v^*$）。此后其余 $b-1$ 个子节点均以半开窗口（如 $(v^*, +\infty)$）进入，它们都是试图被反驳的次优分支（\textbf{Type 2}），均需探索以确认没有更好走法。
+  \item \textbf{剪枝节点（Cut Node，带着紧边界进入并注定立即截断）}：设当前是带着窗口 $(v^*, +\infty)$ 进入的 \textsf{MIN} 节点，其真实值 $\le v^*$。在理想排序下，它的\textbf{第 1 个子节点}就是最强反驳走法（值 $\le v^*$），需要把该子节点全部探索完才能证明其值不超过 $v^*$（故该子节点为 \textbf{Type 3}）。一旦第 1 个子节点返回 $\le v^*$，本节点立刻更新 $\beta \le v^* = \alpha$ 并触发剪枝，\textbf{其余 $b-1$ 个子节点全部跳过}！
+  \item \textbf{全展节点（All Node，试图证明该分支无法推翻对手界）}：设当前是带着窗口 $(v^*, +\infty)$ 进入的 \textsf{MAX} 节点，其真实值 $\le v^*$。为了向父节点（Type 2）证明自己确实拿不到大于 $v^*$ 的分，它必须\textbf{遍历全部 $b$ 个子节点}；而其中每个子节点（\textsf{MIN}）都是带着同一紧窗口 $(v^*, +\infty)$ 进入且只需第 1 步即可反驳成功，因此全部 $b$ 个子节点均为 \textbf{Type 2}！
+\end{enumerate}
+
+记高度（距叶子的剩余层数）为 $h$ 的 Type 1、Type 2、Type 3 节点访问的叶节点数分别为 $T_1(h), T_2(h), T_3(h)$。边界条件为叶子层（$h=0$）：$T_1(0) = T_2(0) = T_3(0) = 1$。对任意 $h \ge 1$，由上述三类节点的展开结构直接写出联立递推式：
+\[
+  T_2(h) = T_3(h - 1), \qquad
+  T_3(h) = b\, T_2(h - 1), \qquad
+  T_1(h) = T_1(h - 1) + (b - 1)\, T_2(h - 1).
+\]
+先求 $T_2(h)$ 与 $T_3(h)$ 的闭式解：代入可得 $T_2(h) = b\, T_2(h - 2)$（$h \ge 2$），且初始两项为 $T_2(0) = 1,\; T_2(1) = T_3(0) = 1$。对 $m \ge 0$ 归纳立得：
+\[
+  T_2(2m) = b^m, \qquad T_2(2m + 1) = b^m \qquad \big(\text{即 } T_2(h) = b^{\lfloor h/2 \rfloor}\big),
+\]
+同时 $T_3(h) = T_2(h+1) = b^{\lceil h/2 \rceil}$。
+
+再对 $T_1(h)$ 沿 $h = 1, 2, \dots, 2k$ 累和展开（其中 $d = 2k$）：
+\begin{align*}
+  T_1(2k) &= T_1(0) + (b - 1)\sum_{j=0}^{2k-1} T_2(j)
+          = 1 + (b - 1)\sum_{m=0}^{k-1} \big(T_2(2m) + T_2(2m+1)\big) \\
+          &= 1 + (b - 1)\sum_{m=0}^{k-1} (b^m + b^m)
+          = 1 + 2(b - 1)\cdot \frac{b^k - 1}{b - 1}
+          = 2 b^k - 1 = 2 b^{d/2} - 1.
+\end{align*}
+（注：同理可得奇数深度 $T_1(2k+1) = T_1(2k) + (b-1)b^k = b^{k+1} + b^k - 1$，与式~\eqref{eq:ab-perfect} 完全统一。）
+\end{proof}
+
+\subsection*{习题 2.6\quad 有界 Expectimax 机会节点的安全剪枝推导}
+已知所有终局效用满足 $U(s) \in [U_{\min}, U_{\max}] = [0, 10]$，故树中任意子节点的真实期望值同样满足 $V(X_i) \in [0, 10]$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{仅测得 $V(X_1) = 1.5$ 时的最紧上下界}：
+  将尚未评估的 $X_2, X_3$ 分别悲观地取下界 $0$ 与乐观地取上界 $10$，得到机会节点 $C$ 的最紧区间：
+  \begin{align*}
+    V_{\min}(C) &= \frac{1.5 + 0 + 0}{3} = \frac{1}{2} = \mathbf{0.5000}, \\
+    V_{\max}(C) &= \frac{1.5 + 10 + 10}{3} = \frac{43}{6} \approx \mathbf{7.1667}.
+  \end{align*}
+  因此 $V(C) \in \big[0.5,\; \frac{43}{6}\big]$。
+  \item \textbf{安全剪枝判定与一般充要条件}：
+  \begin{itemize}
+    \item 当 $\alpha = 7.2$ 时：由于最乐观上界 $V_{\max}(C) = \frac{43}{6} \approx 7.1667 \le 7.2 = \alpha$，无论 $X_2, X_3$ 多大，分支 $C$ 都绝不可能严格超过左分支已保证的 $7.2$，故\textbf{可以安全剪枝 $X_2$ 与 $X_3$}！
+    \item 当 $\alpha = 7.0$ 时：仅知 $V(X_1)=1.5$ 时上界 $7.1667 > 7.0$，尚不能剪枝；继续算得 $V(X_2) = 9.0$ 后，新的最乐观上界收紧为
+    \[
+      V_{\max}(C) = \frac{1.5 + 9.0 + 10.0}{3} = \frac{41}{6} \approx 6.8333 \le 7.0 = \alpha,
+    \]
+    此时\textbf{可以安全剪枝 $X_3$}！
+    \item \textbf{一般充要不等式}：设有 $m$ 个等概率分支、效用界于 $[U_{\min}, U_{\max}]$、已算得前 $k$ 个值（$1 \le k < m$），当父节点为 \textsf{MAX} 且当前下界为 $\alpha$ 时，可安全剪掉剩余 $m-k$ 个分支的充要条件是剩余全取 $U_{\max}$ 仍不超过 $\alpha$：
+    \[
+      \frac{1}{m}\left(\sum_{i=1}^{k} V(X_i) + (m - k) U_{\max}\right) \le \alpha
+      \;\Longleftrightarrow\;
+      \sum_{i=1}^{k} V(X_i) \le m\alpha - (m - k) U_{\max}.
+    \]
+    （对称地，若父节点为 \textsf{MIN} 且当前上界为 $\beta$，则当 $\sum_{i=1}^{k} V(X_i) \ge m\beta - (m-k)U_{\min}$ 时可安全剪枝。）
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 2.7\quad 代码实验：井字棋走法排序敏感性基准测试}
+\textbf{核心测试代码}：在代码~\ref{lst:games} 的 \texttt{alphabeta} 入口加入 \texttt{nonlocal count; count += 1} 计数，依次传入 4 种走法表并对比（测试前清零计数器）：
+\begin{lstlisting}
+orders = {
+    "AB_natural":   [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "AB_center":    [4, 0, 2, 6, 8, 1, 3, 5, 7],
+    "AB_edge_bad":  [1, 3, 5, 7, 0, 2, 6, 8, 4],
+}
+\end{lstlisting}
+\textbf{实测自检基准}（空盘先手搜索，与表~\ref{tab:ttt-ab} 精确核对）：
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{配置} & \textbf{根节点精确返回值} & \textbf{总访问节点数} & \textbf{剪枝率} \\
+\midrule
+（1）朴素 Minimax & $\mathbf{0}$ & $\mathbf{549{,}946}$ & $0.00\%$ \\
+（2）$\alpha$-$\beta$ 自然顺序 \texttt{[0..8]} & $\mathbf{0}$ & $\mathbf{18{,}297}$ & $\mathbf{96.67\%}$ \\
+（3）$\alpha$-$\beta$ 中心--四角--四边 & $\mathbf{0}$ & $\mathbf{7{,}275}$ & $\mathbf{98.68\%}$ \\
+（4）$\alpha$-$\beta$ 四边优先逆序 & $\mathbf{0}$ & $\mathbf{42{,}094}$ & $\mathbf{92.35\%}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+四组返回值严格一致且均为 $0$（双方最优必和棋）；故意把最弱的四边格排在前面后，访问节点数从 $7{,}275$ 暴增至 $42{,}094$（足足扩大了 $\mathbf{5.79}$ 倍！），直观印证走法排序是决定 $\alpha$-$\beta$ 实战效率的命门。
+
+\subsection*{习题 2.8\quad 代码实验：MCTS 探索常数 $c$ 消融与预算收敛曲线}
+\textbf{核心实现要点}：在 \texttt{vol3\_experiments.py} 的 \texttt{mcts\_move} 中将探索常数参数化为 \texttt{c\_exp}，并固定随机数生成器 \texttt{np.random.default\_rng(2026)}。因为 \texttt{Selection} 仅在 \texttt{not node.untried} 时执行，所有子节点必有 $N_i \ge 1$，即使 $c = 0.0$ 也不会发生除零异常。
+
+\textbf{实测自检基准}：
+\begin{itemize}
+  \item \textbf{实验（1）预算扫描}（$c=1.414$，每档 $120$ 局，与 \texttt{data/mcts\_winrate.csv} 精确一致）：
+  $\text{iters}=5$：胜率 $\mathbf{72.5\%}$ / 不败率 $84.2\%$；$\text{iters}=10$：$90.0\%$ / $95.0\%$；$\text{iters}=25$：$96.7\%$ / $\mathbf{100.0\%}$；$\text{iters}=50$：$95.0\%$ / $100.0\%$；$\text{iters}=100$：$\mathbf{100.0\%}$ / $100.0\%$；$\text{iters}=200$：$97.5\%$ / $100.0\%$；$\text{iters}=400$：$\mathbf{100.0\%}$ / $100.0\%$。
+  \item \textbf{实验（2）探索常数 $c$ 消融}（固定 $\text{iters}=50$，每档独立用 \texttt{default\_rng(2026)} 对弈 $120$ 局）：
+  \begin{center}
+  \small
+  \begin{tabular}{@{}ccccc@{}}
+  \toprule
+  \textbf{探索常数 $c$} & $0.0$（纯贪心） & $0.5$ & $1.414$（$\sqrt{2}$） & $4.0$（过度探索） \\
+  \midrule
+  胜率（\%） & $97.5\%$ & $96.7\%$ & $\mathbf{97.5\%}$ & $96.7\%$ \\
+  不败率（\%） & $\mathbf{98.3\%}$（输 2 局） & $100.0\%$ & $\mathbf{100.0\%}$ & $100.0\%$ \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{现象剖析}：当 $c=0.0$ 时，一旦某步关键防守招法在首次随机 Rollout 中碰巧输棋（$W_i/N_i = 0$），纯贪心 UCB1 就永久不再回访该分支（\textbf{锁死陷阱}），直接导致不败率跌破 $100\%$（出现败局）；而 $c=4.0$ 则把过多预算分散到明显劣质走法上，同样削弱胜率；折中的 $c=\sqrt{2}$ 实现了胜率与 $100\%$ 不败率的最佳平衡。
+\end{itemize}
+
+% =========================================================================
+\section{第 3 章习题精解（3.1--3.8）}
+% =========================================================================
+
+\subsection*{习题 3.1\quad 澳大利亚地图三着色的 MRV、度启发式与 LCV 判别}
+对照图~\ref{fig:aus-csp} 的 7 区域约束图（无向边含 WA--NT、WA--SA、NT--SA、NT--Q、SA--Q、SA--NSW、SA--V、Q--NSW、NSW--V；孤立岛 T 无邻居）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{初始变量选择}：全图尚未赋值时，全部 7 个变量均满足 $|D_i| = 3$（MRV 全部打平）。此时启用\textbf{度启发式}，挑选与最多未赋值变量相邻的节点——$\text{SA}$ 的度数为 $5$（其余节点度数最多为 $3$），故优先选择 \textbf{\textsf{SA}}。
+  \item \textbf{赋值 $\text{WA}=\text{R},\; \text{NT}=\text{G}$ 后的前向检验（FC）值域}：
+  仅删去与已赋值变量直接相邻的冲突颜色：
+  \[
+    D_{\text{SA}} = \{\text{B}\},\quad
+    D_{\text{Q}} = \{\text{R}, \text{B}\},\quad
+    D_{\text{NSW}} = \{\text{R}, \text{G}, \text{B}\},\quad
+    D_{\text{V}} = \{\text{R}, \text{G}, \text{B}\},\quad
+    D_{\text{T}} = \{\text{R}, \text{G}, \text{B}\}.
+  \]
+  下一步按 MRV 应优先选择剩余值域最小的变量 \textbf{\textsf{SA}}（$|D_{\text{SA}}| = 1$，无分支直接确定）。
+  \item \textbf{为 \textsf{Q} 选择颜色时的 LCV 判别}：\textsf{Q} 的未赋值邻居为 $\text{SA}\in\{\text{B}\}$ 与 $\text{NSW}\in\{\text{R,G,B}\}$。
+  \begin{itemize}
+    \item 尝试 $\text{Q}=\text{R}$：从 $D_{\text{SA}}$ 删去 $0$ 个值，从 $D_{\text{NSW}}$ 删去 $1$ 个值（$\text{R}$），\textbf{共消去 $1$ 个邻居取值}；
+    \item 尝试 $\text{Q}=\text{B}$：从 $D_{\text{SA}}$ 删去 $1$ 个值（$\text{B}$，直接造成 \textsf{SA} 值域清空！），从 $D_{\text{NSW}}$ 删去 $1$ 个值（$\text{B}$），\textbf{共消去 $2$ 个邻居取值}。
+  \end{itemize}
+  按最少约束值（LCV）原则，应优先尝试 $\mathbf{\text{Q} = \text{R}}$。
+\end{enumerate}
+
+\subsection*{习题 3.2\quad Min-Conflicts 的大规模优势与根本理论缺陷}
+\begin{itemize}
+  \item \textbf{为什么在大规模 $N$ 皇后（如 $N=500$）上远胜朴素回溯？}
+  （1）\textbf{内存极省}：局部搜索始终只维护一套完整状态及冲突计数数组，空间复杂度严格为 $O(N)$，无需保存回溯树各层值域副本；
+  （2）\textbf{跳出浅层死锁}：朴素回溯一旦在顶部几行做出坏决策，必须穷尽底下指数级子树才能回溯（颠簸效应 / Thrashing）；而 $N$ 皇后问题的合法解在状态空间中高度稠密，Min-Conflicts 直接对冲突行做贪心局部修复，其期望收敛步数几乎与 $N$ 无关（经验上 $O(1)$ 至准线性级别），毫秒即可求解 $N=500$ 甚至 $N=10^4$。
+  \item \textbf{根本理论缺陷——不完备性（无法证明无解）}：
+  系统化回溯（如 MAC）最终能穷尽全部等价搜索空间，因此在无解实例（例如 $N=3$ 皇后或 $K_4$ 三着色）上可以给出\textbf{确定性的“无解（UNSAT）”证明}；而 Min-Conflicts 与模拟退火属于不完备的局部搜索，面对无解实例只会在局部极小点之间不断徘徊直至耗尽最大步数上限，永远无法区分“问题根本无解”还是“步数给得还不够多”。
+\end{itemize}
+
+\subsection*{习题 3.3\quad 4 变量二元 CSP 的 AC-3 手工全追踪}
+已知初始值域 $D_A=\{1,2,3\},\; D_B=\{1,2,3\},\; D_C=\{1,2\},\; D_D=\{1,3\}$，约束为 $A>B,\; B\neq C,\; C<D,\; A=D$（共 4 条无向边、8 条有向弧）。按提示先将 $(A,D),(D,A)$ 置于队列前端，其余弧依次入队：
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}c c c c X@{}}
+\toprule
+\textbf{轮次} & \textbf{弹出有向弧} & \textbf{被删元素} & \textbf{更新后值域} & \textbf{重新入队的弧与理由} \\
+\midrule
+1 & $(A, D)$ & $2 \in D_A$ & $D_A=\{1,3\}$ & 重入 $(B,A)$（$D_D$ 无 $2$，故 $A=2$ 无支持） \\
+2 & $(D, A)$ & 无 & 不变 & 无（$1,3 \in D_D$ 均有支持） \\
+3 & $(A, B)$ & $1 \in D_A$ & $D_A=\{3\}$ & 重入 $(D,A)$（$A=1$ 无 $b\in D_B$ 满足 $1>b$） \\
+4 & $(B, A)$ & $3 \in D_B$ & $D_B=\{1,2\}$ & 重入 $(C,B)$（$B=3$ 不满足 $3>3$） \\
+5 & $(C, D)$ & 无 & 不变 & 无（$1,2$ 均满足 $<3\in D_D$） \\
+6 & $(D, C)$ & $1 \in D_D$ & $D_D=\{3\}$ & 重入 $(A,D)$（$D=1$ 无 $c\in D_C$ 满足 $c<1$） \\
+7 & $(B, C)$ & 无 & 不变 & 无（$1\neq 2, 2\neq 1$ 均有支持） \\
+8 & $(C, B)$ & 无 & 不变 & 无（同上） \\
+9--12 & $(B,A),(D,A),(C,B),(A,D)$ & 均无 & 全部稳定 & 队列清空，AC-3 终止 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\begin{itemize}
+  \item \textbf{收束后的弧相容值域}：$D_A = \{3\},\; D_B = \{1,2\},\; D_C = \{1,2\},\; D_D = \{3\}$。
+  \item \textbf{全部合法解（共 2 组）}：$(A,B,C,D) = \mathbf{(3, 1, 2, 3)}$ 与 $\mathbf{(3, 2, 1, 3)}$。
+  \item \textbf{为何 $D_B, D_C$ 不会继续缩小？} 一方面从局部弧相容看，$B\in\{1,2\}$ 均小于 $A=3$ 且在 $D_C=\{1,2\}$ 中都能找到与之不等的值，$C\in\{1,2\}$ 对称地均小于 $D=3$ 且在 $D_B$ 中有不等支持；另一方面从全局解看，$B=1,2$ 与 $C=1,2$ 确实各自出现在不同的真实合法解中，由习题 3.5 的保解性可知任何正确约束传播都绝不可能删除它们。
+\end{itemize}
+
+\subsection*{习题 3.4\quad 模拟退火 Metropolis 接受概率与降温步数计算}
+当前能量上升量 $\Delta E_{\text{cost}} = E(s') - E(s) = 15 - 12 = 3$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{不同温度下的接受概率 $p = \exp(-3 / T)$}：
+  \begin{itemize}
+    \item $T = 10$：$p = e^{-3/10} = e^{-0.3} \approx 0.740818 \approx \mathbf{0.741}$（高温阶段大概率接受上坡，鼓励全局探索）；
+    \item $T = 2$：$p = e^{-3/2} = e^{-1.5} \approx 0.223130 \approx \mathbf{0.223}$；
+    \item $T = 0.5$：$p = e^{-3/0.5} = e^{-6} \approx 0.002479 \approx \mathbf{0.00248}$（低温阶段几乎退化为纯贪心下降）。
+  \end{itemize}
+  \item \textbf{接受概率首次低于 $1\%$ 的最小降温步数 $k$}：
+  令 $T_k = 10 \cdot 0.9^k$，解不等式：
+  \[
+    \exp\!\left(-\frac{3}{T_k}\right) < 0.01
+    \iff \frac{3}{T_k} > \ln 100
+    \iff 10 \cdot 0.9^k < \frac{3}{\ln 100} \approx 0.651442.
+  \]
+  两边除以 $10$ 并取自然对数（注意 $\ln 0.9 < 0$，不等号反转）：
+  \[
+    k > \frac{\ln(0.0651442)}{\ln 0.9} \approx \frac{-2.731153}{-0.105361} \approx 25.922.
+  \]
+  代入边界整数核验：$k=25$ 时 $T_{25}\approx 0.7179,\; p \approx 1.53\% > 1\%$；$k=26$ 时 $T_{26} \approx 0.6461,\; p \approx 0.963\% < 1\%$。故至少需经过 $\mathbf{k = 26}$ 步降温。
+\end{enumerate}
+
+\subsection*{习题 3.5\quad AC-3 队列顺序无关唯一性与保解性证明}
+\begin{proof}
+记二元 CSP 实例的值域向量为 $\mathcal{D} = (D_1, \dots, D_n)$，定义逐分量包含偏序 $\mathcal{D}' \preceq \mathcal{D}'' \iff \forall i,\, D'_i \subseteq D''_i$，以及逐分量并集 $(\mathcal{D}' \sqcup \mathcal{D}'')_i := D'_i \cup D''_i$。
+
+\textbf{第一步（保解性：绝不误删任何属于全局解的值）}。任取原问题的一个合法全局解 $\mathbf{v} = (v_1, \dots, v_n)$。对 \texttt{REVISE} 调用次数 $t$ 做数学归纳，证明每步之后恒有 $v_i \in D_i^{(t)}$（$\forall i$）：
+\begin{itemize}
+  \item 初始 $t=0$ 时，因 $\mathbf{v}$ 是合法解，显然 $v_i \in D_i^{(0)}$；
+  \item 假设第 $t$ 步前命题成立，当前执行 \texttt{REVISE}$(X_i, X_j)$。考察取值 $v_i \in D_i^{(t)}$：由归纳假设 $v_j \in D_j^{(t)}$，又因 $\mathbf{v}$ 满足二元约束 $C_{ij}$，$(v_i, v_j)$ 合法，故 $v_i$ 在 $D_j^{(t)}$ 中至少拥有支持 $v_j$，绝不会被 \texttt{REVISE} 删除！
+\end{itemize}
+因此，终止时所有全局解的分量均完整保留在输出值域中。
+
+\textbf{第二步（存在唯一最大弧相容不动点 $\mathcal{D}^*$）}。记 $\mathcal{AC} = \{\mathcal{D}' \preceq \mathcal{D}^{(0)} \mid \mathcal{D}' \text{ 弧相容}\}$。注意空值域元组 $(\varnothing,\dots,\varnothing) \in \mathcal{AC}$ 故 $\mathcal{AC}$ 非空，且有限域下 $\mathcal{AC}$ 只有有限个元素。任取 $\mathcal{D}', \mathcal{D}'' \in \mathcal{AC}$，检验并集 $\mathcal{U} = \mathcal{D}' \sqcup \mathcal{D}''$：对任意约束边 $(X_i, X_j)$ 与任意 $x \in U_i = D'_i \cup D''_i$，若 $x \in D'_i$，由 $\mathcal{D}'$ 弧相容存在支持 $y \in D'_j \subseteq U_j$；若 $x \in D''_i$，同理存在支持 $y \in D''_j \subseteq U_j$。故 $\mathcal{U} \in \mathcal{AC}$。对 $\mathcal{AC}$ 中全部元素取并集，便得到唯一的最大弧相容子值域
+\[
+  \mathcal{D}^* := \bigsqcup_{\mathcal{D}' \in \mathcal{AC}} \mathcal{D}' \in \mathcal{AC}, \qquad \text{满足 }\; \forall \mathcal{D}' \in \mathcal{AC},\; \mathcal{D}' \preceq \mathcal{D}^*.
+\]
+
+\textbf{第三步（无论队列弹出顺序如何，AC-3 必收敛到 $\mathcal{D}^*$）}。
+首先，每删除一个值域元素都使有限非负整数 $\sum_i |D_i|$ 严格减 $1$，故算法必在有限步终止。其次，用归纳法证明无论弹出哪条弧，每步后恒有 $\mathcal{D}^* \preceq \mathcal{D}^{(t)}$：初始 $\mathcal{D}^* \preceq \mathcal{D}^{(0)}$；若在 \texttt{REVISE}$(X_i, X_j)$ 中删去了某元素 $x \in D_i^{(t)}$，说明 $x$ 在 $D_j^{(t)}$ 中无支持，由归纳假设 $D_j^* \subseteq D_j^{(t)}$，故 $x$ 在 $D_j^*$ 中更无支持；又因 $\mathcal{D}^*$ 弧相容，必有 $x \notin D_i^*$！从而删除 $x$ 后仍保持 $\mathcal{D}^* \preceq \mathcal{D}^{(t+1)}$。
+
+最后，AC-3 终止时队列为空：因为每当 $D_j$ 缩小都会将所有受影响的弧 $(X_k, X_j)$ 重新入队，所以队列为空意味着输出值域 $\mathcal{D}^{\text{out}}$ 对所有有向弧均已相容，即 $\mathcal{D}^{\text{out}} \in \mathcal{AC}$，由此得 $\mathcal{D}^{\text{out}} \preceq \mathcal{D}^*$。结合上一段的 $\mathcal{D}^* \preceq \mathcal{D}^{\text{out}}$，立得 $\mathcal{D}^{\text{out}} = \mathcal{D}^*$，与队列数据结构及弹出顺序完全无关！
+\end{proof}
+
+\subsection*{习题 3.6\quad 树结构二元 CSP 的 $O(n d^2)$ 无回溯精确算法与证明}
+\textbf{两阶段算法}（若约束图是森林，对每个连通树分量独立运行）：
+\begin{enumerate}[label=\textbf{阶段 \arabic*:}, leftmargin=4.2em]
+  \item \textbf{定根与自底向上有向弧相容（DAC）}：任选一个根节点 $r$，通过 BFS/DFS 得到拓扑序 $(X_1=r, X_2, \dots, X_n)$，使得每个非根节点 $X_i$（$i\ge 2$）都有唯一父节点 $\mathrm{pa}(X_i) = X_p$（$p < i$）。按逆序 $i = n, n-1, \dots, 2$ 依次执行一次 \texttt{REVISE}$(\mathrm{pa}(X_i), X_i)$；若期间任意变量值域变空，立即返回\textbf{无解}。
+  \item \textbf{自顶向下无回溯贪心赋值}：按正序 $i = 1, 2, \dots, n$ 逐个赋值：对根节点 $X_1$ 任取 $v_1 \in D_1$；对 $i \ge 2$，从当前 $D_i$ 中任选一个与已赋值的唯一父节点 $\mathrm{pa}(X_i) = v_p$ 满足二元约束的值 $v_i$，即可输出全局相容解 $(v_1, \dots, v_n)$。
+\end{enumerate}
+
+\begin{proof}
+\textbf{（1）正确性证明}。若阶段 1 出现空值域，由习题 3.5 的 \texttt{REVISE} 保解性知原问题必无解。现假设阶段 1 结束时全部 $D_i \neq \varnothing$。考察任意父子边 $(\mathrm{pa}(X_i), X_i)$：按照逆序 $i=n\to 2$，当执行 \texttt{REVISE}$(\mathrm{pa}(X_i), X_i)$ 时，节点 $X_i$ 的所有后代已经全部处理完毕；在随后的步骤中只会修改排在 $i$ 之前的节点值域，\textbf{绝不会再删减 $D_i$}！因此阶段 1 结束时，对每条父子边 $(X_p, X_i)$ 均保持不变式：对任意 $u \in D_p$，都存在至少一个 $v \in D_i$ 与 $u$ 相容。
+
+下面对阶段 2 的步序 $i=1,\dots,n$ 归纳证明总能无回溯选出相容值：$i=1$ 时因 $D_1 \neq \varnothing$ 显然成立。假设 $X_1,\dots,X_{i-1}$ 均已合法赋值；因为约束图是树（无环），$X_i$ 在已赋值集合 $\{X_1,\dots,X_{i-1}\}$ 中\textbf{有且仅有一个邻居，即其父节点 $\mathrm{pa}(X_i) = X_p$}（若还连向其他已赋值节点就会构成环路）。由于 $v_p \in D_p$，由上述不变式必存在 $v_i \in D_i$ 与 $v_p$ 相容，且 $X_i$ 与其他已赋值节点无约束，故 $(v_1,\dots,v_i)$ 局部相容。归纳至 $i=n$ 即得全局合法解！
+
+\textbf{（2）时间复杂度证明}。$n$ 个节点的树恰有 $e = n - 1$ 条边。阶段 1 对每条边只调用\textbf{恰好 1 次} \texttt{REVISE}（永不重入队列），每次检查至多 $d^2$ 对取值，耗时 $O((n-1)d^2) = O(n d^2)$；阶段 2 对每个非根节点扫描至多 $d$ 个候选值与单一父值比对，耗时 $O(nd)$。总时间复杂度严格为 $\mathbf{O(n d^2)}$，比通用 AC-3 的 $O(e d^3)$ 整整低了一个因子 $d$。
+\end{proof}
+
+\subsection*{习题 3.7\quad 代码实验：$N$ 皇后三引擎对决与 $O(1)$ 冲突计数加速}
+\textbf{核心实现（$O(1)$ 冲突计数数组 + NumPy 向量化扫描）}：维护列计数 \texttt{col\_cnt[c]}、主对角线计数 \texttt{d1\_cnt[r - c + n]} 与副对角线计数 \texttt{d2\_cnt[r + c]}，每次只增减移动前后的旧/新位置计数，把单步复杂度从 $O(N^2)$ 压低至 $O(N)$：
+\begin{lstlisting}
+def min_conflicts_fast(n, seed=42, max_steps=100000):
+    rng = np.random.default_rng(seed)
+    q = rng.integers(0, n, size=n)
+    col_cnt = np.zeros(n, dtype=int)
+    d1_cnt = np.zeros(2 * n, dtype=int)
+    d2_cnt = np.zeros(2 * n, dtype=int)
+    for r, c in enumerate(q):
+        col_cnt[c] += 1; d1_cnt[r - c + n] += 1; d2_cnt[r + c] += 1
+    rows = cols = np.arange(n)
+    for step in range(1, max_steps + 1):
+        confs = (col_cnt[q] - 1) + (d1_cnt[rows - q + n] - 1) + (d2_cnt[rows + q] - 1)
+        conf_rows = np.flatnonzero(confs > 0)
+        if len(conf_rows) == 0:
+            return step, q
+        r = int(conf_rows[int(rng.integers(0, len(conf_rows)))])
+        oc = int(q[r])
+        col_cnt[oc] -= 1; d1_cnt[r - oc + n] -= 1; d2_cnt[r + oc] -= 1
+        cand = col_cnt[cols] + d1_cnt[r - cols + n] + d2_cnt[r + cols]
+        best = np.flatnonzero(cand == cand.min())
+        nc = int(best[int(rng.integers(0, len(best)))])
+        q[r] = nc
+        col_cnt[nc] += 1; d1_cnt[r - nc + n] += 1; d2_cnt[r + nc] += 1
+    return -1, q
+\end{lstlisting}
+\textbf{实测自检基准}（\texttt{seed=42}）：
+\begin{itemize}
+  \item $N=16$：朴素回溯尝试 $\mathbf{160{,}712}$ 节点，MRV+FC 仅 $\mathbf{44}$ 节点（缩减 $\mathbf{3{,}652}$ 倍）；$N=20$：MRV+FC 仅 $\mathbf{145}$ 节点；$N=50$：Min-Conflicts 仅 $\mathbf{87}$ 步，与表~\ref{tab:nqueens-exp} 完全一致；
+  \item 升级 $O(1)$ 计数数组求解 $\mathbf{N = 1{,}000}$ 皇后（\texttt{seed=42}）：仅用 $\mathbf{714}$ 步、耗时 $\mathbf{13.3\text{ ms}}$（远快于 $1$ 秒基准），经独立校验函数核查列集与两条对角线集合基数均为 $1{,}000$，全部 $\binom{1000}{2} = 499{,}500$ 对皇后冲突数精确为 $\mathbf{0}$。
+\end{itemize}
+
+\subsection*{习题 3.8\quad 代码实验：通用 AC-3 与 MAC 求解器验证}
+\textbf{MAC 核心骨架}（每层递归对值域做深拷贝并只向 AC-3 推入指向刚赋值变量的邻居弧）：
+\begin{lstlisting}
+def mac_solve(domains, neighbors, constraint_fn, assign=None):
+    assign = {} if assign is None else assign
+    if len(assign) == len(domains):
+        return dict(assign)
+    var = min((v for v in domains if v not in assign), key=lambda v: len(domains[v]))
+    for val in sorted(domains[var]):
+        dom_copy = {v: set(d) for v, d in domains.items()}
+        dom_copy[var] = {val}
+        init_arcs = [(nb, var) for nb in neighbors[var] if nb not in assign]
+        if ac3(dom_copy, neighbors, constraint_fn, init_arcs):
+            assign[var] = val
+            res = mac_solve(dom_copy, neighbors, constraint_fn, assign)
+            if res is not None:
+                return res
+            del assign[var]
+    return None
+\end{lstlisting}
+\textbf{三组测试用例的自动断言核验结果}：
+\begin{enumerate}[label=\arabic*., leftmargin=1.8em]
+  \item \textbf{递增链 $X_1 < X_2 < X_3$}（$D_1=D_2=\{1,2,3\},\, D_3=\{2,3\}$）：单次 \texttt{ac3} 返回 \texttt{True}，值域依次收束（$3\notin D_2 \Rightarrow 2,3\notin D_1 \Rightarrow 1\notin D_2 \Rightarrow 2\notin D_3$），精确收敛至 $D_1=\{1\},\, D_2=\{2\},\, D_3=\{3\}$（直接锁定唯一解）。
+  \item \textbf{$K_3$ 二着色问题}（$D_A=D_B=D_C=\{\text{R},\text{B}\}$）：单独调用 \texttt{ac3} 返回 \texttt{True}，且三者值域大小仍保持 $2$（证明弧相容对含环问题不完备）；调用 MAC 后仅展开 $1$ 层（试探 $A=\text{R}$，随即 AC-3 推出 $D_B=\{\text{B}\},\; D_C=\{\text{B}\}$，再经弧 $(C,B)$ 清空 $D_C$；对称试探 $A=\text{B}$ 同样清空），立即返回无解。
+  \item \textbf{澳大利亚 7 区域三着色}：（a）在 MAC 上收集全部可行解（含孤立岛 \textsf{T} 的 $3$ 种颜色），精确输出 $\mathbf{18}$ 组不同合法解（6 区域大陆共 $3 \times 2 \times 1 = 6$ 种着色，乘以 \textsf{T} 的 $3$ 种颜色得 $18$）；（b）预赋值 $\text{WA}=\text{R},\, \text{Q}=\text{G}$ 后单次调用 \texttt{ac3}，推出 $D_{\text{NT}}=\{\text{B}\},\; D_{\text{SA}}=\{\text{B}\}$，随后弧 $(\text{SA}, \text{NT})$ 清空 $D_{\text{SA}}$，零回溯瞬间返回 \texttt{False}。
+\end{enumerate}
+
+% =========================================================================
+\section{第 4 章习题精解（4.1--4.8）}
+% =========================================================================
+
+\subsection*{习题 4.1\quad 三值贝叶斯网络的参数压缩计算}
+每个离散变量有 $k=3$ 种取值，因此给定父节点的一种取值组合后，该变量只需 $k-1 = 2$ 个独立概率参数（第三项由归一化确定）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{完整联合概率分布的独立参数个数}：12 个三值变量共有 $3^{12} = 531{,}441$ 种联合状态，减去 $1$ 个归一化约束，需
+  \[
+    3^{12} - 1 = \mathbf{531{,}440}\text{ 个独立参数}.
+  \]
+  \item \textbf{贝叶斯网络的独立参数总数}：
+  \begin{itemize}
+    \item $2$ 个无父节点的根节点：$2 \times 3^0 \times (3 - 1) = 2 \times 2 = 4$；
+    \item $6$ 个恰有 $1$ 个父节点的节点：$6 \times 3^1 \times (3 - 1) = 6 \times 6 = 36$；
+    \item $4$ 个恰有 $2$ 个父节点的节点：$4 \times 3^2 \times (3 - 1) = 4 \times 18 = 72$。
+  \end{itemize}
+  合计仅需 $4 + 36 + 72 = \mathbf{112}$ 个独立参数。
+  \item \textbf{参数压缩比}：
+  \[
+    \frac{531{,}440}{112} = \mathbf{4{,}745}\text{ 倍（精确整除！参数量压缩了 } 99.979\%\text{）}.
+  \]
+\end{enumerate}
+
+\subsection*{习题 4.2\quad 学生成绩网络 d-分离快速判定}
+网络拓扑为 $D \to G \leftarrow I$，$I \to S$，$G \to L$（唯一对撞节点为 $G$，其后代为 $L$；分叉节点为 $I$）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$D \indep I$：成立。} $D$ 与 $I$ 之间仅有唯一无向简单路径 $D \to G \leftarrow I$；中间节点 $G$ 是对撞节点，且 $G$ 及其后代 $L$ 均不在空条件集 $\emptyset$ 中，故该路径被阻断。
+  \item \textbf{$D \indep I \mid G$：不成立。} 路径 $D \to G \leftarrow I$ 中的对撞节点 $G$ 本身被观测，激活路径（产生“解释消除”关联：已知考出高分 $G$ 且课程极难 $D$，则智力 $I$ 更高的概率上升）。
+  \item \textbf{$D \indep I \mid L$：不成立。} 路径 $D \to G \leftarrow I$ 中的对撞节点 $G$ 虽未被直接观测，但其后代 $L$ 在条件集中，依照 d-分离法则同样激活该对撞路径。
+  \item \textbf{$S \indep L \mid I$：成立。} $S$ 与 $L$ 之间仅有唯一无向简单路径 $S \leftarrow I \to G \to L$；节点 $I$ 构成非对撞的分叉结构（$S \leftarrow I \to G$）且 $I$ 位于条件集中，故路径在 $I$ 处被阻断。
+  \item \textbf{$D \indep S \mid L$：不成立。} $D$ 与 $S$ 之间仅有唯一无向简单路径 $D \to G \leftarrow I \to S$：对撞节点 $G$ 因后代 $L$ 被观测而处于\textbf{通畅}状态，分叉节点 $I$ 未在条件集中也处于\textbf{通畅}状态，整条路径无一阻断节点，因此 $D$ 与 $S$ 在给定 $L$ 下不条件独立！
+\end{enumerate}
+
+\subsection*{习题 4.3\quad Pearl 警报网络变量消元与解释消除手算}
+沿用图~\ref{fig:alarm-bn} 的全部精确 CPT：$P(B=1)=0.001$、$P(E=1)=0.002$；$P(A=1\mid B,E)$ 在 $(1,1)$、$(1,0)$、$(0,1)$、$(0,0)$ 下依次为 $0.95$、$0.94$、$0.29$、$0.001$；$P(J=1\mid A=1)=0.90$，$P(J=1\mid A=0)=0.05$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{变量消元求 $P(B=1 \mid J=1)$}：
+  目标比例式为 $P(B \mid J=1) \propto P(B)\sum_e P(e)\sum_a P(a\mid B,e) P(J=1\mid a)\sum_m P(m\mid a)$。
+  \begin{itemize}
+    \item \textbf{步骤 1（剪去无关叶节点 $M$）}：$\sum_{m\in\{0,1\}} P(m\mid A) \equiv 1$，直接消去。
+    \item \textbf{步骤 2（消去 $E$，生成因子 $f_1(A, B) = \sum_e P(e)\, P(A\mid B, e)$）}：
+    \begin{align*}
+      f_1(A=1, B=1) &= 0.002 \times 0.95 + 0.998 \times 0.94 = 0.0019 + 0.93812 = 0.94002, \\
+      f_1(A=0, B=1) &= 1 - 0.94002 = 0.05998, \\
+      f_1(A=1, B=0) &= 0.002 \times 0.29 + 0.998 \times 0.001 = 0.00058 + 0.000998 = 0.001578, \\
+      f_1(A=0, B=0) &= 1 - 0.001578 = 0.998422.
+    \end{align*}
+    \item \textbf{步骤 3（消去 $A$，生成因子 $f_2(B) = \sum_a f_1(a, B)\, P(J=1 \mid a)$）}：
+    \begin{align*}
+      f_2(B=1) &= 0.94002 \times 0.90 + 0.05998 \times 0.05 = 0.846018 + 0.002999 = 0.849017, \\
+      f_2(B=0) &= 0.001578 \times 0.90 + 0.998422 \times 0.05 = 0.0014202 + 0.0499211 = 0.0513413.
+    \end{align*}
+    \item \textbf{步骤 4（乘以先验 $P(B)$ 并归一化）}：
+    \begin{align*}
+      P(B=1, J=1) &= 0.001 \times 0.849017 = 0.000849017, \\
+      P(B=0, J=1) &= 0.999 \times 0.0513413 = 0.0512899587, \\
+      P(J=1) &= 0.000849017 + 0.0512899587 = 0.0521389757.
+    \end{align*}
+    归一化得
+    \[
+      P(B=1 \mid J=1) = \frac{0.000849017}{0.0521389757} \approx \mathbf{0.016284} \quad (\approx 1.63\%).
+    \]
+  \end{itemize}
+  \item \textbf{变量消元求 $P(B=1 \mid J=1, E=1)$}：
+  同样剪去 $M$；已知 $E=1$，常数因子 $P(E=1)=0.002$ 与 $B$ 无关，在归一化中自动约去。只需消去 $A$ 得到 $g(B) = \sum_a P(a \mid B, E=1)\, P(J=1 \mid a)$：
+  \begin{align*}
+    g(B=1) &= 0.95 \times 0.90 + 0.05 \times 0.05 = 0.855 + 0.0025 = 0.8575, \\
+    g(B=0) &= 0.29 \times 0.90 + 0.71 \times 0.05 = 0.261 + 0.0355 = 0.2965.
+  \end{align*}
+  乘以 $P(B)$ 得未归一化值：$\tilde{p}(B=1) = 0.001 \times 0.8575 = 0.0008575$，$\tilde{p}(B=0) = 0.999 \times 0.2965 = 0.2962035$，总和 $0.2970610$。归一化得
+  \[
+    P(B=1 \mid J=1, E=1) = \frac{0.0008575}{0.2970610} \approx \mathbf{0.002887} \quad (\approx 0.29\%).
+  \]
+  \item \textbf{数量级变化与 d-分离解释}：
+  仅接到约翰来电时，盗窃概率从先验 $0.1\%$ 飙升 $16.3$ 倍至 $1.63\%$；但一旦同时得知发生了地震（$E=1$），盗窃概率立刻骤降 $\mathbf{5.64}$ 倍至 $0.29\%$（回落近一个数量级）！从 d-分离视角看，两个原本独立的病因 $B$ 与 $E$ 在对撞结构 $B \to A \leftarrow E$ 处汇合；观测到对撞节点 $A$ 的后代 $J=1$ 激活了路径 $B \to A \leftarrow E$，使 $B$ 与 $E$ 产生强烈的条件负相关——这正是经典的\textbf{解释消除（Explaining Away）}现象：地震已经充分解释了警报响起与约翰来电，不再需要再假定家中遭贼。
+\end{enumerate}
+
+\subsection*{习题 4.4\quad 马尔可夫毯计算与最小屏蔽集证明}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{学生成绩网络中 $I$ 与 $G$ 的马尔可夫毯}（回忆 $\MB(X) = \Pa(X) \cup \mathrm{Ch}(X) \cup \mathrm{Sp}(X)$，即父节点、子节点及子节点的其他父节点）：
+  \begin{itemize}
+    \item 节点 $I$：父节点 $\varnothing$，子节点 $\{G, S\}$，子节点 $G$ 的另一父节点（配偶）为 $\{D\}$，故 $\mathbf{\MB(I) = \{D, G, S\}}$；
+    \item 节点 $G$：父节点 $\{D, I\}$，子节点 $\{L\}$，子节点 $L$ 无其他父节点，故 $\mathbf{\MB(G) = \{D, I, L\}}$。
+  \end{itemize}
+  \item \textbf{证明在忠实性（Faithfulness）下 $\MB(X)$ 是最小屏蔽集（即 $\MB(X) \subseteq \mathbf{S}$）}：
+  \begin{proof}
+  用反证法。假设 $\mathbf{S}$ 满足 $X \indep (V \setminus (\{X\} \cup \mathbf{S})) \mid \mathbf{S}$，但存在某个节点 $Y \in \MB(X)$ 却不在 $\mathbf{S}$ 中（即 $Y \notin \mathbf{S}$ 且显然 $Y \neq X$）。由此必有 $X \indep Y \mid \mathbf{S}$；再由分布对图 $\mathcal{G}$ 的忠实性（分布中的每条独立性都必须对应图上的 d-分离），$\mathbf{S}$ 必须阻断 $X$ 与 $Y$ 之间的\textbf{所有}无向路径。下面按 $Y \in \MB(X)$ 的三种角色逐一导出矛盾：
+  \begin{enumerate}[label=\textbf{情形 \arabic*:}, leftmargin=4.2em]
+    \item $Y \in \Pa(X)$：图中存在长度为 $1$ 的直接有向边 $Y \to X$，该路径不含任何中间节点，因此绝不可能被任意不含 $\{X, Y\}$ 的集合 $\mathbf{S}$ 阻断，与 d-分离矛盾。
+    \item $Y \in \mathrm{Ch}(X)$：同理，直接边 $X \to Y$ 无中间节点，不可能被 $\mathbf{S}$ 阻断，矛盾。
+    \item $Y \in \mathrm{Sp}(X)$：存在公共子节点 $Z \in \mathrm{Ch}(X) \cap \mathrm{Ch}(Y)$，构成对撞路径 $X \to Z \leftarrow Y$。
+    \begin{itemize}
+      \item 若 $Z \in \mathbf{S}$，则对撞节点 $Z$ 位于条件集中，路径 $X \to Z \leftarrow Y$ 被\textbf{激活}，与 $X \indep Y \mid \mathbf{S}$ 矛盾；
+      \item 若 $Z \notin \mathbf{S}$，则 $Z \in \mathrm{Ch}(X) \setminus \mathbf{S}$，回到情形 2（直接边 $X \to Z$ 未被阻断），与 $X \indep Z \mid \mathbf{S}$ 矛盾！
+    \end{itemize}
+  \end{enumerate}
+  三种情形均导出矛盾，故不存在漏掉的成员，必有 $\MB(X) \subseteq \mathbf{S}$。结合定理~\ref{thm:mb}，马尔可夫毯正是满足屏蔽性质的唯一最小节点集。
+  \end{proof}
+\end{enumerate}
+
+\subsection*{习题 4.5\quad 马尔可夫等价类与不可逆的 V-结构证明}
+\begin{proof}
+对三变量 $(X, Y, Z)$，全部非平凡条件独立陈述仅可能涉及非相邻对 $(X, Y)$（因任意直连边两端点永不 d-分离），即边际独立 $X \indep Y$ 与条件独立 $X \indep Y \mid Z$。逐一列出三种结构的 d-分离真值表：
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{三元组结构} & \textbf{无向骨架} & $X \indep Y$（空集） & $X \indep Y \mid Z$ \\
+\midrule
+链式 $X \to Z \to Y$（或 $X \leftarrow Z \leftarrow Y$） & $X\text{--}Z\text{--}Y$ & 假（通畅） & 真（$Z$ 阻断） \\
+分叉 $X \leftarrow Z \to Y$ & $X\text{--}Z\text{--}Y$ & 假（通畅） & 真（$Z$ 阻断） \\
+对撞（V-结构）$X \to Z \leftarrow Y$ & $X\text{--}Z\text{--}Y$ & \textbf{真（$Z$ 阻断）} & \textbf{假（$Z$ 激活）} \\
+\bottomrule
+\end{tabular}
+\end{center}
+由表立见：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{链式与分叉编码完全相同的条件独立集} $\{X \indep Y \mid Z\}$，且联合分布可以互相精确改写：$P(X)P(Z\mid X)P(Y\mid Z) = P(Z)P(X\mid Z)P(Y\mid Z)$。因此，仅从观测数据（不做干预实验）永远无法区分链式与分叉的箭头方向。
+  \item \textbf{对撞结构编码的条件独立集 $\{X \indep Y\}$ 与前两者严格不同}（两个真值恰好完全相反！），因而单靠观测数据即可唯一识别出对撞箭头。
+  \item \textbf{推及一般马尔可夫等价类（Verma--Pearl 定理的必要性）}：
+  \begin{itemize}
+    \item \textbf{无向骨架必相同}：在任意 DAG 中，两节点 $U, V$ 之间存在无向边当且仅当\textbf{不存在任何子集} $\mathbf{S} \subseteq V \setminus \{U, V\}$ 能使 $U \indep V \mid \mathbf{S}$。因为两个马尔可夫等价 DAG 拥有完全相同的 d-分离集合，所以它们的无向邻接关系（骨架）必然完全一致。
+    \item \textbf{无屏蔽 V-结构必相同}：设 $X\text{--}Z\text{--}Y$ 是骨架中的一条诱导路径且 $X, Y$ 不相邻。因为 $X, Y$ 不相邻，必存在至少一个分离集 $\mathbf{S}$ 使 $X \indep Y \mid \mathbf{S}$。若 $Z$ 是对撞节点（无屏蔽 V-结构 $X \to Z \leftarrow Y$），则\textbf{任何}能阻断该路径的分离集 $\mathbf{S}$ 都绝对不能包含 $Z$；反之若 $Z$ 不是对撞节点（链式或分叉），则\textbf{每一个}分离集 $\mathbf{S}$ 都必须包含 $Z$。因此，所有无屏蔽 V-结构被 d-分离集合唯一锁定，任何两个马尔可夫等价 DAG 必共享相同的骨架与无屏蔽 V-结构！
+  \end{itemize}
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.6\quad 链式网络消元顺序复杂度与非忠实分布反例}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$n$ 节点有向链 $X_1 \to X_2 \to \cdots \to X_n$ 查询 $P(X_n)$ 的最大中间因子作用域大小}：
+  初始因子池为 $\{P(X_1),\, P(X_2\mid X_1),\, P(X_3\mid X_2),\, \dots,\, P(X_n\mid X_{n-1})\}$。
+  \begin{itemize}
+    \item \textbf{顺次消元 $X_1, X_2, \dots, X_{n-1}$}：
+    消去 $X_1$ 时，涉及因子 $P(X_1)$ 与 $P(X_2\mid X_1)$，乘积作用域为 $\{X_1, X_2\}$（大小 $2$），求和后留下单变量因子 $\tau_1(X_2)$（大小 $1$）；一般地，第 $k$ 步消去 $X_k$ 时，只涉及 $\tau_{k-1}(X_k)$ 与 $P(X_{k+1}\mid X_k)$，乘积作用域为 $\{X_k, X_{k+1}\}$（大小始终为 $2$）。故\textbf{最大中间因子作用域大小为 $\mathbf{2}$}（表长 $O(d^2)$，与链长 $n$ 无关）。
+    \item \textbf{隔点消元 $X_2, X_4, \dots$（偶数下标优先，再消奇数下标）}：
+    假设 $n \ge 3$。第一步消去 $X_2$ 时，同时涉及 $P(X_2\mid X_1)$ 与 $P(X_3\mid X_2)$，乘积作用域合并为 $\{X_1, X_2, X_3\}$（大小 $\mathbf{3}$），求和后产生跨越边的新因子 $f(X_1, X_3)$（大小 $2$）；随后消去 $X_4$ 时涉及 $\{X_3, X_4, X_5\}$（大小 $3$），产生 $f(X_3, X_5)$；所有偶数节点消完后，剩余因子构成缩短一倍的新链 $X_1\text{--}X_3\text{--}X_5\text{--}\cdots\text{--}X_n$，后续继续按任意内部节点消元（如消 $X_3$ 涉及 $\{X_1, X_3, X_5\}$）仍合并为大小 $3$ 的因子。因此，隔点消元的\textbf{最大中间因子作用域大小为 $\mathbf{3}$}（表长 $O(d^3)$，相比顺次消元多了一个状态空间因子 $d$！）。
+  \end{itemize}
+  \item \textbf{链式网络 $X \to Z \to Y$ 上的具体非忠实二值 CPT 反例}：
+  取二值变量 $X, Z, Y \in \{0, 1\}$，设定 CPT 如下：
+  \[
+    P(X=1) = 0.5,\qquad
+    P(Z=1 \mid X=1) = 0.8,\quad P(Z=1 \mid X=0) = 0.2,
+  \]
+  \[
+    P(Y=1 \mid Z=1) = 0.5,\qquad P(Y=1 \mid Z=0) = 0.5.
+  \]
+  在图结构 $X \to Z \to Y$ 上，空条件集 $\emptyset$ 下路径通畅，故 $X$ 与 $Y$ \textbf{未被 d-分离}；但直接计算实际条件分布：
+  \begin{align*}
+    P(Y=1 \mid X=1) &= 0.8 \times 0.5 + 0.2 \times 0.5 = 0.5, \\
+    P(Y=1 \mid X=0) &= 0.2 \times 0.5 + 0.8 \times 0.5 = 0.5,
+  \end{align*}
+  即 $P(Y \mid X) = P(Y)$，实际分布精确满足边际独立 $X \indep Y$！
+  （注记：对于二值单链 $X \to Z \to Y$，展开 $P(Y=1\mid X=x) = P(Y=1\mid Z=0) + \big[P(Y=1\mid Z=1)-P(Y=1\mid Z=0)\big]P(Z=1\mid X=x)$ 可知，非忠实当且仅当某条边退化为常值行；若图含两条并行路径 $X\to Z\to Y$ 与 $X\to Y$，则两条非零因果效应还可相互抵消造成更隐蔽的非忠实独立。）
+\end{enumerate}
+
+\subsection*{习题 4.7\quad 代码实验：带无关节点预剪枝的通用变量消元引擎}
+\textbf{无关叶节点递归剪枝核心实现}（迭代剔除既不在 $\mathbf{Q}$ 也不在 $\mathbf{E}$ 且出度为 $0$ 的节点）：
+\begin{lstlisting}
+def prune_barren_nodes(children_map, query_vars, evidence):
+    keep = set(query_vars) | set(evidence.keys())
+    alive = set(children_map.keys())
+    changed = True
+    while changed:
+        changed = False
+        for v in list(alive):
+            if v not in keep and not (children_map[v] & alive):
+                alive.remove(v)
+                changed = True
+    return alive
+\end{lstlisting}
+将 \texttt{variable\_elimination}（代码~\ref{lst:ve}）的初始因子池限定在 \texttt{alive} 对应的 CPT 集合上，其余逻辑不变。
+
+\textbf{实测自检基准核验}：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 在 Pearl 警报网络上测试 6 组不同查询/证据组合，例如 $P(B\mid J=1, M=1)=0.284172$、$P(B\mid J=1)=0.016284$、$P(B\mid J=1, E=1)=0.002887$、$P(A\mid J=1, M=0)=0.055825$、$P(E\mid M=1)=0.035881$ 与 $P(J\mid B=1)=0.849017$，剪枝后 VE 与暴力枚举的最大绝对误差均为 $< 10^{-15} < 10^{-14}$；
+  \item 查询 $P(B=1 \mid J=1)$ 时，由于叶节点 $M \notin \{B, J\}$ 且无子节点，\texttt{prune\_barren\_nodes} 自动删去 $M$，参与计算的因子数由 $5$ 个降至 $\mathbf{4}$ 个，精确输出 $P(B=1\mid J=1) = \mathbf{0.016284}$（精确值 $0.01628373$，误差 $< 10^{-6}$）。
+\end{enumerate}
+
+\subsection*{习题 4.8\quad 代码实验：$3\times 4$ 网格 BN 的 Min-Degree 消元序基准}
+\textbf{Min-Degree 贪心消元序核心实现}（基于当前因子池维护隐式交互图，每步消去邻居数最少的隐藏变量并把其邻居连成新团）：
+\begin{lstlisting}
+def min_degree_order(scopes, hidden_vars):
+    cur = [set(sc) for sc in scopes]
+    rem = set(hidden_vars)
+    order = []
+    while rem:
+        def degree(v):
+            nbrs = set().union(*(sc for sc in cur if v in sc)) - {v}
+            return len(nbrs)
+        best = min(sorted(rem), key=degree)
+        order.append(best)
+        rem.remove(best)
+        rel = [sc for sc in cur if best in sc]
+        cur = [sc for sc in cur if best not in sc]
+        if rel:
+            merged = set().union(*rel) - {best}
+            if merged:
+                cur.append(merged)
+    return order
+\end{lstlisting}
+\textbf{实测自检基准}（$3\times 4$ 有向网格 BN，证据为左上角 $(0,0)$，查询右下角 $(2,3)$，共 $10$ 个隐藏变量）：
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{消元顺序策略} & \textbf{最大中间因子变量数} & \textbf{最大因子表长 $2^w$} & \textbf{总浮点乘法次数} \\
+\midrule
+（a）按行主序消元 & $5$ & $32$ & $232$ \\
+（b）\textbf{Min-Degree 贪心消元} & $\mathbf{4}$（$\le 4$） & $\mathbf{16}$ & $\mathbf{128}$ \\
+（c）20 次随机打乱（最坏序） & $\mathbf{8}$（$\ge 6$） & $\mathbf{256}$ & $\mathbf{624}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+所有合法消元序算得的后验 $P(X_{2,3}\mid X_{0,0})$ 两两差值均 $< 10^{-15}$；而 Min-Degree 策略自动沿较短的“行方向（宽度 $3$）”推进波前，把最大因子规模严格压在 $\mathbf{4}$ 个变量（表长 $16$），比最坏随机序（$8$ 变量、表长 $256$）压缩了 $16$ 倍存储与近 $5$ 倍乘法开销！
+
+% =========================================================================
+\section{第 5 章习题精解（5.1--5.8）}
+% =========================================================================
+
+\subsection*{习题 5.1\quad Pearl 警报网络的似然加权权重手算}
+证据为 $E = 1,\; J = 1,\; M = 0$，按拓扑序 $B \to E \to A \to J \to M$ 执行似然加权：仅对隐藏变量（$B, A$）按条件分布采样，每遇到一个证据变量（$E, J, M$）就把当前样本权重乘以该证据在父节点当前赋值下的条件概率。
+\begin{itemize}
+  \item \textbf{样本（a）：$B=0,\; A=1$（配合固定证据 $E=1,\; J=1,\; M=0$）}：
+  \begin{align*}
+    w_a &= P(E=1) \cdot P(J=1 \mid A=1) \cdot P(M=0 \mid A=1) \\
+        &= 0.002 \times 0.90 \times (1 - 0.70)
+        = 0.002 \times 0.90 \times 0.30
+        = \frac{27}{50{,}000} = \mathbf{0.00054}.
+  \end{align*}
+  \item \textbf{样本（b）：$B=1,\; A=0$（配合固定证据 $E=1,\; J=1,\; M=0$）}：
+  \begin{align*}
+    w_b &= P(E=1) \cdot P(J=1 \mid A=0) \cdot P(M=0 \mid A=0) \\
+        &= 0.002 \times 0.05 \times (1 - 0.01)
+        = 0.002 \times 0.05 \times 0.99
+        = \frac{99}{1{,}000{,}000} = \mathbf{0.000099}.
+  \end{align*}
+  \item \textbf{仅基于这两条样本的加权后验估计}（只有样本（b）满足 $B=1$）：
+  \[
+    \hat{P}(B=1 \mid E=1, J=1, M=0)
+    = \frac{w_b}{w_a + w_b}
+    = \frac{0.000099}{0.00054 + 0.000099}
+    = \frac{99}{639} = \frac{11}{71} \approx \mathbf{0.1549}\quad (0.154930).
+  \]
+\end{itemize}
+
+\subsection*{习题 5.2\quad 雨伞世界连续 3 天未带伞的前向滤波手算}
+沿用第~\ref{sec:hmm} 节约定：隐藏状态顺序为 $[\text{Rain}, \text{Sun}]$，先验 $\boldsymbol{\pi}_0 = [0.5, 0.5]$，转移矩阵 $T = \begin{psmallmatrix}0.7 & 0.3\\ 0.3 & 0.7\end{psmallmatrix}$，未带伞（$\neg\text{U}$）的发射似然向量为 $\mathbf{e}_{\neg\text{U}} = [0.1,\; 0.8]$。观测序列 $O_{1:3} = [\neg\text{U}, \neg\text{U}, \neg\text{U}]$。
+\begin{enumerate}[label=\textbf{第 \arabic* 天:}, leftmargin=4.2em]
+  \item \textbf{$t=1$（$O_1 = \neg\text{U}$）}：
+  \begin{itemize}
+    \item 预测分布：$\boldsymbol{\pi}_1 = \boldsymbol{\pi}_0 T = [0.5,\; 0.5]$；
+    \item 乘以似然 $[0.1, 0.8]$ 得未归一化向量：$[0.05,\; 0.40]$；
+    \item 归一化常数：$Z_1 = 0.05 + 0.40 = \frac{9}{20} = \mathbf{0.4500}$；
+    \item 滤波分布：$\boldsymbol{\alpha}_1 = \left[\frac{0.05}{0.45},\; \frac{0.40}{0.45}\right] = \left[\frac{1}{9},\; \frac{8}{9}\right] \approx [\mathbf{0.1111},\; \mathbf{0.8889}]$。
+  \end{itemize}
+  \item \textbf{$t=2$（$O_2 = \neg\text{U}$）}：
+  \begin{itemize}
+    \item 预测分布：$\boldsymbol{\alpha}_1 T = \left[\frac{1}{9}(0.7)+\frac{8}{9}(0.3),\; \frac{1}{9}(0.3)+\frac{8}{9}(0.7)\right] = \left[\frac{31}{90},\; \frac{59}{90}\right] \approx [0.344444,\; 0.655556]$；
+    \item 乘以似然 $[0.1, 0.8]$：$\left[\frac{31}{900},\; \frac{472}{900}\right] \approx [0.034444,\; 0.524444]$；
+    \item 归一化常数：$Z_2 = \frac{503}{900} \approx \mathbf{0.5589}$；
+    \item 滤波分布：$\boldsymbol{\alpha}_2 = \left[\frac{31}{503},\; \frac{472}{503}\right] \approx [\mathbf{0.0616},\; \mathbf{0.9384}]$。
+  \end{itemize}
+  \item \textbf{$t=3$（$O_3 = \neg\text{U}$）}：
+  \begin{itemize}
+    \item 预测分布：$\boldsymbol{\alpha}_2 T = \left[\frac{31(0.7)+472(0.3)}{503},\; \frac{31(0.3)+472(0.7)}{503}\right] = \left[\frac{1633}{5030},\; \frac{3397}{5030}\right] \approx [0.324652,\; 0.675348]$；
+    \item 乘以似然 $[0.1, 0.8]$：$\left[\frac{1633}{50300},\; \frac{27176}{50300}\right] \approx [0.032465,\; 0.540278]$；
+    \item 归一化常数：$Z_3 = \frac{28809}{50300} \approx \mathbf{0.5727}$；
+    \item 滤波分布：$\boldsymbol{\alpha}_3 = \left[\frac{1633}{28809},\; \frac{27176}{28809}\right] \approx [\mathbf{0.0567},\; \mathbf{0.9433}]$。
+  \end{itemize}
+\end{enumerate}
+\textbf{整条观测序列的边际概率}：
+\[
+  P(O_{1:3}) = Z_1 Z_2 Z_3 = \frac{9}{20} \times \frac{503}{900} \times \frac{28809}{50300} = \frac{28809}{200000} \approx \mathbf{0.1440}\quad (0.144045).
+\]
+可见连续三天未带伞使下雨后验从 $50\%$ 迅速收敛并稳定在约 $5.67\%$ 附近（因每天仍有 $30\%$ 概率变天转雨，故后验不会归零）。
+
+\subsection*{习题 5.3\quad 学生成绩网络的 Gibbs 采样全条件分布推导}
+网络因子分解为 $P(D, I, G, S, L) = P(D)\, P(I)\, P(G \mid D, I)\, P(S \mid I)\, P(L \mid G)$。给定证据 $L=1,\; S=1$，由定理~\ref{thm:mb}，每个隐藏变量的全条件分布正比于\textbf{包含该变量本身的全部 CPT 因子之积}（即自身 CPT 乘以其所有子节点的 CPT），其余无关因子均可约去：
+\begin{align*}
+  P(D \mid I, G, L=1, S=1) &\;\propto\; P(D)\, P(G \mid D, I), \\
+  P(I \mid D, G, L=1, S=1) &\;\propto\; P(I)\, P(G \mid D, I)\, P(S=1 \mid I), \\
+  P(G \mid D, I, L=1, S=1) &\;\propto\; P(G \mid D, I)\, P(L=1 \mid G).
+\end{align*}
+（留意简洁的屏蔽效果：重采样 $D$ 时完全不依赖证据 $L, S$；重采样 $I$ 时仅看证据 $S=1$ 而不看 $L=1$；重采样 $G$ 时仅看证据 $L=1$ 而不看 $S=1$！）
+
+\subsection*{习题 5.4\quad HMM 的 $k$ 步前瞻预测闭式与固定滞后平滑推导}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$k$ 步前瞻预测 $P(S_{t+k} \mid O_{1:t})$ 的闭式表达与 $k\to\infty$ 极限}：
+  记行向量 $\mathbf{p}_{t+k \mid t} := \big[P(S_{t+k}=1 \mid O_{1:t}), \dots, P(S_{t+k}=K \mid O_{1:t})\big]$，其中 $k=0$ 即当前滤波分布 $\mathbf{p}_{t\mid t} = \boldsymbol{\alpha}_t$。因为未来 $t+1,\dots,t+k$ 无新观测证据，由一阶马尔可夫性 $S_{t+j} \indep O_{1:t} \mid S_{t+j-1}$ 及全概率公式（式~\eqref{eq:hmm-pred}），对任意 $j \ge 1$ 有
+  \[
+    P(S_{t+j} = s \mid O_{1:t}) = \sum_{s' \in \mathcal{S}} P(S_{t+j-1} = s' \mid O_{1:t})\, T_{s', s}
+    \;\Longleftrightarrow\;
+    \mathbf{p}_{t+j \mid t} = \mathbf{p}_{t+j-1 \mid t}\, T.
+  \]
+  连续迭代 $k$ 次，即得闭式矩阵表达：
+  \[
+    \mathbf{p}_{t+k \mid t} = \boldsymbol{\alpha}_t\, T^k.
+  \]
+  \textbf{极限分析}：当 $T$ 为正则（不可约且非周期，即存在正整数 $m$ 使 $T^m$ 全元素严格为正）随机转移矩阵时，由 Perron--Frobenius 定理，$T$ 存在唯一平稳分布 $\boldsymbol{\pi}_\infty$（满足 $\boldsymbol{\pi}_\infty T = \boldsymbol{\pi}_\infty$），且 $\lim_{k\to\infty} T^k = \mathbf{1}\boldsymbol{\pi}_\infty$（每一行均收敛至 $\boldsymbol{\pi}_\infty$）。于是对任意当前滤波分布 $\boldsymbol{\alpha}_t$（满足 $\boldsymbol{\alpha}_t \mathbf{1} = 1$）：
+  \[
+    \lim_{k\to\infty} \mathbf{p}_{t+k \mid t} = \boldsymbol{\alpha}_t (\mathbf{1}\boldsymbol{\pi}_\infty) = (\boldsymbol{\alpha}_t \mathbf{1})\boldsymbol{\pi}_\infty = \boldsymbol{\pi}_\infty.
+  \]
+  直觉上，在缺乏新观测的遥远未来，历史证据 $O_{1:t}$ 的信息以第二大特征值模长 $|\lambda_2|^k$ 的速度指数级衰减，最终完全退化为链的静态先验平稳分布 $\boldsymbol{\pi}_\infty$（例如雨伞世界中 $\boldsymbol{\pi}_\infty = [0.5, 0.5]$）。
+  \item \textbf{固定滞后平滑 $P(S_{t-d} \mid O_{1:t})$ 的公式}：
+  由条件独立性 $O_{t-d+1:t} \indep O_{1:t-d} \mid S_{t-d}$，与全序列平滑式~\eqref{eq:hmm-smooth} 同理可得：
+  \[
+    P(S_{t-d} = s \mid O_{1:t}) \;\propto\; \alpha_{t-d}(s)\, \beta_{t-d \mid t}(s),
+  \]
+  其中 $\alpha_{t-d}(s) = P(S_{t-d}=s \mid O_{1:t-d})$ 为 $d$ 步前缓存的前向滤波向量，而长度为 $d$ 的窗口后向消息向量 $\boldsymbol{\beta}_{t-d\mid t}$ 满足矩阵连乘形式（列向量约定，记 $D_o := \operatorname{diag}(E_{:, o})$）：
+  \[
+    \boldsymbol{\beta}_{t-d \mid t} = \left(\prod_{\tau=t-d+1}^{t} T\, D_{o_\tau}\right)\mathbf{1}.
+  \]
+  工程上每推进一帧只需对最近 $d$ 步做一次 $O(d K^2)$ 反向递推（若 $T$ 与 $D_{o_\tau}$ 可逆还可递推维护窗口乘积矩阵至 $O(K^3)$ 常数滞后开销），在允许 $d$ 帧微小延迟的实时流式系统中大幅提升状态估计精度。
+\end{enumerate}
+
+\subsection*{习题 5.5\quad Gibbs 采样的可约性陷阱（确定性约束反例）与修复}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{构造两变量反例并证明无法收敛}：
+  设二值随机变量 $(X, Y) \in \{0,1\}^2$ 的真实目标分布为确定性等价约束 $X = Y$：
+  \[
+    P(X=0, Y=0) = 0.5,\quad P(X=1, Y=1) = 0.5,\quad P(X=0, Y=1) = P(X=1, Y=0) = 0.
+  \]
+  该分布显然不满足定理~\ref{thm:gibbs-stationarity} 所需的严格正性条件 $P > 0$。若单坐标 Gibbs 采样从 $(X^{(0)}, Y^{(0)}) = (0, 0)$ 出发：
+  \begin{itemize}
+    \item 固定 $Y=0$ 重采样 $X$：$P(X=0 \mid Y=0) = \frac{0.5}{0.5 + 0} = 1$，$P(X=1 \mid Y=0) = 0$，故新状态必保持 $X=0$；
+    \item 固定 $X=0$ 重采样 $Y$：$P(Y=0 \mid X=0) = \frac{0.5}{0.5 + 0} = 1$，$P(Y=1 \mid X=0) = 0$，故新状态必保持 $Y=0$。
+  \end{itemize}
+  数学归纳可知，对一切迭代步 $t \ge 0$ 均有 $(X^{(t)}, Y^{(t)}) \equiv (0, 0)$，永远无法跨过零概率障碍到达另一状态 $(1, 1)$！因此采样链被割裂成两个互不连通的孤岛 $\{(0,0)\}$ 与 $\{(1,1)\}$（马尔可夫链\textbf{可约 / Reducible}，不满足遍历性），无论采样多少亿步，经验估计恒为 $\hat{P}(X=1) = 0 \neq 0.5$，彻底失效！
+  \item \textbf{两种标准工程修复方案}：
+  \begin{itemize}
+    \item \textbf{分块 Gibbs 采样（Blocked Gibbs Sampling）}：将存在确定性或极强耦合关系的变量打包为一个联合块 $B=(X, Y)$，一步直接从联合条件分布 $P(X, Y \mid \text{rest})$ 采样（本例中一步即以 $0.5/0.5$ 自由跳变于 $(0,0)$ 与 $(1,1)$ 之间）；
+    \item \textbf{平滑扰动或混合跳转（Smoothing / Tempering / MH-Hybrid）}：对零概率表项施加微小正平滑 $\epsilon > 0$（配合模拟退火或重要性重加权消除偏差），或在单坐标更新中穿插允许同时翻转多变量的 Metropolis--Hastings 全局提议步，恢复链的不可约性。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 5.6\quad 有效样本量（ESS）上下界与 Viterbi 最优子结构证明}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{证明 $1 \le \mathrm{ESS} \le M$ 及其等号成立条件}（设 $w_m \ge 0$ 且至少有一个 $w_m > 0$）：
+  \begin{proof}
+  \textbf{下界 $\mathrm{ESS} \ge 1$}：展开分子平方得
+  \[
+    \left(\sum_{m=1}^{M} w_m\right)^2 = \sum_{m=1}^{M} w_m^2 + 2\sum_{1 \le i < j \le M} w_i w_j \;\ge\; \sum_{m=1}^{M} w_m^2,
+  \]
+  因为所有交叉项 $w_i w_j \ge 0$。两边同除以正数 $\sum_{m=1}^{M} w_m^2$，立得 $\mathrm{ESS} \ge 1$。等号成立当且仅当所有 $i < j$ 均满足 $w_i w_j = 0$，即\textbf{至多只有一个样本权重大于 $0$}（其余权重全为 $0$，单一样本完全垄断估计）。
+
+  \textbf{上界 $\mathrm{ESS} \le M$}：对向量 $\mathbf{w} = (w_1, \dots, w_M)$ 与全 $1$ 向量 $\mathbf{1} = (1, \dots, 1)$ 应用 Cauchy--Schwarz 不等式：
+  \[
+    \left(\sum_{m=1}^{M} w_m \cdot 1\right)^2 \le \left(\sum_{m=1}^{M} w_m^2\right)\left(\sum_{m=1}^{M} 1^2\right) = M \sum_{m=1}^{M} w_m^2.
+  \]
+  两边同除以 $\sum_{m=1}^{M} w_m^2 > 0$，即得 $\mathrm{ESS} \le M$。等号成立当且仅当 $\mathbf{w}$ 与 $\mathbf{1}$ 线性相关，即\textbf{$w_1 = w_2 = \dots = w_M > 0$}（所有样本等权，无任何权重退化）。
+  \end{proof}
+  \item \textbf{数学归纳法证明对数空间 Viterbi 递推式~\eqref{eq:viterbi-dp} 的最优子结构与全局最优性}：
+  \begin{proof}
+  需证对任意时刻 $t \in \{1, \dots, T\}$ 与任意状态 $s \in \mathcal{S}$，由式~\eqref{eq:viterbi-init}--\eqref{eq:viterbi-dp} 算出的 $\delta_t(s)$ 精确满足
+  \[
+    \delta_t(s) = \max_{s_1, \dots, s_{t-1} \in \mathcal{S}} \log P(S_{1:t-1} = s_{1:t-1},\; S_t = s,\; O_{1:t}).
+  \]
+  \begin{itemize}
+    \item \textbf{归纳基础（$t = 1$）}：无前置状态序列，由定义 $P(S_1 = s, O_1) = \pi_1(s) E_{s, o_1}$，两边取对数即得 $\delta_1(s) = \log \pi_1(s) + \log E_{s, o_1} = \log P(S_1 = s, O_1)$，命题成立。
+    \item \textbf{归纳步（假设 $t-1$ 成立，证 $t$ 成立）}：由 HMM 联合概率分解式~\eqref{eq:hmm-joint}，对任意前缀 $s_{1:t-1}$ 有
+    \[
+      \log P(S_{1:t-1} = s_{1:t-1},\, S_t = s,\, O_{1:t})
+      = \log P(S_{1:t-1} = s_{1:t-1},\, O_{1:t-1}) + \log T_{s_{t-1}, s} + \log E_{s, o_t}.
+    \]
+    两边对 $(s_1, \dots, s_{t-1})$ 取最大值，分离出只与 $s$ 相关的常数 $\log E_{s, o_t}$，再将剩余最大化拆分为先对 $s_{1:t-2}$、后对 $s_{t-1} = s'$：
+    \begin{align*}
+      \max_{s_{1:t-1}} \log P(s_{1:t-1}, S_t=s, O_{1:t})
+      &= \log E_{s, o_t} + \max_{s' \in \mathcal{S}} \left\{\log T_{s', s} + \max_{s_{1:t-2}} \log P(s_{1:t-2}, S_{t-1}=s', O_{1:t-1})\right\} \\
+      &= \log E_{s, o_t} + \max_{s' \in \mathcal{S}} \big\{\delta_{t-1}(s') + \log T_{s', s}\big\}
+      = \delta_t(s),
+    \end{align*}
+    其中第二步直接应用了 $t-1$ 步的归纳假设。
+  \end{itemize}
+  当 $t = T$ 时，取 $s_T^* = \argmax_{s \in \mathcal{S}} \delta_T(s)$ 并沿回溯指针 $\psi_t$ 倒推还原 $s_{t-1}^* = \psi_t(s_t^*)$，所得路径 $s_{1:T}^*$ 精确达到 $\max_{s_{1:T}} \log P(S_{1:T}=s_{1:T}, O_{1:T})$。由于对数函数严格单调递增且 $P(O_{1:T})$ 是正定常数，该路径同时全局最大化联合概率 $P(S_{1:T}, O_{1:T})$ 与后验概率 $P(S_{1:T} \mid O_{1:T})$。
+  \end{proof}
+\end{enumerate}
+
+\subsection*{习题 5.7\quad 代码实验：三种贝叶斯网络采样器定量基准测试}
+\textbf{核心实现要点}：在 Pearl 警报网络上查询 $P(B=1 \mid J=1, M=1)$（精确真值 $0.284172$，证据边际概率 $P(J=1, M=1) \approx 0.002084$）。拒绝采样与似然加权均用 NumPy 向量化批量生成 $M$ 条样本（似然加权额外用 \texttt{(w.sum()**2) / (w**2).sum()} 计算 $\mathrm{ESS}$）；Gibbs 采样对隐藏变量 $(B, E, A)$ 依次按马尔可夫毯条件分布轮换更新，丢弃前 \texttt{burn = 500} 步。
+
+\textbf{实测自检基准}（固定种子 \texttt{np.random.default\_rng(2026)}）：
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}r c c c c c c@{}}
+\toprule
+\textbf{样本数 $M$} & \textbf{拒绝估计} & \textbf{接受数（接受率）} & \textbf{LW 估计} & \textbf{LW 的 $\mathrm{ESS}$} & \textbf{Gibbs 估计} & \textbf{Gibbs 误差} \\
+\midrule
+$1{,}000$ & $0.0000$ & $1$（$0.00100$） & $0.0000$ & $3.9$ & $0.2720$ & $0.01217$ \\
+$5{,}000$ & $0.4444$ & $9$（$0.00180$） & $0.3693$ & $24.0$ & $0.2830$ & $0.00117$ \\
+$20{,}000$ & $0.2500$ & $40$（$0.00200$） & $0.3833$ & $88.5$ & $0.2823$ & $0.00187$ \\
+$50{,}000$ & $0.3585$ & $\mathbf{106}$（$\mathbf{0.00212}$） & $0.2416$ & $\mathbf{217.5}$ & $\mathbf{0.2834}$ & $\mathbf{0.00079}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+在 $M = 50{,}000$ 时，三项自检基准全部严格达标：（1）拒绝采样实际接受率为 $\mathbf{0.00212} \in [0.0016, 0.0026]$（仅 $106$ 条有效样本，浪费率 $99.79\%$）；（2）似然加权虽然零拒绝，但因罕见叶子证据 $J=1, M=1$ 位于 DAG 底部，权重高度集中在极少数 $A=1$ 样本上，$\mathrm{ESS} = \mathbf{217.5} \ll 50{,}000$（$<400$）；（3）Gibbs 采样由底层证据向上反推，误差仅 $\mathbf{0.00079} < 0.005$，精度碾压前两者。
+
+\subsection*{习题 5.8\quad 代码实验：超长序列（$T=2000$）Viterbi 数值下溢压测}
+\textbf{实验设定与核心实现}：构建 2 状态 HMM，其中转移矩阵 $T = \begin{psmallmatrix}0.95 & 0.05\\ 0.05 & 0.95\end{psmallmatrix}$、发射矩阵 $E = \begin{psmallmatrix}0.75 & 0.25\\ 0.30 & 0.70\end{psmallmatrix}$、先验 $\boldsymbol{\pi}_1 = [0.5, 0.5]$，用 \texttt{np.random.\allowbreak default\_rng(2026)} 生成长度 $T_{\text{len}} = 2{,}000$ 的真实隐状态与观测序列；对比朴素概率连乘版与代码~\ref{lst:hmm} 的对数空间 Viterbi：
+\begin{lstlisting}
+# Naive probability-space Viterbi (exhibits IEEE-754 float64 underflow)
+dp_naive = np.zeros((T_len, 2))
+dp_naive[0] = pi * E[:, obs[0]]
+underflow_t = None
+for t in range(1, T_len):
+    for s in range(2):
+        dp_naive[t, s] = E[s, obs[t]] * np.max(dp_naive[t - 1] * T[:, s])
+    if underflow_t is None and dp_naive[t].max() == 0.0:
+        underflow_t = t
+\end{lstlisting}
+\textbf{实测自检基准}：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{下溢崩溃时刻}：由于每步概率连乘因子平均约 $0.5 \sim 0.7$，经过约 $1{,}000$ 步后概率跌破 IEEE-754 双精度浮点数最小次正规数 $5\times 10^{-324}$；实测朴素概率版在 $\mathbf{t = 1{,}065}$（$\in [600, 1100]$）处触发 \texttt{dp\_naive[t].max() == 0.0}，后续所有状态得分全零，解码彻底瘫痪；
+  \item \textbf{对数 Viterbi 精度优势}：对数空间版在 $T=2{,}000$ 全程无任何 \texttt{NaN}/\texttt{-inf} 异常，逐位隐状态解码准确率高达 $\mathbf{85.40\%}$；而仅按单步发射概率猜测状态的基线准确率仅为 $\mathbf{72.70\%}$，对数 Viterbi 借助时序转移上下文高出足足 $\mathbf{+12.70}$ 个百分点（远超 $+10$ 个百分点的自检基准）。
+\end{enumerate}
+
+% =========================================================================
+\section{第 6 章习题精解（6.1--6.8）}
+% =========================================================================
+
+\subsection*{习题 6.1\quad 折扣因子临界不等式与无穷等比回报计算}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{选择动作 B 优于动作 A 的临界条件}：
+  按 $G_0 = R_1 + \gamma R_2 + \gamma^2 R_3 + \cdots$ 分别计算两个动作的折扣总回报：
+  \[
+    G_0(A) = 5 + 0 + \cdots = 5, \qquad
+    G_0(B) = 0 + \gamma \cdot 0 + \gamma^2 \cdot 10 + 0 + \cdots = 10\gamma^2.
+  \]
+  智能体应当放弃眼前小利选择动作 B，当且仅当
+  \[
+    10\gamma^2 > 5 \;\iff\; \gamma^2 > \frac{1}{2} \;\iff\; \mathbf{\gamma > \frac{\sqrt{2}}{2} \approx 0.7071} \quad (\text{且 } \gamma < 1).
+  \]
+  当 $\gamma = \sqrt{2}/2$ 时两动作无差异；当 $\gamma < \sqrt{2}/2$ 时智能体更短视，宁可立刻拿 $+5$ 分。
+  \item \textbf{恒定单步奖励 $+2$、$\gamma = 0.9$ 的无限期折扣总回报}：
+  \[
+    G_0 = \sum_{k=0}^{\infty} 2 \cdot (0.9)^k = \frac{2}{1 - 0.9} = \mathbf{20}.
+  \]
+\end{enumerate}
+
+\subsection*{习题 6.2\quad 两状态微型 MDP 手工两步值迭代演算}
+沿用图~\ref{fig:toy-mdp} 参数（$\gamma = 0.8$）：在 $s_0$ 选 $a_0$ 得 $R=+4$（$0.5\,s_0, 0.5\,s_1$），选 $a_1$ 得 $R=+1$（$1.0\,s_0$）；在 $s_1$ 选 $a_0$ 得 $R=+1$（$0.1\,s_0, 0.9\,s_1$），选 $a_1$ 得 $R=0$（$0.8\,s_0, 0.2\,s_1$）。从 $V^{(0)} = (0, 0)$ 出发：
+\begin{itemize}
+  \item \textbf{第 1 步（$V^{(1)} = \mathcal{T}^* V^{(0)}$）}：
+  \begin{align*}
+    V^{(1)}(s_0) &= \max\{4 + 0.8(0),\; 1 + 0.8(0)\} = \mathbf{4.0000} \quad (a_0), \\
+    V^{(1)}(s_1) &= \max\{1 + 0.8(0),\; 0 + 0.8(0)\} = \mathbf{1.0000} \quad (a_0).
+  \end{align*}
+  故 $V^{(1)} = (4,\; 1)$。
+  \item \textbf{第 2 步（$V^{(2)} = \mathcal{T}^* V^{(1)}$）}：
+  \begin{align*}
+    Q^{(1)}(s_0, a_0) &= 4 + 0.8(0.5 \times 4 + 0.5 \times 1) = 4 + 0.8 \times 2.5 = \mathbf{6.0000}, \\
+    Q^{(1)}(s_0, a_1) &= 1 + 0.8(1.0 \times 4) = 1 + 3.2 = 4.2000 \implies V^{(2)}(s_0) = \mathbf{6.0000}, \\
+    Q^{(1)}(s_1, a_0) &= 1 + 0.8(0.1 \times 4 + 0.9 \times 1) = 1 + 0.8 \times 1.3 = 2.0400, \\
+    Q^{(1)}(s_1, a_1) &= 0 + 0.8(0.8 \times 4 + 0.2 \times 1) = 0.8 \times 3.4 = \mathbf{2.7200} \implies V^{(2)}(s_1) = \mathbf{2.7200}.
+  \end{align*}
+  故精确值 $V^{(2)} = \big(6,\; \frac{68}{25}\big) = (\mathbf{6.0000},\; \mathbf{2.7200})$。
+  \item \textbf{基于 $V^{(2)}$ 提取的贪心策略 $\pi^{(2)}$}（对 $V^{(2)}$ 执行一步前瞻）：
+  \begin{align*}
+    Q^{(2)}(s_0, a_0) &= 4 + 0.8(0.5\times 6 + 0.5\times 2.72) = \mathbf{7.4880}, \\
+    Q^{(2)}(s_0, a_1) &= 1 + 0.8\times 6 = 5.8000, \\
+    Q^{(2)}(s_1, a_1) &= 0 + 0.8(0.8\times 6 + 0.2\times 2.72) = \mathbf{4.2752}, \\
+    Q^{(2)}(s_1, a_0) &= 1 + 0.8(0.1\times 6 + 0.9\times 2.72) = 3.4384.
+  \end{align*}
+  因此 $\pi^{(2)}(s_0) = a_0,\; \pi^{(2)}(s_1) = a_1$。\textbf{关键观察}：尽管 $V^{(2)} = (6.00, 2.72)$ 距离真值 $V^* = (420/31, 320/31) \approx (13.55, 10.32)$ 还差一大截，但\textbf{$\pi^{(2)}$ 已经完全等于全局最优策略 $\pi^*$！}（实际上连计算 $V^{(2)}$ 时的 argmax 就已经切换至最优策略——在值迭代中，策略往往比价值函数早得多收敛！）
+\end{itemize}
+
+\subsection*{习题 6.3\quad 三状态机器人 MDP 的策略迭代全流程}
+状态集 $\{H, L, D\}$，$\gamma = 0.5$。只有低电态 $L$ 存在动作分支（“工作”或“充电”），$H$ 恒“工作”，$D$ 恒“救援充电”。
+\begin{enumerate}[label=\textbf{第 \arabic* 轮:}, leftmargin=4.2em]
+  \item \textbf{初始策略 $\pi_0(L) = \text{工作}$}：
+  \begin{itemize}
+    \item \textbf{策略评估}：列出 Bellman 期望线性方程组：
+    \[
+      \begin{cases}
+        V(H) = 4 + 0.5\big(0.5 V(H) + 0.5 V(L)\big) \implies 3 V(H) - V(L) = 16, \\
+        V(D) = -6 + 0.5 V(H), \\
+        V(L) = 2 + 0.5\big(0.8 V(D) + 0.2 V(L)\big) \implies 9 V(L) - 4 V(D) = 20.
+      \end{cases}
+    \]
+    将第二式代入第三式得 $9 V(L) - 2 V(H) = -4$，再代入 $V(L) = 3 V(H) - 16$ 得 $25 V(H) = 140$，解得精确值：
+    \[
+      V^{\pi_0}(H) = \frac{28}{5} = 5.6, \qquad
+      V^{\pi_0}(L) = \frac{4}{5} = 0.8, \qquad
+      V^{\pi_0}(D) = -\frac{16}{5} = -3.2.
+    \]
+    \item \textbf{策略改进（考察 $L$ 态两动作的 $Q$ 值）}：
+    \begin{align*}
+      Q^{\pi_0}(L, \text{工作}) &= V^{\pi_0}(L) = 0.8, \\
+      Q^{\pi_0}(L, \text{充电}) &= -1 + 0.5\, V^{\pi_0}(H) = -1 + 0.5 \times 5.6 = \mathbf{1.8} \;>\; 0.8!
+    \end{align*}
+    严格更优，更新策略为 $\pi_1(L) = \text{充电}$。
+  \end{itemize}
+  \item \textbf{更新后策略 $\pi_1(L) = \text{充电}$}：
+  \begin{itemize}
+    \item \textbf{策略评估}：列出新方程组：
+    \[
+      \begin{cases}
+        3 V(H) - V(L) = 16, \\
+        V(L) = -1 + 0.5 V(H), \\
+        V(D) = -6 + 0.5 V(H).
+      \end{cases}
+    \]
+    将第二式代入第一式得 $3 V(H) - (-1 + 0.5 V(H)) = 16 \implies 2.5 V(H) = 15$，解得极其整洁的整数精确值：
+    \[
+      V^{\pi_1}(H) = \mathbf{6}, \qquad
+      V^{\pi_1}(L) = \mathbf{2}, \qquad
+      V^{\pi_1}(D) = \mathbf{-3}.
+    \]
+    \item \textbf{策略改进核验}：
+    \begin{align*}
+      Q^{\pi_1}(L, \text{充电}) &= 2, \\
+      Q^{\pi_1}(L, \text{工作}) &= 2 + 0.5\big(0.8 \times (-3) + 0.2 \times 2\big) = 2 + 0.5(-2.0) = \mathbf{1} \;<\; 2.
+    \end{align*}
+    策略不再变化，算法在第 2 轮终止！
+  \end{itemize}
+\end{enumerate}
+\textbf{最终精确最优解}：$\pi^*(L) = \mathbf{\text{充电}}$（低电时宁愿花 $-1$ 主动充电，避免冒 $80\%$ 风险掉入 $-6$ 救援惩罚），最优价值向量为 $\mathbf{V^* = (V^*(H), V^*(L), V^*(D)) = (6,\; 2,\; -3)}$。注意从 $\pi_0$ 到 $\pi_1$，全部三个状态的价值均严格提升（$5.6\to 6,\; 0.8\to 2,\; -3.2\to -3$）。
+
+\subsection*{习题 6.4\quad $Q$-值 Bellman 最优性算子 $\gamma$-压缩性证明与 Q-Learning 偏好原因}
+\begin{proof}
+任取两张动作价值表 $Q_1, Q_2 \in \R^{|S|\times |A|}$ 与任意状态-动作对 $(s, a) \in S \times A$。注意到即时奖励 $R(s, a, s')$ 在作差时完全抵消：
+\begin{align*}
+  \big|(\mathcal{T}_Q^* Q_1)(s, a) - (\mathcal{T}_Q^* Q_2)(s, a)\big|
+  &= \gamma \left|\sum_{s' \in S} P(s' \mid s, a)\Big(\max_{a' \in A} Q_1(s', a') - \max_{a' \in A} Q_2(s', a')\Big)\right| \\
+  &\le \gamma \sum_{s' \in S} P(s' \mid s, a)\,\Big|\max_{a' \in A} Q_1(s', a') - \max_{a' \in A} Q_2(s', a')\Big| \;\text{（三角不等式）} \\
+  &\le \gamma \sum_{s' \in S} P(s' \mid s, a)\,\max_{a' \in A} \big|Q_1(s', a') - Q_2(s', a')\big| \quad\text{（引理~\ref{lem:max-nonexpansive}）} \\
+  &\le \gamma \sum_{s' \in S} P(s' \mid s, a)\,\norm{Q_1 - Q_2}_\infty \\
+  &= \gamma \norm{Q_1 - Q_2}_\infty,
+\end{align*}
+最后一步利用了概率分布归一化 $\sum_{s'\in S} P(s'\mid s,a) = 1$。上式右端与 $(s, a)$ 无关，对左端关于全部 $(s, a) \in S\times A$ 取最大值，立得
+\[
+  \norm{\mathcal{T}_Q^* Q_1 - \mathcal{T}_Q^* Q_2}_\infty \le \gamma \norm{Q_1 - Q_2}_\infty.
+\]
+\end{proof}
+\textbf{为何无模型强化学习（如 Q-Learning）偏好迭代 $Q$ 而非 $V$？}
+在无模型（Model-Free）场景下，环境转移概率 $P(s'\mid s,a)$ 与奖励函数 $R(s,a,s')$ \textbf{均不可知}：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{无模型贪心决策}：若只学到了最优状态价值 $V^*$，执行动作时仍必须算 $\argmax_a \sum_{s'} P(s'\mid s,a)[R + \gamma V^*(s')]$，离不开环境模型 $P, R$；而拥有 $Q^*$ 后，只需直接查表取 $\pi^*(s) = \argmax_{a\in A} Q^*(s, a)$，完全脱离环境模型！
+  \item \textbf{无偏单样本目标构造}：观察 $\mathcal{T}_Q^*$ 的结构——\textbf{期望 $\sum_{s'} P(s'\mid s,a)$ 位于 $\max_{a'}$ 之外}！因此仅凭一条交互样本 $(s, a, r, s')$ 就能直接构造期望意义下无偏的 Bellman 目标 $y = r + \gamma \max_{a'} Q(s', a')$ 并做随机近似（TD 更新）；相反，在 $\mathcal{T}^*$ 中 $\max_a$ 包裹在期望外面，单样本无法对 $\max$ 内部的未知期望做无偏估计。
+\end{enumerate}
+
+\subsection*{习题 6.5\quad 奖励平移不变性证明与含终止态反例}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{无终止态无限期折扣 MDP 中的平移不变性证明}：
+  \begin{proof}
+  当所有状态均无终止退出时，任意策略 $\pi$ 产生的每条轨迹都包含无穷多个转移步 $k = 0, 1, 2, \dots$。将每步奖励平移 $\tilde{R}(s,a,s') = R(s,a,s') + c$，由期望的线性性与绝对收敛级数求和，对任意策略 $\pi$ 与任意状态 $s \in S$：
+  \[
+    \tilde{V}^\pi(s) = \E_\pi\left[\sum_{k=0}^{\infty} \gamma^k (R_{k+1} + c) \;\middle|\; S_0 = s\right]
+    = \E_\pi\left[\sum_{k=0}^{\infty} \gamma^k R_{k+1} \;\middle|\; S_0 = s\right] + c \sum_{k=0}^{\infty} \gamma^k
+    = V^\pi(s) + \frac{c}{1 - \gamma}.
+  \]
+  由于平移量 $\frac{c}{1-\gamma}$ 是一个既不依赖策略 $\pi$、也不依赖状态 $s$ 的全局常数，对任意两策略 $\pi_1, \pi_2$ 恒有 $\tilde{V}^{\pi_1}(s) \ge \tilde{V}^{\pi_2}(s) \iff V^{\pi_1}(s) \ge V^{\pi_2}(s)$，故最优策略集合 $\Pi^*$ 完全不变！
+  \end{proof}
+  \item \textbf{含终止吸收态的 $4\times 3$ 网格世界反例}：
+  当存在终止吸收态（进入后轨迹在随机停时 $\tau$ 结束，后续永远得 $0$ 分）时，仅给非终止态步长奖励加上常数 $c$ 会使一条在时刻 $\tau$ 终止的轨迹额外获得
+  \[
+    \Delta G(\tau) = c \sum_{k=0}^{\tau - 1} \gamma^k = c\,\frac{1 - \gamma^\tau}{1 - \gamma},
+  \]
+  这一附加项\textbf{强烈依赖策略诱导的寿命长度 $\tau$}，彻底打破了不变性！具体反例（见 $4\times 3$ 网格世界，$\gamma = 0.99$，原步长奖励 $-0.04$）：
+  \begin{itemize}
+    \item \textbf{正平移（$-0.04 \to +0.01$，即 $c = +0.05$）}：多活一步就白赚 $+0.01 > 0$，一直不进终点的无限期回报达 $+0.01 / (1-0.99) = +1.0$，甚至与进入 $+1$ 终点的奖励持平！智能体会故意在远离终点的角落反复撞墙“刷步长分”，永远拒绝进入终点；
+    \item \textbf{负平移（$-0.04 \to -2.0$，即 $c = -1.96$）}：每拖延一步都要重扣 $-2.0$，如习题 6.7 实测所示，位于 $(0,3)$ 和 $(1,2)$ 的智能体彻底放弃绕往 $+1$ 宝藏，改为直接朝 $-1$ 深渊跳下（策略变为 \texttt{N} 与 \texttt{E}），以最小化停时 $\tau$ 来“及时止损”！
+  \end{itemize}
+  （本质原因：若把终止态等价建模为“永远自循环且奖励为 $0$ 的吸收态”，只平移非终止步长奖励相当于漏掉了吸收态自循环的 $+c$，并非全状态均匀平移。）
+\end{enumerate}
+
+\subsection*{习题 6.6\quad 贪心提取策略的性能损失上界定理证明}
+\begin{proof}
+记 $P^{\hat{\pi}}$ 为策略 $\hat{\pi}$ 诱导的转移矩阵，$R^{\hat{\pi}}$ 为一步期望奖励向量，$\mathcal{T}^{\hat{\pi}} V := R^{\hat{\pi}} + \gamma P^{\hat{\pi}} V$ 为策略 $\hat{\pi}$ 的 Bellman 期望算子。首先易见 $\mathcal{T}^{\hat{\pi}}$ 也是 $\gamma$-压缩算子：对任意 $U, W \in \R^{|S|}$，
+\[
+  \norm{\mathcal{T}^{\hat{\pi}} U - \mathcal{T}^{\hat{\pi}} W}_\infty = \gamma \norm{P^{\hat{\pi}}(U - W)}_\infty \le \gamma \norm{P^{\hat{\pi}}}_\infty \norm{U - W}_\infty = \gamma \norm{U - W}_\infty,
+\]
+因为随机矩阵每行元素非负且和为 $1$，故行和范数 $\norm{P^{\hat{\pi}}}_\infty = 1$。
+
+\textbf{第一步：利用贪心定义连接 $\mathcal{T}^{\hat{\pi}}$ 与 $\mathcal{T}^*$}。由于 $\hat{\pi}$ 是关于 $\hat{V}$ 逐状态取 $\argmax_a$ 得到的贪心策略，它与 Bellman 最优性算子在 $\hat{V}$ 处精确重合：
+\[
+  \mathcal{T}^{\hat{\pi}} \hat{V} = \mathcal{T}^* \hat{V}.
+\]
+又由 Bellman 最优性方程有 $V^* = \mathcal{T}^* V^*$。结合三角不等式以及 $\mathcal{T}^*$（定理~\ref{thm:vi-contraction}）和 $\mathcal{T}^{\hat{\pi}}$ 各自的 $\gamma$-压缩性，得
+\begin{align*}
+  \norm{V^* - \mathcal{T}^{\hat{\pi}} V^*}_\infty
+  &= \norm{\mathcal{T}^* V^* - \mathcal{T}^* \hat{V} + \mathcal{T}^{\hat{\pi}} \hat{V} - \mathcal{T}^{\hat{\pi}} V^*}_\infty \\
+  &\le \norm{\mathcal{T}^* V^* - \mathcal{T}^* \hat{V}}_\infty + \norm{\mathcal{T}^{\hat{\pi}} \hat{V} - \mathcal{T}^{\hat{\pi}} V^*}_\infty \\
+  &\le \gamma \norm{V^* - \hat{V}}_\infty + \gamma \norm{\hat{V} - V^*}_\infty
+  \le 2\gamma \varepsilon.
+\end{align*}
+
+\textbf{第二步：通过 $(I - \gamma P^{\hat{\pi}})^{-1}$ 放大至全局次优性上界}。因为 $V^{\hat{\pi}} = \mathcal{T}^{\hat{\pi}} V^{\hat{\pi}} = R^{\hat{\pi}} + \gamma P^{\hat{\pi}} V^{\hat{\pi}}$ 且 $\mathcal{T}^{\hat{\pi}} V^* = R^{\hat{\pi}} + \gamma P^{\hat{\pi}} V^*$，拆分 $V^* - V^{\hat{\pi}}$ 得
+\[
+  V^* - V^{\hat{\pi}}
+  = \big(V^* - \mathcal{T}^{\hat{\pi}} V^*\big) + \big(\mathcal{T}^{\hat{\pi}} V^* - \mathcal{T}^{\hat{\pi}} V^{\hat{\pi}}\big)
+  = \big(V^* - \mathcal{T}^{\hat{\pi}} V^*\big) + \gamma P^{\hat{\pi}} (V^* - V^{\hat{\pi}}).
+\]
+移项得 $(I - \gamma P^{\hat{\pi}})(V^* - V^{\hat{\pi}}) = V^* - \mathcal{T}^{\hat{\pi}} V^*$。由定理~\ref{thm:bellman-invertible}，$(I - \gamma P^{\hat{\pi}})^{-1} = \sum_{k=0}^{\infty} \gamma^k (P^{\hat{\pi}})^k$ 且 $\norm{(P^{\hat{\pi}})^k}_\infty = 1$，两边取无穷范数即得
+\[
+  \norm{V^* - V^{\hat{\pi}}}_\infty
+  \le \sum_{k=0}^{\infty} \gamma^k \norm{(P^{\hat{\pi}})^k}_\infty \norm{V^* - \mathcal{T}^{\hat{\pi}} V^*}_\infty
+  \le \frac{1}{1 - \gamma} \cdot 2\gamma\varepsilon
+  = \frac{2\gamma \varepsilon}{1 - \gamma}.
+\]
+（注：这一不等式直通第 6 卷 DQN/Actor-Critic：它解释了为什么 $\gamma \to 1$ 时微小的神经网络值函数拟合误差 $\varepsilon$ 会被放大 $2\gamma/(1-\gamma)$ 倍，从而引发策略抖动。）
+\end{proof}
+
+\subsection*{习题 6.7\quad 代码实验：$4\times 3$ 网格世界步长惩罚四重相变}
+\textbf{核心实验代码}：直接复用代码~\ref{lst:mdp} 的 \texttt{policy\_iteration}，传入 \texttt{gamma=0.99} 并遍历 \texttt{step\_r in [-2.0, -0.4, -0.04, -0.01]}，逐格输出最优动作箭头与状态价值。
+
+\textbf{实测四重策略相变与数值自检基准}（格子坐标 $(r, c)$ 中 $r=0$ 为底行、$r=2$ 为顶行，墙在 $(1,1)$，终止态 $(2,3)=+1,\; (1,3)=-1$）：
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}c c c c c c X@{}}
+\toprule
+$r_{\text{step}}$ & $V^*(0,0)$ & $V^*(0,3)$ & $\pi^*(0,1)$ & $\pi^*(0,3)$ & $\pi^*(1,2)$ & \textbf{策略相变机制与完整 $3\times 4$ 地图（顶行$\to$底行）} \\
+\midrule
+$-2.00$ & $-10.5638$ & $-3.7475$ & \texttt{E} & \textbf{\texttt{N}} & \textbf{\texttt{E}} & 极怕扣分，就近跳入 $-1$ 止损：\texttt{[E E E +1 / N W E -1 / E E E N]} \\
+$-0.40$ & $-1.5867$ & $-1.2595$ & \texttt{E} & \texttt{W} & \texttt{N} & 冒险抄近道走中间危险廊道：\texttt{[E E E +1 / N W N -1 / N E N W]} \\
+$-0.04$ & $+0.6507$ & $+0.3380$ & \textbf{\texttt{W}} & \texttt{W} & \texttt{N} & $(0,1)$ 改为左绕避开险道：\texttt{[E E E +1 / N W N -1 / N W N W]} \\
+$-0.01$ & $\mathbf{+0.8533}$ & $\mathbf{+0.6398}$ & \texttt{W} & \textbf{\texttt{S}} & \textbf{\texttt{W}} & 极度保守，撞墙防滑安全出角：\texttt{[E E E +1 / N W W -1 / N W W S]} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+注：上表地图简记中中行第 2 格的 \texttt{W} 标示障碍墙 \texttt{WALL}。全部关键节点策略（$r=-2.0$ 的 \texttt{N/E}、$r=-0.04$ 的 \texttt{W}、$r=-0.01$ 的 \texttt{S/W}）以及 $V^*(0,3)=+0.6398,\; V^*(0,0)=+0.8533$ 均与题目自检基准精确吻合至小数点后四位！
+
+\subsection*{习题 6.8\quad 代码实验：$10\times 10$ 随机网格世界同步/异步值迭代与策略迭代对比}
+\textbf{核心实现与两处防坑要点}：
+（1）\textbf{原地异步更新（Gauss-Seidel VI）}：直接在原字典 \texttt{V[s] = ...} 上覆盖，无需分配新字典 \texttt{V\_new}，让新算出的邻格价值在同一轮内即刻向周围传播；
+（2）\textbf{工程防坑}：随机摆放 $15$ 块墙壁后需用 BFS 检验连通性，防止孤立死格无法触达终止态；同时在策略迭代的策略改进步加入容差 \texttt{if q\_best > q\_cur + 1e-12:}，避免浮点舍入导致两个等值动作来回振荡死循环！
+\begin{lstlisting}
+# In-place (Gauss-Seidel) Asynchronous Value Iteration
+V = {s: (terminals[s] if s in terminals else 0.0) for s in states}
+iters = 0
+while max(abs(V[s] - V_star[s]) for s in states) >= 1e-6:
+    iters += 1
+    for s in sweep_order:          # standard row-major or reversed (goal-first)
+        if s in terminals:
+            continue
+        V[s] = max(step_r + gamma * sum(p * V[ns] for ns, p in T_cache[(s, a)])
+                   for a in actions)
+\end{lstlisting}
+\textbf{实测自检基准}（连通 $10\times 10$ 网格，15 障碍墙、$(9,9)=+1$、$(8,9)$ 与 $(4,5)$ 为 $-1$，$\gamma=0.95,\; r_{\text{step}}=-0.02$，收敛判据 $\norm{V - V^*}_\infty < 10^{-6}$）：
+\begin{center}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{求解算法} & \textbf{收敛轮数} & \textbf{轮数相对同步 VI 变化} & \textbf{总耗时（ms）} & \textbf{与 $V^*$ 最大误差} \\
+\midrule
+（a）同步值迭代（Sync VI） & $54$ & 基准 & $15.07$ & $7.99\times 10^{-7}$ \\
+（b1）异步值迭代（行主序） & $\mathbf{38}$ & $\mathbf{-29.6\%}$ & $6.79$ & $8.89\times 10^{-7}$ \\
+（b2）异步值迭代（从终点倒序） & $\mathbf{24}$ & $\mathbf{-55.6\%}$ & $3.38$ & $7.35\times 10^{-7}$ \\
+（c）精确策略迭代（PI） & $\mathbf{7}$（$\le 12$） & $\mathbf{-87.0\%}$ & $\mathbf{2.85}$ & $0$（精确解） \\
+\bottomrule
+\end{tabular}
+\end{center}
+三种算法收敛后的价值表两两最大差值均 $< 10^{-6}$ 且最优策略 $100\%$ 一致；原地异步值迭代仅改动一行代码，便在行主序下减少 $29.6\%$ 扫描轮数（若按离终点由近及远倒序扫描更是暴减 $55.6\%$，直觉上等价于把 Bellman 信息波前一次扫穿整张地图！）；而策略迭代凭二次收敛般的策略跳跃，仅用 $\mathbf{7}$ 轮、$\mathbf{2.85\text{ ms}}$ 即获全精确最优解（在障碍更曲折的迷宫中，同步 VI 常超过 $80\sim 120$ 轮，PI 仍稳居 $\le 12$ 轮）。

@@ -1,0 +1,69 @@
+\chapter*{序章：经典人工智能的当代生命力与八校考点对照}
+\addcontentsline{toc}{chapter}{序章：经典人工智能的当代生命力与八校考点对照}
+\markboth{序章\quad 本卷坐标与八校考点对照}{}
+
+\begin{chapIntro}{本章定位}
+前两卷搭好了人工智能的数理与编程底座。从本卷（第 3 卷）起，我们正式进入\textbf{智能体（Agent）算法世界}：系统掌握搜索、博弈、约束满足、概率图模型与马尔可夫决策过程，为后续经典机器学习、深度学习与强化学习立起完整的“决策与推理”支柱。
+\end{chapIntro}
+
+\section*{0.1\quad 为什么大模型时代仍然必学经典 AI？}
+\addcontentsline{toc}{section}{0.1\quad 为什么大模型时代仍然必学经典 AI？}
+
+初学者常有一个误解：“深度学习和大模型都这么强了，A*、$\alpha$-$\beta$ 剪枝、贝叶斯网络和 MDP 是不是已经过时了？”事实恰恰相反：
+\begin{enumerate}
+  \item \textbf{测试时搜索正在回归前沿}：从 AlphaGo / AlphaZero 到现代数学与代码推理大模型，核心突破正是把神经网络的直觉评估与\textbf{蒙特卡洛树搜索（MCTS）}结合起来，用算力换取多步深思熟虑；
+  \item \textbf{408 数据结构与算法的直接变现}：你在 408 中学过的图遍历、最小堆、回溯与动态规划，在本卷被直接升维为 A* 启发式搜索、AC-3 弧相容、Viterbi 动态规划与 Bellman 方程；
+  \item \textbf{强化学习与因果推理的必经地基}：没有第 4 章的\textbf{贝叶斯网络与 d-分离}，就看不懂因果推断与结构化生成模型；没有第 6 章的\textbf{MDP 与 Bellman 最优性方程}，第 6 卷的 Q-Learning、DQN 与 PPO 就会沦为黑箱公式。
+\end{enumerate}
+
+\section*{0.2\quad 第 3 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.2\quad 第 3 卷八校核心考点覆盖对照表}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{34mm}p{34mm}p{16mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+状态空间建模、BFS/UCS 与 A* 最优证明 & Berkeley CS188 / Stanford CS221 & 第 1 章 & 机器人路径规划、程序合成与启发式推理搜索 \\
+Minimax、$\alpha$-$\beta$ 剪枝、Expectimax 与 MCTS & CS188 / CMU 07-280 & 第 2 章 & 博弈智能体、AlphaZero 与推理大模型测试时搜索 \\
+CSP、MRV/FC、AC-3 弧相容与局部搜索 & CS221 / CS188 & 第 3 章 & 调度排班、组合优化、模拟退火与非凸逃逸直觉 \\
+贝叶斯网络、d-分离与变量消元（VE） & CS221 / 北大通班 & 第 4 章 & 因果推理、结构化概率建模与图神经网络直觉 \\
+似然加权、Gibbs MCMC 与 HMM（Viterbi） & CS188 / CS221 & 第 5 章 & 序列标注、语音/生物解码、第 4 卷 EM 与 MCMC \\
+MDP、Bellman 方程、值迭代与策略迭代 & CS188 / CS221 / MIT 6-4 & 第 6 章 & 第 6 卷深度强化学习（DQN / Actor-Critic / PPO） \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.3\quad 第 3 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.3\quad 第 3 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white, line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\状态空间搜索与\\A* 启发式算法};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\对抗博弈、$\alpha$-$\beta$ 剪枝\\与 MCTS};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\约束满足（CSP）与\\AC-3 / 局部搜索};
+
+  \node[ch, below=9mm of c1] (c4) {\textbf{第 4 章}\\贝叶斯网络、d-分离\\与变量消元};
+  \node[ch, below=9mm of c2] (c5) {\textbf{第 5 章}\\采样推断（Gibbs）与\\HMM / Viterbi};
+  \node[goal, below=9mm of c3] (c6) {\textbf{\color{ochre}第 6 章（直通第 6 卷 RL）}\\马尔可夫决策过程\\与 Bellman 方程};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] ([xshift=9mm]c1.south) to[out=-14,in=194] ([xshift=-9mm]c3.south);
+  \draw[arr] (c4) -- (c5);
+  \draw[arr] ([xshift=9mm]c2.south) -- ([xshift=-9mm]c6.north);
+  \draw[arr] (c5) -- (c6);
+\end{tikzpicture}}
+\end{center}

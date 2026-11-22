@@ -1,0 +1,700 @@
+\chapter[注意力机制与 Transformer 架构]{注意力机制与 Transformer 架构\\（从零手写迷你 GPT）}
+\label{ch:attention-transformer}
+
+\chapEpigraph{每个人都知道什么是注意力。它是心智在诸多同时呈现的对象或思绪之中，清晰而鲜明地择取其一。}{William James（威廉·詹姆斯，《心理学原理》，1890）}
+
+\begin{chapIntro}{本章导读：卸下串行枷锁，重构序列计算的底层范式}
+上一章结尾我们看到，循环神经网络（RNN/LSTM）受困于两道难以逾越的物理墙：其一，隐藏状态必须按时间步 $h_1 \to h_2 \to \cdots \to h_T$ 严格\textbf{串行}递推，导致 GPU 成千上万个算术核心在序列长度维度上被迫空转；其二，无论前文长达几百还是几万词，所有历史信息都必须压缩进一个固定维度的状态向量 $h_t \in \R^d$，长程信息不可避免地被冲刷殆尽。
+
+2017 年 Vaswani 等人发表的《Attention Is All You Need》以彻底的极简主义掀翻了棋盘：\textbf{完全抛弃循环与卷积，仅靠“自注意力（Self-Attention）”让序列中任意两个位置以 $O(1)$ 的路径长度直接对话！} 本章将以第一性原理层层拆解现代大语言模型的全部核心零件：
+\begin{enumerate}
+  \item \textbf{缩放点积注意力与 $\sqrt{d_k}$ 缩放定理}：从可微软词典寻址出发，严格证明若不除以 $\sqrt{d_k}$，内积方差将随维度线性膨胀，把 $\softmax$ 推入雅可比矩阵趋零的饱和死区；
+  \item \textbf{多头机制、张量变形舞步与因果掩码}：逐行追踪 \texttt{(B, T, C)} 到 \texttt{(B, H, T, d\_h)} 的张量形状流转，严格证明上三角 $-\infty$ 掩码保证了未来词元对当前位置具有\textbf{严格为零的梯度}，并介绍现代 LLM 标配的分组查询注意力（GQA）；
+  \item \textbf{位置编码与 RoPE 旋转位置编码}：证明无位置编码的自注意力具有置换等变性，完整推导二维复平面与旋转矩阵下的 RoPE 相对位置定理 $R_\theta(m)^\top R_\theta(n) = R_\theta(n - m)$；
+  \item \textbf{Pre-LN 架构、SwiGLU 与 KV Cache 显存账本}：衔接到第 3 章的残差高速公路定理，精确核算预填充（Prefill）与自回归解码（Decode）的计算量及 KV Cache 显存公式；
+  \item \textbf{可运行实测（\texttt{data/transformer\_train.csv}）}：用纯 PyTorch 从零手写 2 层因果\textbf{迷你 GPT}，亲眼见证它在 60--80 步内将 6 词序列反转任务的整句精确匹配率从 $0\%$ 拉升至 $100.00\%$！
+\end{enumerate}
+\end{chapIntro}
+
+\section{从软词典寻址到缩放点积注意力}
+\label{sec:sdpa}
+
+\subsection{注意力即“可微分的软词典查询”}
+
+在传统程序设计中，哈希词典（dictionary）存储着一组键值对 $\{(k_1, v_1), \dots, (k_T, v_T)\}$。当你提交一个查询 $q$ 时，硬词典执行精确匹配：若 $q = k_j$ 则原样返回 $v_j$，否则返回空值。这种“非黑即白”的离散寻址在数学上是不可微的，无法通过第 1 章的反向传播端到端学习。
+
+\textbf{注意力机制（Attention Mechanism）}的天才之处，是将硬词典软化为连续可微的概率凸组合：
+\begin{enumerate}
+  \item 用查询向量 $q \in \R^{d_k}$ 与所有键向量 $k_1, \dots, k_T \in \R^{d_k}$ 逐一计算相似度打分 $s_j = \operatorname{score}(q, k_j)$；
+  \item 用 $\softmax$ 将打分归一化为概率分布 $\alpha_j = \frac{\exp(s_j)}{\sum_{r=1}^T \exp(s_r)}$（满足 $\alpha_j > 0,\; \sum_{j=1}^T \alpha_j = 1$）；
+  \item 以权重 $\alpha_j$ 对所有值向量 $v_1, \dots, v_T \in \R^{d_v}$ 做加权平均，输出 $o = \sum_{j=1}^T \alpha_j v_j \in \R^{d_v}$。
+\end{enumerate}
+
+在\textbf{自注意力（Self-Attention）}中，查询、键与值都源自同一输入序列 $X \in \R^{T \times d_{\text{model}}}$（每个词元 $x_i$ 既是“发问者”，也是“被检索的索引”与“被提取的内容”），仅通过三组独立线性投影区分角色：
+\begin{equation}
+  Q = X W_Q \in \R^{T \times d_k}, \qquad
+  K = X W_K \in \R^{T \times d_k}, \qquad
+  V = X W_V \in \R^{T \times d_v}.
+  \label{eq:qkv-proj}
+\end{equation}
+于是序列中任意两个相隔甚远的词元 $i$ 与 $j$（无论相距 $5$ 步还是 $5000$ 步），只需一次内积 $q_i^\top k_j$ 即可直接交互——最大信号传播路径长度从 RNN 的 $O(T)$ 一举压缩为\textbf{常数 $O(1)$}，且全部 $T$ 个位置的计算化归为高度并行的矩阵乘法！
+
+\begin{defBox}
+\begin{definition}[缩放点积注意力，Scaled Dot-Product Attention]
+给定查询矩阵 $Q \in \R^{T_q \times d_k}$、键矩阵 $K \in \R^{T_k \times d_k}$ 与值矩阵 $V \in \R^{T_k \times d_v}$，缩放点积注意力定义为：
+\begin{equation}
+  \Attn(Q, K, V) = \softmax\!\left(\frac{Q K^\top}{\sqrt{d_k}}\right) V \in \R^{T_q \times d_v},
+  \label{eq:sdpa}
+\end{equation}
+其中 $\softmax$ 沿矩阵的\textbf{最后一维（每一行，即键维度 $T_k$）}独立归一化。记 $Z = \frac{Q K^\top}{\sqrt{d_k}} \in \R^{T_q \times T_k}$ 为注意力对数几率（logits），$P = \softmax(Z) \in \R^{T_q \times T_k}$ 为注意力权重矩阵，则输出 $O = P V$。
+\end{definition}
+\end{defBox}
+
+\begin{example}[手算迷你示例：$T=3,\; d_k=d_v=2$ 的软词典检索]
+\label{ex:sdpa-hand}
+设三个词元对应的键与值分别为 $k_1 = (1, 0)^\top,\; k_2 = (0, 1)^\top,\; k_3 = (-1, 0)^\top$，以及 $v_1 = (10, 0)^\top,\; v_2 = (0, 10)^\top,\; v_3 = (-10, 0)^\top$。现给定一个偏向键 $k_1$ 的查询 $q = (2, 0.5)^\top$：
+\begin{enumerate}
+  \item \textbf{原始点积与缩放}：$q^\top K^\top = (2,\; 0.5,\; -2)$。除以 $\sqrt{d_k} = \sqrt{2} \approx 1.4142$ 得缩放对数几率
+  \[
+    z = (1.4142,\; 0.3536,\; -1.4142).
+  \]
+  \item \textbf{行 $\softmax$ 权重}：$\exp(z) \approx (4.113,\; 1.424,\; 0.243)$，求和为 $5.780$，故
+  \[
+    \alpha = \softmax(z) \approx (0.712,\; 0.246,\; 0.042).
+  \]
+  \item \textbf{加权读取值向量}：
+  \[
+    o = 0.712 (10, 0)^\top + 0.246 (0, 10)^\top + 0.042 (-10, 0)^\top \approx (6.70,\; 2.46)^\top.
+  \]
+\end{enumerate}
+可见注意力自动将 $71.2\%$ 的权重分配给最匹配的键 $k_1$，同时保留了 $24.6\%$ 给正交邻近项 $k_2$，几乎屏蔽了反向项 $k_3$——并且整个过程对 $q, k_j, v_j$ 处处光滑可微！
+\end{example}
+
+\subsection{为什么必须除以 $\sqrt{d_k}$？——方差膨胀与 Softmax 饱和死区定理}
+
+初学者常疑惑：式~\eqref{eq:sdpa} 中的分母 $\sqrt{d_k}$ 究竟是经验技巧还是数学必然？下面给出完整的概率与微积分证明。
+
+\begin{thmBox}
+\begin{theorem}[$\sqrt{d_k}$ 缩放定理与 Softmax 雅可比梯度消失]
+\label{thm:sqrt-dk}
+设查询向量 $q \in \R^{d_k}$ 与键向量 $k \in \R^{d_k}$ 的各分量相互独立，且满足零均值、单位方差：$\E[q_r] = \E[k_r] = 0,\; \Var(q_r) = \Var(k_r) = 1$（$r = 1, \dots, d_k$）。则：
+\begin{enumerate}
+  \item 未缩放点积 $s = q^\top k$ 满足 $\E[s] = 0$ 且 $\Var(s) = d_k$；因此其典型量级按 $\Theta(\sqrt{d_k})$ 增长。令 $z = s / \sqrt{d_k}$ 可精确恢复单位方差 $\Var(z) = 1$（与维度 $d_k$ 无关）。
+  \item 记 $p = \softmax(z) \in \Delta^{T-1}$，则 $\softmax$ 的雅可比矩阵为：
+  \begin{equation}
+    J_{\softmax}(z) = \frac{\partial p}{\partial z} = \diag(p) - p p^\top.
+    \label{eq:softmax-jacobian}
+  \end{equation}
+  当未缩放 logits 随 $\sqrt{d_k}$ 放大时，设最大与次大未缩放分差为 $\Delta = s_{(1)} - s_{(2)} = c\sqrt{d_k} > 0$，则 $p$ 指数级坍缩至单热顶点 $e_{i^*}$，且雅可比矩阵的 Frobenius 范数与最大奇异值均按 $O(e^{-c\sqrt{d_k}})$ 趋近于零，导致经由注意力权重回传给 $Q, K$ 的梯度彻底消失。
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+\textbf{第一部分（内积方差）}：因各分量独立且零均值，
+\[
+  \E[q^\top k] = \sum_{r=1}^{d_k} \E[q_r k_r] = \sum_{r=1}^{d_k} \E[q_r]\E[k_r] = 0.
+\]
+对每一项乘积 $q_r k_r$，由独立性有 $\Var(q_r k_r) = \E[q_r^2 k_r^2] - (\E[q_r k_r])^2 = \E[q_r^2]\E[k_r^2] - 0 = 1 \cdot 1 = 1$。由于不同坐标 $r \ne r'$ 相互独立，方差直接相加：
+\[
+  \Var(q^\top k) = \sum_{r=1}^{d_k} \Var(q_r k_r) = d_k.
+\]
+于是除以 $\sqrt{d_k}$ 后，$\Var\!\left(\frac{q^\top k}{\sqrt{d_k}}\right) = \frac{1}{d_k}\Var(q^\top k) = 1$。
+
+\textbf{第二部分（Softmax 雅可比与饱和坍缩）}：对 $p_i = \frac{e^{z_i}}{\sum_m e^{z_m}}$ 求偏导 $\frac{\partial p_i}{\partial z_j}$，利用商的求导法则：
+\begin{itemize}
+  \item 当 $i = j$ 时：
+  \[
+    \frac{\partial p_i}{\partial z_i}
+    = \frac{e^{z_i}\sum_m e^{z_m} - e^{z_i} e^{z_i}}{\left(\sum_m e^{z_m}\right)^2}
+    = p_i - p_i^2 = p_i(1 - p_i).
+  \]
+  \item 当 $i \ne j$ 时：
+  \[
+    \frac{\partial p_i}{\partial z_j}
+    = \frac{0 - e^{z_i} e^{z_j}}{\left(\sum_m e^{z_m}\right)^2}
+    = -p_i p_j.
+  \]
+\end{itemize}
+合并两式即得 $\frac{\partial p_i}{\partial z_j} = p_i(\delta_{ij} - p_j)$，写成矩阵形式正是式~\eqref{eq:softmax-jacobian}：$J_{\softmax}(z) = \diag(p) - p p^\top$。
+
+现在考察未缩放情形 $z = s$，设 $i^* = \argmax_m s_m$ 且与其余分量至少相差 $\Delta = c\sqrt{d_k} > 0$。令 $\epsilon := 1 - p_{i^*}$，则：
+\[
+  \epsilon = \frac{\sum_{m \ne i^*} e^{s_m - s_{i^*}}}{1 + \sum_{m \ne i^*} e^{s_m - s_{i^*}}}
+  \le (T - 1) e^{-c\sqrt{d_k}}.
+\]
+由于对任意非最大项 $j \ne i^*$ 均有 $p_j \le \epsilon$，而最大项 $p_{i^*}(1 - p_{i^*}) \le \epsilon$，因此雅可比矩阵的每一元素满足：
+\[
+  \abs{\big(J_{\softmax}(s)\big)_{ij}}
+  \le \begin{cases}
+    p_{i^*}(1 - p_{i^*}) \le \epsilon, & i = j = i^*,\\
+    p_i \le \epsilon, & \text{其余一切 }(i, j).
+  \end{cases}
+\]
+由 Gershgorin 圆盘定理或直接对角求和可知，雅可比矩阵的谱范数满足 $\norm{J_{\softmax}(s)}_2 \le 2\epsilon \le 2(T-1) e^{-c\sqrt{d_k}}$。当 $d_k = 64$ 或 $128$ 时，典型未缩放分差可达 $10 \sim 20$，此时 $e^{-15} \approx 3 \times 10^{-7}$！上游传给注意力概率的梯度 $\bar{P} = \bar{O} V^\top$ 在穿过式~\eqref{eq:softmax-jacobian} 化为 logits 梯度时：
+\begin{equation}
+  \bar{Z}_{i,:} = P_{i,:} \had \left(\bar{P}_{i,:} - \inner{P_{i,:}}{\bar{P}_{i,:}}\mathbf{1}^\top\right),
+  \label{eq:attn-softmax-vjp}
+\end{equation}
+由于 $P_{i,:}$ 几乎是单热向量 $e_{i^*}$，$\bar{P}_{i, i^*} - \inner{P_{i,:}}{\bar{P}_{i,:}} \approx 0$ 且其余位置被 $P_{i, j} \approx 0$ 彻底乘零，于是 $\bar{Q} = \frac{1}{\sqrt{d_k}}\bar{Z} K$ 与 $\bar{K} = \frac{1}{\sqrt{d_k}}\bar{Z}^\top Q$ 全面熄火。
+\end{proof}
+\end{thmBox}
+
+式~\eqref{eq:attn-softmax-vjp} 同样给出了缩放点积注意力反向传播（VJP）的核心公式——顺带验证第 1 章的反向模式自动微分：给定上游梯度 $\bar{O} \in \R^{T \times d_v}$，依次可得 $\bar{V} = P^\top \bar{O}$，$\bar{P} = \bar{O} V^\top$，按式~\eqref{eq:attn-softmax-vjp} 算出 $\bar{Z}$，最后 $\bar{Q} = d_k^{-1/2}\bar{Z} K$ 与 $\bar{K} = d_k^{-1/2}\bar{Z}^\top Q$。
+
+\section{多头注意力、因果掩码与分组查询（GQA）}
+\label{sec:mha-mask-gqa}
+
+\subsection{多头注意力（MHA）与张量形状变形舞步}
+
+单一注意力头在每个位置上只能生成一张权重分布 $P \in \R^{T \times T}$，但自然语言中的依赖关系是多维交织的：同一个代词“它”可能既需要在\emph{句法指代子空间}回看十词之前的主语，又需要在\emph{局部修饰子空间}紧盯相邻动词。
+
+\textbf{多头注意力（Multi-Head Attention, MHA）}将总通道维度 $C = d_{\text{model}}$ 均匀切分为 $H$ 个独立子空间，每个头的维度为 $d_h = C / H$：
+\begin{equation}
+  \operatorname{MHA}(X) = \operatorname{Concat}\!\left(\operatorname{head}_1, \dots, \operatorname{head}_H\right) W^O,
+  \qquad
+  \operatorname{head}_h = \Attn(X W_h^Q,\; X W_h^K,\; X W_h^V),
+  \label{eq:mha}
+\end{equation}
+其中 $W_h^Q, W_h^K, W_h^V \in \R^{C \times d_h}$，$W^O \in \R^{C \times C}$。注意到把 $H$ 个头的参数量加总，总投影参数为 $3 H (C d_h) + C^2 = 4 C^2$——\textbf{与单头满维注意力参数量完全一致}，却换来了 $H$ 组可同时关注的独立表示子空间！
+
+工程实现绝不会用 Python \texttt{for} 循环逐头计算，而是把所有头的 $Q, K, V$ 融合成单次大矩阵乘法 $W_{QKV} \in \R^{C \times 3C}$，再借由精准的\textbf{张量形状舞步（Tensor Shape Choreography）}交给批量矩阵乘（Batched GEMM）一次性并行扫过批次 $B$ 与头数 $H$：
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{26mm}p{34mm}X@{}}
+\toprule
+\textbf{操作步骤} & \textbf{张量形状} & \textbf{数学与内存含义} \\
+\midrule
+输入序列 $X$ & \texttt{(B, T, C)} & $B$ 条样本，序列长 $T$，模型宽度 $C = H \cdot d_h$ \\
+融合投影 + 切分 & $3\times$\texttt{(B, T, C)} & 单次线性层 \texttt{qkv(x)} 后按 \texttt{dim=-1} 均切出 $Q, K, V$ \\
+拆头与转置 & \texttt{(B, H, T, d\_h)} & \textbf{先} \texttt{view(B,T,H,d\_h)}，\textbf{再} \texttt{transpose(1,2)} 将 $H$ 移入批维 \\
+缩放内积与掩码 & \texttt{(B, H, T, T)} & \texttt{(q @ k.transpose(-2,-1)) / sqrt(d\_h)} 加掩码 \\
+归一化与取值 & \texttt{(B, H, T, d\_h)} & \texttt{softmax(att, dim=-1) @ v} 完成全部 $B\cdot H$ 组软检索 \\
+合并多头 + 输出 & \texttt{(B, T, C)} & \texttt{transpose(1,2).contiguous().view(B,T,C)} 接 $W^O$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+请特别留意最后一步里的 \texttt{.contiguous()}：\texttt{transpose(1, 2)} 只交换了张量的步长（stride）元数据而未搬运底层内存，若不先整理为连续内存就直接调用 \texttt{.view(B, T, C)}，PyTorch 会立即抛出运行时错误。
+
+\subsection{因果掩码（Causal Masking）：零信息泄露的严格保证}
+
+在自回归语言模型（GPT、Llama 等解码器架构）训练中，我们把整段文本 $(x_1, \dots, x_T)$ 一次性并行输入网络，要求位置 $i$ 仅利用前缀 $x_{\le i}$ 来预测下一词 $x_{i+1}$。如果位置 $i$ 在自注意力中“偷看”了 $j > i$ 的未来词元，训练损失将瞬间作弊归零，但在推理生成时未来尚不存在，模型便彻底瘫痪。
+
+解决方案是在 $\softmax$ \textbf{之前}，给注意力 logits 矩阵加上一个上三角负无穷掩码 $M \in \R^{T \times T}$：
+\begin{equation}
+  M_{ij} = \begin{cases}
+    0, & j \le i,\\
+    -\infty, & j > i,
+  \end{cases}
+  \qquad
+  P = \softmax\!\left(\frac{Q K^\top}{\sqrt{d_k}} + M\right).
+  \label{eq:causal-mask}
+\end{equation}
+
+\begin{thmBox}
+\begin{proposition}[因果掩码的零未来梯度定理]
+\label{prop:causal-zero-grad}
+在式~\eqref{eq:causal-mask} 的因果自注意力中，对任意位置 $i$ 与任意未来位置 $j > i$，不仅前向注意力权重严格满足 $P_{ij} = 0$，而且任意只依赖位置 $i$ 输出 $o_i$ 的损失 $\mathcal{L}(o_i)$ 对未来键、值向量 $(k_j, v_j)$ 的反向梯度也\textbf{恒严格为零}：
+\[
+  \frac{\partial o_i}{\partial k_j} = \mathbf{0}, \qquad \frac{\partial o_i}{\partial v_j} = \mathbf{0} \qquad (\forall\, j > i).
+\]
+\end{proposition}
+\begin{proof}
+前向显然：对 $j > i$，$Z_{ij} = -\infty$，故 $P_{ij} = \frac{e^{-\infty}}{\sum_{r \le i} e^{Z_{ir}}} = 0$，从而 $o_i = \sum_{r=1}^i P_{ir} v_r$ 与 $v_j$ 无关，立得 $\frac{\partial o_i}{\partial v_j} = P_{ij} I = \mathbf{0}$。
+
+对键向量 $k_j$（$j > i$），由链式法则和式~\eqref{eq:softmax-jacobian}，对任意列 $m \in \{1, \dots, T\}$：
+\[
+  \frac{\partial P_{im}}{\partial Z_{ij}} = P_{im}(\delta_{mj} - P_{ij}).
+\]
+当 $m = j$ 时 $P_{ij} = 0$，故 $P_{ij}(1 - P_{ij}) = 0$；当 $m \ne j$ 时同样有 $-P_{im} P_{ij} = 0$。因此整行导数 $\frac{\partial P_{i,:}}{\partial Z_{ij}} \equiv \mathbf{0}$，从而 $\frac{\partial o_i}{\partial k_j} = \sum_m \frac{\partial o_i}{\partial P_{im}}\frac{\partial P_{im}}{\partial Z_{ij}}\frac{\partial Z_{ij}}{\partial k_j} = \mathbf{0}$。未来词元在正反向两个方向上都被数学隔离！
+\end{proof}
+\end{thmBox}
+
+\begin{insightBox}{为什么不能在 $\softmax$ 之后再把上三角置零？}
+如果先对完整 $Q K^\top/\sqrt{d_k}$ 做 $\softmax$ 再把 $j > i$ 的权重乘零，会有两重灾难：第一，剩余下三角权重之和不再等于 $1$（且分母 $Z_i = \sum_{r=1}^T e^{Z_{ir}}$ 已经偷偷混入了未来词元 $k_{j>i}$ 的信息！）；第二，由分母泄露导致的 $\partial P_{im}/\partial Z_{ij} = -P_{im}P_{ij} \ne 0$ 会把未来词元的梯度传给前文！\textbf{掩码必须在 $\softmax$ 之前以加法 $-\infty$ 施加。}
+\end{insightBox}
+
+\subsection{分组查询注意力（GQA）：现代大模型的显存瘦身术}
+
+标准 MHA 为每个查询头都配备专属的键头与值头（$n_{\text{kv}} = n_q = H$）。但在后文第~\ref{sec:block-kvcache} 节我们将看到，大模型长文本推理的头号显存瓶颈是保存历史键值的 \textbf{KV Cache}。
+\begin{itemize}
+  \item \textbf{多查询注意力（MQA；Shazeer, 2019）}：令所有 $n_q$ 个查询头共享\textbf{同一组}键与值（$n_{\text{kv}} = 1$），KV 显存骤降 $H$ 倍，但有时会轻微损及质量与训练稳定性；
+  \item \textbf{分组查询注意力（GQA；Ainslie et al., 2023）}：取两全其美的折中——把 $n_q$ 个查询头均分为 $n_{\text{kv}}$ 组（例如 Llama-3 8B 中 $n_q = 32,\; n_{\text{kv}} = 8$，每 4 个查询头共享 1 组 $K, V$）。GQA 几乎保留了 MHA 的全部表达精度，同时把 KV Cache 显存和解码访存带宽直接砍去 $75\%$（$4\times$ 压缩），已成为当今主流开源大模型的默认标准。
+\end{itemize}
+
+\section{位置编码与旋转位置编码（RoPE）}
+\label{sec:pe-rope}
+
+\subsection{自注意力的置换等变性：没有位置编码的“词袋”}
+
+与 RNN 按时间步推进、CNN 按空间坐标滑窗不同，原始自注意力把输入视为无序集合！
+
+\begin{thmBox}
+\begin{proposition}[无位置编码自注意力的置换等变性]
+\label{prop:attn-perm}
+设 $\Pi \in \{0, 1\}^{T \times T}$ 为任意 $T \times T$ 置换矩阵（满足 $\Pi^\top \Pi = \Pi \Pi^\top = I$）。对无因果掩码且无位置编码的自注意力层 $F(X) = \Attn(X W_Q, X W_K, X W_V)$，恒有：
+\begin{equation}
+  F(\Pi X) = \Pi\, F(X).
+  \label{eq:attn-perm}
+\end{equation}
+\end{proposition}
+\begin{proof}
+代入 $\Pi X$ 得 $Q' = \Pi Q,\; K' = \Pi K,\; V' = \Pi V$，从而内积矩阵变为：
+\[
+  \frac{Q' (K')^\top}{\sqrt{d_k}} = \frac{\Pi Q K^\top \Pi^\top}{\sqrt{d_k}}.
+\]
+因为 $\softmax$ 对每一行独立运算且关于行内元素次序对称，行置换与列置换均与 $\softmax$ 交换：$\softmax(\Pi Z \Pi^\top) = \Pi\,\softmax(Z)\,\Pi^\top$。最后右乘 $V' = \Pi V$ 并利用正交性 $\Pi^\top \Pi = I$：
+\[
+  F(\Pi X) = \Pi\,\softmax\!\left(\frac{Q K^\top}{\sqrt{d_k}}\right)\Pi^\top \Pi V = \Pi\, F(X).
+\]
+\end{proof}
+\end{thmBox}
+
+这意味着如果不注入位置信息，“猫追狗”与“狗追猫”里每个词拿到的上下文表征完全一样——模型退化成了一个高级词袋！因此，我们必须为 Transformer 装上“空间坐标仪”。
+
+\subsection{正弦绝对位置编码的灵感与局限}
+
+原始 Transformer（Vaswani et al., 2017）将确定性正弦位置向量 $\mathrm{PE}_m \in \R^d$ 直接\emph{加}在词嵌入上：$x_m \leftarrow e_m + \mathrm{PE}_m$，其第 $2i$ 与 $2i+1$ 维定义为：
+\begin{equation}
+  \mathrm{PE}_{(m, 2i)} = \sin(m \theta_i), \qquad
+  \mathrm{PE}_{(m, 2i+1)} = \cos(m \theta_i), \qquad
+  \theta_i = 10000^{-2i/d}.
+  \label{eq:sin-pe}
+\end{equation}
+不同维度构成从高频（$i=0,\; \theta_0 = 1$）到低频（$i=d/2-1,\; \theta \approx 10^{-4}$）的连续“二进制时钟”。由三角和角公式，$\mathrm{PE}_{m+\Delta}$ 可由 $\mathrm{PE}_m$ 经仅依赖偏移 $\Delta$ 的线性旋转矩阵得到。
+
+但加法式绝对位置编码有一个隐蔽缺陷：展开内积 $(e_m + \mathrm{PE}_m)^\top W_Q^\top W_K (e_n + \mathrm{PE}_n)$ 时，会产生内容--位置交叉项与 $\mathrm{PE}_m^\top W_Q^\top W_K \mathrm{PE}_n$；投影矩阵 $W_Q^\top W_K$ 会破坏完美旋转结构，使得模型在训练长度之外的外推能力较弱。
+
+\subsection{旋转位置编码（RoPE）：复平面上的相对位置奇迹}
+
+苏剑林等人（Su et al., 2021）提出的\textbf{旋转位置编码（Rotary Positional Embedding, RoPE）}提出了一个惊艳的几何洞见：\textbf{不要把位置向量“加”到词嵌入里，而是把查询 $q_m$ 与键 $k_n$ 按各自的位置索引 $(m, n)$ 在二维子平面上直接“旋转”对应角度！}
+
+先看最核心的二维情形（$d_h = 2$）。将二维向量 $q = (q_1, q_2)^\top \in \R^2$ 视为复数 $\tilde{q} = q_1 + \mathrm{i} q_2 \in \C$，位置 $m$ 对应的角度旋转操作就是乘以单位复数 $e^{\mathrm{i} m \theta}$，等价于左乘二维正交旋转矩阵：
+\begin{equation}
+  R_\theta(m) = \begin{pmatrix}
+    \cos(m\theta) & -\sin(m\theta) \\
+    \sin(m\theta) & \cos(m\theta)
+  \end{pmatrix} \in \mathrm{SO}(2).
+  \label{eq:rope-2d}
+\end{equation}
+对一般偶数维度 $d_h = 2K$，将向量两两配对为 $K$ 个二维子平面，采用多尺度角频率 $\theta_r = \text{base}^{-2(r-1)/d_h}$（经典 $\text{base} = 10000$，现代长上下文模型如 Llama-3 扩大至 $500{,}000$），构成 $d_h \times d_h$ 分块对角旋转矩阵：
+\begin{equation}
+  R_{\Theta, m}^{d_h} = \diag\!\left(R_{\theta_1}(m),\; R_{\theta_2}(m),\; \dots,\; R_{\theta_{d_h/2}}(m)\right).
+  \label{eq:rope-nd}
+\end{equation}
+
+\begin{thmBox}
+\begin{theorem}[RoPE 的相对位置内积不变性与保范定理]
+\label{thm:rope}
+对任意位置索引 $m, n \in \mathbb{Z}$、角频率 $\theta \in \R$ 及向量 $q, k \in \R^{d_h}$，旋转矩阵严格满足群乘法关系：
+\begin{equation}
+  R_\theta(m)^\top R_\theta(n) = R_\theta(n - m),
+  \label{eq:rope-group}
+\end{equation}
+由此推出经 RoPE 旋转后的查询与键内积\textbf{仅依赖于相对位置偏移 $n - m$}，且旋转不改变任何向量欧氏范数：
+\begin{equation}
+  \big(R_{\Theta, m}^{d_h} q\big)^\top \big(R_{\Theta, n}^{d_h} k\big)
+  = q^\top R_{\Theta, n - m}^{d_h} k,
+  \qquad
+  \norm{R_{\Theta, m}^{d_h} q}_2 = \norm{q}_2.
+  \label{eq:rope-rel}
+\end{equation}
+\end{theorem}
+\begin{proof}
+\textbf{方法一（二维旋转矩阵直接展开）}：对单个二维子块，取转置 $R_\theta(m)^\top$ 并与 $R_\theta(n)$ 相乘：
+\begin{align*}
+  R_\theta(m)^\top R_\theta(n)
+  &= \begin{pmatrix}
+    \cos m\theta & \sin m\theta \\
+    -\sin m\theta & \cos m\theta
+  \end{pmatrix}
+  \begin{pmatrix}
+    \cos n\theta & -\sin n\theta \\
+    \sin n\theta & \cos n\theta
+  \end{pmatrix} \\
+  &= \begin{pmatrix}
+    \cos m\theta \cos n\theta + \sin m\theta \sin n\theta &
+    -\cos m\theta \sin n\theta + \sin m\theta \cos n\theta \\
+    -\sin m\theta \cos n\theta + \cos m\theta \sin n\theta &
+    \sin m\theta \sin n\theta + \cos m\theta \cos n\theta
+  \end{pmatrix} \\
+  &= \begin{pmatrix}
+    \cos\big((n - m)\theta\big) & -\sin\big((n - m)\theta\big) \\
+    \sin\big((n - m)\theta\big) & \cos\big((n - m)\theta\big)
+  \end{pmatrix}
+  = R_\theta(n - m).
+\end{align*}
+\textbf{方法二（复平面一行极简证）}：将 $q, k \in \R^2$ 记为复数 $\tilde{q}, \tilde{k} \in \C$，则实内积满足 $u^\top v = \operatorname{Re}(\tilde{u}^* \tilde{v})$（其中 $*$ 表示复共轭）。于是：
+\[
+  \big(R_\theta(m) q\big)^\top \big(R_\theta(n) k\big)
+  = \operatorname{Re}\!\left[\big(\tilde{q} e^{\mathrm{i}m\theta}\big)^* \big(\tilde{k} e^{\mathrm{i}n\theta}\big)\right]
+  = \operatorname{Re}\!\left[\tilde{q}^* \tilde{k}\, e^{\mathrm{i}(n-m)\theta}\right]
+  = q^\top R_\theta(n - m) k.
+\]
+对分块对角矩阵 $R_{\Theta, m}^{d_h}$，逐块应用上述恒等式即得 $(R_{\Theta, m}^{d_h})^\top R_{\Theta, n}^{d_h} = R_{\Theta, n-m}^{d_h}$；特别地，令 $n = m$ 得 $(R_{\Theta, m}^{d_h})^\top R_{\Theta, m}^{d_h} = R_{\Theta, 0}^{d_h} = I$，故 $R_{\Theta, m}^{d_h}$ 为正交矩阵，严格保持 $\norm{R_{\Theta, m}^{d_h} q}_2 = \norm{q}_2$。
+\end{proof}
+\end{thmBox}
+
+RoPE 的工程实现也极为轻巧：利用分块稀疏性，根本不需要显式构造 $d_h \times d_h$ 矩阵，仅需 $O(d_h)$ 逐元素乘加即可完成：
+\[
+  R_{\Theta, m}^{d_h} q
+  = \begin{pmatrix} q_1 \\ q_2 \\ \vdots \\ q_{d_h-1} \\ q_{d_h} \end{pmatrix}
+  \had \begin{pmatrix} \cos m\theta_1 \\ \cos m\theta_1 \\ \vdots \\ \cos m\theta_K \\ \cos m\theta_K \end{pmatrix}
+  + \begin{pmatrix} -q_2 \\ q_1 \\ \vdots \\ -q_{d_h} \\ q_{d_h-1} \end{pmatrix}
+  \had \begin{pmatrix} \sin m\theta_1 \\ \sin m\theta_1 \\ \vdots \\ \sin m\theta_K \\ \sin m\theta_K \end{pmatrix}.
+\]
+同时，当多个几何级数频率 $\theta_r$ 叠加时，由 Abel 分部求和可证明内积上界随相对距离 $|n - m|$ 增大而呈现自然的\textbf{远程衰减性}——既保留绝对位置的 $O(1)$ 计算速度，又精确实现了相对位置建模，因此成为 Llama、Qwen、DeepSeek、Mistral 等几乎全部现代开源 LLM 的首选位置编码。
+
+\section{Transformer 块、SwiGLU 与 KV Cache 复杂度分析}
+\label{sec:block-kvcache}
+
+\subsection{Pre-LN vs Post-LN 与 SwiGLU 前馈网络}
+
+单个 Transformer 解码器块由“通信层（多头自注意力，沿序列维 $T$ 混合信息）”与“计算层（逐位置前馈网络 FFN，沿通道维 $C$ 提炼特征）”交替叠加而成。如何把归一化层放在残差连接里，直接决定了百层大模型能否稳定训练：
+\begin{itemize}
+  \item \textbf{Post-LN（2017 原始论文）}：$x' = \LN\big(x + \mathrm{MHA}(x)\big)$。正如第 3 章残差梯度高速公路定理所警示的，外层 $\LN$ 直接横亘在恒等主干道上，深层堆叠后每层都会对残差流反复重缩放，若无极精细的学习率 Warmup，训练极易在初始阶段发散。
+  \item \textbf{Pre-LN（GPT-2 / Llama 现代标配）}：
+  \begin{equation}
+    u_l = x_l + \mathrm{MHA}\!\big(\LN(x_l)\big), \qquad
+    x_{l+1} = u_l + \mathrm{FFN}\!\big(\LN(u_l)\big).
+    \label{eq:pre-ln}
+  \end{equation}
+  从第 1 层输入直到最后一层输出之前，存在一条\textbf{完全不被任何非线性或归一化阻断的洁净加法主干道}（仅在顶层分类头之前补加一层终末 $\LN_f$），因此梯度可直通底层！现代架构通常进一步用第 2 章介绍的 \textbf{RMSNorm} 取代 $\LN$，省去减均值开销而提速 $10\% \sim 20\%$。
+\end{itemize}
+
+在逐位置 FFN 中，原始 Transformer 采用两层全连接 $\mathrm{FFN}(x) = \ReLU(x W_1 + b_1) W_2 + b_2$（中间升维至 $4d$，总参数 $8d^2$）。现代大模型（PaLM、Llama、Qwen）普遍升级为带门控的 \textbf{SwiGLU}（Shazeer, 2020）：
+\begin{equation}
+  \mathrm{SwiGLU}(x) = \Big(\operatorname{SiLU}(x W_{\text{gate}}) \had (x W_{\text{up}})\Big) W_{\text{down}},
+  \qquad
+  \operatorname{SiLU}(z) = z \cdot \sigma(z).
+  \label{eq:swiglu}
+\end{equation}
+因为引入了第三个矩阵 $W_{\text{gate}}$，为了保持总参数量与传统 FFN 的 $8d^2$ 持平，工程上将中间隐藏宽度调整为 $d_{\text{ff}} = \frac{8}{3} d_{\text{model}}$（并常向上圆整至 $256$ 的倍数以对齐 GPU 张量核心），此时参数量为 $3 \cdot d_{\text{model}} \cdot \frac{8}{3} d_{\text{model}} = 8 d_{\text{model}}^2$，在同算力下稳定带来更低的验证困惑度。
+
+图~\ref{fig:transformer-arch} 直观展示了 Pre-LN Transformer 块的洁净残差流与因果掩码矩阵结构。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=1.5mm, draw=#1, thick, fill=#1!10, minimum width=30mm, minimum height=7.2mm, align=center, font=\sffamily\footnotesize, text=ink},
+  add/.style={circle, draw=tealDark, very thick, fill=tealLight, inner sep=1.2pt, font=\bfseries\small, text=tealDark},
+  arr/.style={-{Stealth[length=2mm]}, thick, ink!80},
+  hwy/.style={-{Stealth[length=2.2mm]}, very thick, tealDark}
+]
+  % ==================== Panel (a): Pre-LN Transformer Block ====================
+  \node[font=\sffamily\bfseries\small, color=tealDark] at (1.0, 6.75) {(a) Pre-LN Transformer 块与洁净残差流};
+
+  \node[font=\sffamily\footnotesize, color=slate] (xin) at (0, -0.3) {输入隐藏状态 $x_l \in \R^{T\times C}$};
+  \coordinate (s1) at (0, 0.35);
+  \node[box=navy] (ln1) at (0, 1.15) {RMSNorm / LayerNorm};
+  \node[box=teal] (mha) at (0, 2.2) {因果多头自注意力（+ RoPE）};
+  \node[add] (a1) at (0, 3.15) {$+$};
+
+  \coordinate (s2) at (0, 3.65);
+  \node[box=navy] (ln2) at (0, 4.35) {RMSNorm / LayerNorm};
+  \node[box=ochre] (ffn) at (0, 5.35) {SwiGLU 前馈网络（FFN）};
+  \node[add] (a2) at (2.8, 5.35) {$+$};
+  \node[font=\sffamily\footnotesize, color=tealDark] (xout) at (2.8, 6.18) {输出 $x_{l+1}$};
+
+  % Wait: let's route residual cleanly on the right!
+  \draw[hwy] (xin) -- (s1);
+  \draw[arr] (s1) -- (ln1);
+  \draw[arr] (ln1) -- (mha);
+  \draw[arr] (mha) -- (a1);
+  \draw[hwy] (s1) -- (2.3, 0.35) |- (a1) node[pos=0.25, right=2pt, font=\scriptsize\sffamily, color=tealDark] {恒等主干};
+
+  \draw[hwy] (a1) -- (s2);
+  \draw[arr] (s2) -- (ln2);
+  \draw[arr] (ln2) -- (ffn);
+  \draw[arr] (ffn) -- (a2);
+  \draw[hwy] (s2) -| (a2) node[pos=0.72, right=2pt, font=\scriptsize\sffamily, color=tealDark] {恒等主干};
+  \draw[hwy] (a2) -- (xout);
+
+  % ==================== Panel (b): Causal Mask Matrix ====================
+  \begin{scope}[shift={(6.4, 0.55)}]
+    \node[font=\sffamily\bfseries\small, color=tealDark] at (2.3, 6.20) {(b) $5\times 5$ 因果掩码矩阵（$\softmax$ 前）};
+
+    \foreach \i in {0,...,4} {
+      \foreach \j in {0,...,4} {
+        \pgfmathsetmacro{\x}{\j * 0.92}
+        \pgfmathsetmacro{\y}{(4 - \i) * 0.92}
+        \ifnum\j>\i
+          \fill[ochreLight] (\x, \y) rectangle (\x+0.88, \y+0.88);
+          \draw[ochre!55] (\x, \y) rectangle (\x+0.88, \y+0.88);
+          \node[font=\scriptsize, color=ochre] at (\x+0.44, \y+0.44) {$-\infty$};
+        \else
+          \fill[tealLight] (\x, \y) rectangle (\x+0.88, \y+0.88);
+          \draw[teal!60] (\x, \y) rectangle (\x+0.88, \y+0.88);
+          \node[font=\scriptsize, color=tealDark] at (\x+0.44, \y+0.44) {$z_{\i\j}$};
+        \fi
+      }
+    }
+    % Axis labels
+    \node[font=\scriptsize\sffamily, color=slate] at (2.3, 4.92) {被关注键位置 $j$（Keys）};
+    \node[font=\scriptsize\sffamily, color=slate, rotate=90] at (-0.42, 2.3) {查询位置 $i$（Queries）};
+    \foreach \k in {0,...,4} {
+      \node[font=\tiny\ttfamily, color=slate] at ({\k*0.92+0.44}, 4.65) {t\k};
+      \node[font=\tiny\ttfamily, color=slate] at (-0.18, {(4-\k)*0.92+0.44}) {t\k};
+    }
+    \node[font=\scriptsize\sffamily, color=ochre, align=center] at (2.3, -0.45) {上三角置 $-\infty \implies P_{ij}=0$ 且 $\partial o_i / \partial k_j = 0$};
+  \end{scope}
+\end{tikzpicture}}
+\caption{Pre-LN Transformer 解码器块与因果掩码原理示意。(a) 两条残差主干道保持纯加法流通，保证深层梯度直达底层；(b) $\softmax$ 前对未来位置施加 $-\infty$ 掩码，从前向与反向同时杜绝未来信息泄露。}
+\label{fig:transformer-arch}
+\end{figure}
+
+\subsection{预填充 vs 自回归解码：KV Cache 复杂度与显存账本}
+
+训练阶段我们已知全部 $T$ 个词元，整条序列并行算完一次前向即可。但在\textbf{推理生成}时，大模型必须逐词自回归输出，分为两个物理特性迥异的阶段：
+
+\begin{enumerate}
+  \item \textbf{预填充阶段（Prefill）}：一次性处理长度为 $T_p$ 的用户输入提示词（Prompt）。此时 $Q, K, V \in \R^{T_p \times C}$ 全部并行计算，注意力矩阵乘法耗时 $O(T_p^2 d_{\text{model}})$，由于矩阵宽大，GPU 处于\textbf{算力受限（Compute-Bound）}的高效状态。同时将每一层算出的所有历史键张量 $K_{1:T_p}$ 与值张量 $V_{1:T_p}$ 缓存在显存中——这便是 \textbf{KV Cache}。
+  \item \textbf{逐词解码阶段（Autoregressive Decode）}：生成第 $t$ 个新词元时，由于因果掩码，\textbf{过去 $1, \dots, t-1$ 个词元的键与值向量完全不会随新词的到来而改变}！
+  \begin{itemize}
+    \item \textbf{若不使用 KV Cache}：每吐出一个新词都要把长度为 $t$ 的完整前缀从头算一遍，单步注意力耗费 $O(t^2 d)$，生成 $T$ 个词总复杂度飙升至惊人的 $\sum_{t=1}^T O(t^2 d) = O(T^3 d)$！
+    \item \textbf{启用 KV Cache 后}：只需对\textbf{当前单个新词元} $x_t$ 投影出 $q_t, k_t, v_t \in \R^{1 \times d}$，把 $(k_t, v_t)$ 追加进缓存，再用单向量 $q_t$ 去点乘缓存矩阵 $K_{1:t} \in \R^{t \times d}$ 并加权求和 $V_{1:t}$。单步注意力计算量暴降至 $O(t d)$，生成 $T$ 个词的总计算量回到 $O(T^2 d)$！
+  \end{itemize}
+\end{enumerate}
+
+但天下没有免费的午餐：KV Cache 用\textbf{显存空间换取计算时间}。对一个 $L$ 层、批大小 $B$、序列长度 $T$、KV 头数 $n_{\text{kv}}$、单头维度 $d_h$、每标量占 $b_{\text{elem}}$ 字节（FP16/BF16 为 $2$ 字节，INT8 为 $1$ 字节）的模型，KV Cache 占用的精确显存为：
+\begin{equation}
+  \text{Mem}_{\mathrm{KV}} = 2 \cdot L \cdot B \cdot T \cdot n_{\text{kv}} \cdot d_h \cdot b_{\text{elem}},
+  \label{eq:kv-cache-mem}
+\end{equation}
+其中最前面的因子 $2$ 对应 $K$ 与 $V$ 两份缓存。
+
+\begin{example}[Llama-3 8B 规模模型的 KV Cache 显存精算]
+设 $L = 32,\; n_q = 32,\; d_h = 128$，使用 BF16（$b_{\text{elem}} = 2$ 字节），单条请求（$B = 1$）上下文长度 $T = 8192$：
+\begin{itemize}
+  \item 若采用标准 \textbf{MHA}（$n_{\text{kv}} = 32$）：
+  \[
+    \text{Mem}_{\mathrm{KV}}^{\mathrm{MHA}} = 2 \times 32 \times 1 \times 8192 \times 32 \times 128 \times 2 \text{ B} = 4{,}294{,}967{,}296 \text{ B} = 4.00\text{ GiB} \approx 4.29\text{ GB}.
+  \]
+  当并发批大小升至 $B = 32$ 时，仅 KV Cache 就要吞掉 \textbf{128 GiB} 显存，远远超过 8B 模型权重本身（约 16 GB）！
+  \item 采用 \textbf{GQA}（$n_{\text{kv}} = 8$）后：单条请求的 KV Cache 直接缩减 $4$ 倍至 \textbf{1.00 GiB}（$1.07\text{ GB}$），使并发吞吐瞬间翻四番！这也是第 6 卷第 5--6 章将深入剖析的 PagedAttention（vLLM）与 KV 量化优化的直接起点。
+\end{itemize}
+\end{example}
+
+\section{实测实验：从零手写迷你 GPT 学会序列反转}
+\label{sec:exp-minigpt}
+
+纸上谈兵终觉浅。下面我们直接用不到 45 行纯 PyTorch 代码，不调用 \texttt{nn.Transformer}，亲手组装一个具备完整因果多头自注意力与 Pre-LN 残差流的 \textbf{Mini-GPT}（来自配套脚本 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp4\_mini\_gpt\_reverse}），并在经典的算法推理任务——\textbf{6 词序列反转}上检验它的真本领！
+
+\textbf{任务构造}：词表大小为 $12$（数字词元 \texttt{0..9}、分隔符 \texttt{10} 记作 \texttt{|}、填充符 \texttt{11}）。每条样本随机生成 6 个数字并拼接其倒序，例如：
+\[
+  \texttt{3 8 1 0 7 4 | 4 7 0 1 8 3}
+\]
+总长度 $13$，自回归输入 $x = s_{0:11}$、目标 $y = s_{1:12}$（长度 $12$）。\textbf{交叉熵损失仅在分隔符之后的 6 个反转答案位置上计算}——因为前 6 个数字是完全随机生成的，不可预测。要答对这 6 个位置，模型必须学会用注意力跨越不定距离（从间隔 $1$ 步到间隔 $11$ 步）精准定位对称位置并搬运词元！
+
+\begin{lstlisting}[caption={纯 PyTorch 手写因果多头自注意力与 Pre-LN 迷你 GPT（与 \texttt{vol5\_experiments.py} 一致）},label={lst:minigpt}]
+import math, torch, torch.nn as nn, torch.nn.functional as F
+
+class CausalSelfAttn(nn.Module):
+    def __init__(self, d_model: int, n_head: int, max_len: int):
+        super().__init__()
+        self.n_head, self.d_head = n_head, d_model // n_head
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        mask = torch.tril(torch.ones(max_len, max_len)).view(1, 1, max_len, max_len)
+        self.register_buffer("mask", mask)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q.view(B, T, self.n_head, self.d_head).transpose(1, 2)  # (B,H,T,d_h)
+        k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.d_head).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_head)    # 缩放点积
+        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)                                # 沿键维归一化
+        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.proj(y)
+
+class MiniGPT(nn.Module):
+    def __init__(self, vocab=12, seq_len=13, d_model=48, n_head=4, n_layer=2):
+        super().__init__()
+        self.tok = nn.Embedding(vocab, d_model)
+        self.pos = nn.Embedding(seq_len, d_model)
+        self.blocks = nn.ModuleList([nn.ModuleDict({
+            "ln1": nn.LayerNorm(d_model),
+            "attn": CausalSelfAttn(d_model, n_head, seq_len),
+            "ln2": nn.LayerNorm(d_model),
+            "ffn": nn.Sequential(nn.Linear(d_model, 4*d_model),
+                                 nn.GELU(), nn.Linear(4*d_model, d_model)),
+        }) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab, bias=False)
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        B, T = idx.shape
+        x = self.tok(idx) + self.pos(torch.arange(T, device=idx.device))
+        for blk in self.blocks:
+            x = x + blk["attn"](blk["ln1"](x))    # Pre-LN 残差注意力
+            x = x + blk["ffn"](blk["ln2"](x))     # Pre-LN 残差前馈
+        return self.head(self.ln_f(x))
+\end{lstlisting}
+
+我们配置 $d_{\text{model}} = 48,\; H = 4$（单头维度 $d_h = 12$）、$L = 2$ 层，采用 AdamW（$\eta = 2\times 10^{-3},\; \lambda = 10^{-2}$）、批大小 $64$ 在线采样训练 $320$ 步，并在 $256$ 条独立验证序列上追踪两项指标：逐词准确率（\texttt{val\_tok\_acc}）与\textbf{整条 6 词答案全部答对的精确匹配率}（\texttt{val\_seq\_acc}）。实测数据 \texttt{data/transformer\_train.csv} 记录了极具戏剧性的“顿悟式”收敛（见图~\ref{fig:minigpt-train}）：
+\begin{itemize}
+  \item \textbf{第 0 步（随机初始化）}：交叉熵损失 \texttt{2.6166}（接近 $\ln 12 \approx 2.485$ 的盲猜基线），逐词准确率仅 \texttt{8.33\%}，整句精确率 \texttt{0.00\%}；
+  \item \textbf{第 20 步}：损失降至 \texttt{2.0962}，逐词准确率升至 \texttt{34.38\%}，但 6 词全对率仍为 \texttt{0.00\%}（模型还在摸索镜像位置索引）；
+  \item \textbf{第 40 步（相变跃迁！）}：一旦注意力头锁定了“位置 $6+k$ 对齐位置 $5-k$”的复制电路，损失瞬间暴跌至 \texttt{0.2933}，逐词准确率飙升至 \texttt{99.87\%}，整句精确率一举跃上 \texttt{99.22\%}；
+  \item \textbf{第 60--80 步}：损失进一步跌破 \texttt{0.0321} 与 \texttt{0.0149}，验证集逐词与整句精确率双双锁死在 \textbf{\texttt{100.00\%}}；
+  \item \textbf{第 320 步}：交叉熵损失收敛至 \texttt{0.0018}，整句准确率稳稳保持 \textbf{\texttt{100.00\%}}——一个参数量不足 6 万的纯手写迷你 GPT，彻底掌握了任意未见 6 位数序列的精确倒序复制！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left plot: Cross-Entropy Loss
+  \begin{axis}[
+    name=lossplot,
+    width=0.47\linewidth, height=5.8cm,
+    title={\sffamily\bfseries\footnotesize (a) 训练交叉熵损失收敛曲线},
+    xlabel={训练步数（Step）},
+    ylabel={交叉熵损失 $\mathcal{L}_{\mathrm{CE}}$},
+    xmin=-6, xmax=326, ymin=-0.08, ymax=2.85,
+    xtick={0,80,160,240,320},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink}
+  ]
+    \addplot[ochre, very thick, mark=*, mark size=1.6pt]
+      table[x=step, y=loss, col sep=comma]{data/transformer_train.csv};
+    \node[font=\scriptsize\sffamily, color=ochre, anchor=west] at (axis cs:55, 2.35) {step=0: 2.6166};
+    \node[font=\scriptsize\sffamily, color=tealDark, anchor=south west] at (axis cs:92, 0.22) {step=80: 0.0149};
+    \draw[-{Stealth[length=1.8mm]}, tealDark, thin] (axis cs:105, 0.22) -- (axis cs:82, 0.05);
+  \end{axis}
+
+  % Right plot: Val Token Acc & Exact Seq Acc
+  \begin{axis}[
+    at={(lossplot.east)}, anchor=west, xshift=1.45cm,
+    width=0.47\linewidth, height=5.8cm,
+    title={\sffamily\bfseries\footnotesize (b) 验证集逐词与整句精确匹配率},
+    xlabel={训练步数（Step）},
+    ylabel={验证准确率（\%）},
+    xmin=-6, xmax=326, ymin=-3, ymax=108,
+    xtick={0,80,160,240,320},
+    ytick={0,25,50,75,100},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.22)}, anchor=east, font=\scriptsize, fill=white, draw=tealLine, legend cell align=left}
+  ]
+    \addplot[teal, very thick, mark=*, mark size=1.6pt]
+      table[x=step, y=val_tok_acc, col sep=comma]{data/transformer_train.csv};
+    \addlegendentry{逐词准确率（Tok Acc）}
+
+    \addplot[navy, very thick, dashed, mark=square*, mark size=1.5pt]
+      table[x=step, y=val_seq_acc, col sep=comma]{data/transformer_train.csv};
+    \addlegendentry{整句精确率（Seq Acc）}
+
+    \node[font=\scriptsize\sffamily\bfseries, color=tealDark, fill=white, inner sep=1pt]
+      at (axis cs:195, 86) {step $\ge 60$: 100.00\%};
+  \end{axis}
+\end{tikzpicture}
+\caption{纯 PyTorch 2 层迷你 GPT 在 6 词序列反转任务上的实测训练曲线（读取自 \texttt{data/transformer\_train.csv}）。第 20--40 步间模型完成复制注意力电路的“顿悟”相变，80 步后损失降至 \texttt{0.0149}，整句准确率锁定 \texttt{100.00\%}。}
+\label{fig:minigpt-train}
+\end{figure}
+
+\begin{failBox}{手写 Transformer 最致命的三个隐蔽 Bug}
+\begin{enumerate}
+  \item \textbf{忘记因果掩码导致训练作弊与推理崩盘}：若漏掉 \texttt{masked\_fill}，位置 $t$ 会直接抄写位置 $t+1$ 的答案词元，训练损失三步跌至 $0$；可一旦进入自回归采样循环，模型从未学过从前文推理，只能胡言乱语。自检金标准：随机扰动输入张量第 $t+1$ 步之后的所有元素，检查位置 $t$ 的前向输出差值是否严格为 \texttt{0.0}！
+  \item \textbf{多头拆分的错误 \texttt{view} 顺序静默打乱序列}：新手常把 \texttt{q.view(B, T, H, d\_h).transpose(1, 2)} 误写成一行 \texttt{q.view(B, H, T, d\_h)}。后者代码\textbf{不会报错}，却会把不同时间步的特征强行切片拼凑进错误的头里，彻底摧毁语义对齐！
+  \item \textbf{把 $\softmax$ 算在错误的维度上}：对形状为 \texttt{(B, H, T, T)} 的注意力矩阵，必须执行 \texttt{F.softmax(att, dim=-1)}（沿键维度使每行之和为 $1$）。若错写成 \texttt{dim=-2}（每列之和为 $1$），不仅每个查询的权重之和不再归一，还会把未来行的数值揉进当前行的分母里，双重破坏因果性！
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{打破 $O(T^2)$ 内存墙：FlashAttention 预告与线性注意力 / 状态空间对偶}
+标准注意力实现必须把 $T \times T$ 的注意力矩阵 $P$ 写入显存（HBM）再读回，当上下文长达 $T = 128\text{K}$ 时，仅单头注意力矩阵就需要 $128\text{K}^2 \times 2\text{ B} = 32\text{ GB}$ 显存！现代系统与算法正从两条路线攻克此墙：
+\begin{itemize}
+  \item \textbf{FlashAttention（Dao et al., 2022/2023；精确注意力，零近似）}：利用 GPU 片上极高速 SRAM 实施\textbf{分块平铺（Tiling）}，结合第 1 章提到的在线安全 $\softmax$ 递推，边读取小块 $Q_i, K_j, V_j$ 边动态维护运行最大值 $m_i$ 与归一分母 $\ell_i$，\textbf{全程从不将 $O(T^2)$ 矩阵落盘至 HBM}！反向传播时仅重算局部块，使显存复杂度从 $O(T^2)$ 骤降至 $O(T)$，实测提速 $2\sim 4\times$（详见第 6 卷第 5 章）。
+  \item \textbf{线性注意力与结构化状态空间对偶（SSD / Mamba-2）}：若将 $\exp(q_i^\top k_j)$ 近似为特征映射内积 $\phi(q_i)^\top \phi(k_j)$，由矩阵乘法结合律：
+  \[
+    \sum_{j=1}^i \big(\phi(q_i)^\top \phi(k_j)\big) v_j
+    = \phi(q_i)^\top \underbrace{\sum_{j=1}^i \phi(k_j) v_j^\top}_{S_i \in \R^{d \times d}},
+  \]
+  只需维护一个固定大小的状态矩阵 $S_i = S_{i-1} + \phi(k_i) v_i^\top$，复杂度一举化为线性 $O(T d^2)$！Dao 与 Gu（2024）进一步揭示：带衰减因子的线性注意力在矩阵形式下与第 3 章的 Mamba 选择性状态空间模型存在严格的\textbf{数学对偶性}——注意力与循环递归在半个世纪后终于在统一框架下合流！
+\end{itemize}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章彻底拆解了现代基础模型的心脏——Transformer：
+\begin{itemize}
+  \item \textbf{缩放点积注意力}以 $O(1)$ 路径长度打通全局交互，分母 $\sqrt{d_k}$ 精确抵消高维内积方差膨胀，避免 $\softmax$ 雅可比矩阵 $\diag(p) - pp^\top$ 陷入饱和零梯度区；
+  \item \textbf{多头、因果掩码与 GQA} 分别解决了多子空间表征、自回归零未来梯度泄露与长文本显存瘦身三大工程命题；
+  \item \textbf{RoPE} 借由正交旋转群恒等式 $R_\theta(m)^\top R_\theta(n) = R_\theta(n-m)$，以 $O(d)$ 代价在绝对位置框架内精确实现了相对位置内积；
+  \item \textbf{Pre-LN、SwiGLU 与 KV Cache} 将训练稳定性与推理吞吐推向极致，而 45 行纯 PyTorch 手写迷你 GPT 在 80 步内斩获 $100\%$ 序列反转精确率，印证了这一架构的惊人威力。
+\end{itemize}
+有了如此强大的通用架构之后，下一个核心问题是：\textbf{没有海量人工标签时，如何喂养它成长为通识大模型，又该如何最优分配模型规模与数据算力？} 这正是第 5 章的主题。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{掌握缩放注意力、参数量估算与 KV Cache 显存账本}
+
+\begin{enumerate}
+  \item[\textbf{5.4.1}] \textbf{因果缩放点积注意力完整手算}：给定长度 $T=3$、维度 $d_k = d_v = 2$ 的序列矩阵：
+  \[
+    Q = \begin{pmatrix} 1 & 0 \\ 0 & 1 \\ 1 & 1 \end{pmatrix}, \qquad
+    K = \begin{pmatrix} 1 & 0 \\ 1 & 1 \\ 0 & 1 \end{pmatrix}, \qquad
+    V = \begin{pmatrix} 2 & 0 \\ 0 & 2 \\ 1 & 1 \end{pmatrix}.
+  \]
+  分别计算\textbf{无因果掩码}与\textbf{带因果掩码}（式~\eqref{eq:causal-mask}）时的缩放 logits 矩阵 $Z$、权重矩阵 $P$ 及最终输出矩阵 $O$（保留三位小数）。对比第 1 行输出的变化。
+  \exHint{带因果掩码时，第 1 行只能看见 $j=1$，故 $P_{1,:} = (1, 0, 0)$，输出恒等于 $v_1 = (2, 0)$！}
+
+  \item[\textbf{5.4.2}] \textbf{70B 大模型的参数结构与 KV Cache 精算}：某现代解码器大模型配置为 $L = 80$ 层、$d_{\text{model}} = 8192$、查询头 $n_q = 64$、KV 头 $n_{\text{kv}} = 8$（$d_h = 128$）、SwiGLU 中间维 $d_{\text{ff}} = 28672$、词表 $|V| = 128{,}000$（不共享输入/输出嵌入）。
+  \begin{enumerate}
+    \item 估算该模型的总可训练参数量（忽略 RMSNorm 极少量参数）；
+    \item 若以 BF16（2 字节）部署，上下文长度 $T = 32{,}768$、并发批大小 $B = 16$，依据式~\eqref{eq:kv-cache-mem} 精确计算 KV Cache 显存占用（以 GiB 为单位），并与若改用标准 MHA（$n_{\text{kv}} = 64$）时的显存对比。
+  \end{enumerate}
+  \exHint{每层 GQA 投影参数为 $W_Q(d^2) + W_K(d \cdot n_{\text{kv}} d_h) + W_V(d \cdot n_{\text{kv}} d_h) + W_O(d^2)$；SwiGLU 为 $3 d \cdot d_{\text{ff}}$。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{深入注意力梯度流、RoPE 远程衰减与跨层信息容量}
+
+\begin{enumerate}
+  \item[\textbf{5.4.3}] \textbf{Softmax 雅可比半正定性与缩放点积注意力完整 VJP}：
+  \begin{enumerate}
+    \item 利用 Cauchy--Schwarz 不等式证明：对任意概率分布 $p \in \Delta^{T-1}$ 及任意向量 $u \in \R^T$，式~\eqref{eq:softmax-jacobian} 给出的矩阵 $J_{\softmax} = \diag(p) - p p^\top$ 是对称半正定矩阵（$u^\top J_{\softmax} u \ge 0$），且其零空间恰好由全一向量 $\mathbf{1}$ 张成；
+    \item 由此解释为何给注意力 logits 任意一行同时加上标量常数 $c$（如为了数值稳定而减去行最大值 $\max_j Z_{ij}$），不仅前向概率保持不变，反向梯度 $\bar{Z}$ 也严格满足 $\sum_{j=1}^T \bar{Z}_{ij} = 0$。
+  \end{enumerate}
+  \exHint{把 $u^\top (\diag(p) - pp^\top) u$ 改写成以 $p$ 为概率测度的方差 $\Var_{j \sim p}(u_j) = \E_p[u^2] - (\E_p[u])^2 \ge 0$！}
+
+  \item[\textbf{5.4.4}] \textbf{RoPE 编码的相对距离远程衰减上界}：设 $d_h = 2K$，角频率 $\theta_r = 10000^{-2(r-1)/d_h}$，记 $\tilde{q}_r, \tilde{k}_r \in \C$ 为第 $r$ 个二维子平面上的复数表示，相对距离为 $\Delta = n - m$。定义 $h_r := \tilde{q}_r^* \tilde{k}_r$ 及部分和 $S_r := \sum_{j=1}^r e^{\mathrm{i} \Delta \theta_j}$（$S_0 = 0$）。利用 Abel 分部求和恒等式：
+  \[
+    \sum_{r=1}^{K} h_r e^{\mathrm{i} \Delta \theta_r}
+    = h_K S_K - \sum_{r=1}^{K-1} (h_{r+1} - h_r) S_r,
+  \]
+  证明 RoPE 注意力内积绝对值受控于 $\max_r |h_{r+1} - h_r| \sum_{r=1}^{K} |S_r|$（外加边界项），并说明为何当频率 $\theta_r$ 呈几何级数分布时，$\sum_r |S_r|$ 随相对距离 $|\Delta|$ 增大呈现振荡衰减趋势。
+  \exHint{高、中、低频单位复数 $e^{\mathrm{i}\Delta\theta_r}$ 随 $|\Delta|$ 增大相位错开，相消干涉导致部分和 $|S_r|$ 显著小于 $r$。}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{手写 RoPE、无缩放消融对比与 KV Cache 增量解码验证}
+
+\begin{enumerate}
+  \item[\textbf{5.4.5}] \textbf{无 $\sqrt{d_k}$ 缩放消融实验}：复制代码~\ref{lst:minigpt} 中的 \texttt{MiniGPT}，将模型宽度放大至 $d_{\text{model}} = 256,\; H = 2$（即单头维度 $d_h = 128$），分别在开启与关闭 \texttt{/ math.sqrt(self.d\_head)} 两种设置下训练序列反转任务。统计前 100 步中注意力权重矩阵的\textbf{平均信息熵} $H(P) = -\frac{1}{T}\sum_{i,j} P_{ij}\ln P_{ij}$ 以及 $W_Q$ 梯度范数，定量验证定理~\ref{thm:sqrt-dk} 的预测。
+  \exHint{未缩放时初始注意力熵接近 $0$（退化为单热尖峰），梯度范数较缩放组小几个数量级。}
+
+  \item[\textbf{5.4.6}] \textbf{为手写 \texttt{MiniGPT} 添加 RoPE 与增量 KV Cache 推理}：
+  \begin{enumerate}
+    \item 去掉 \texttt{self.pos} 绝对位置嵌入，用 $O(d_h)$ 的 \texttt{cos/sin} 逐元素旋转为 \texttt{CausalSelfAttn} 接入 RoPE，并验证相对位置内积不变性（误差 $< 10^{-6}$）；
+    \item 给 \texttt{CausalSelfAttn.forward} 新增可选参数 \texttt{kv\_cache}，支持单词增量解码。对比“每次重算全前缀”与“启用 KV Cache 逐步生成”输出的最后一步 logits，确保两者最大绝对误差 $< 10^{-5}$！
+  \end{enumerate}
+  \exHint{增量解码第 $t$ 步时，不要忘记把 RoPE 的位置索引设为当前绝对步号 $t$（而非 $0$），并且单步查询 $q_t$ 无需再加下三角掩码（它合法可见缓存中的全部历史键 $K_{0:t}$）。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{深入长上下文外推与注意力回路的机械可解释性}
+
+\begin{enumerate}
+  \item[\textbf{5.4.7}] \textbf{长上下文外推：位置内插（PI）与 NTK-Aware / YaRN 缩放}：一个在长度 $T_{\text{train}} = 4096$ 上用 RoPE 训练的 LLM，若直接推理 $T_{\text{test}} = 16384$，模型困惑度会瞬间崩溃。查阅 Chen 等人（2023）的\textbf{位置内插（Position Interpolation）}（将 $m$ 替换为 $m / 4$）与 \textbf{YaRN}（按频率高低分区缩放：高频维度保持不变以保留局部词序分辨率，低频维度做内插）思想，从定理~\ref{thm:rope} 的多频时钟视角剖析为何“高频不插、低频内插”远优于均匀内插。
+  \exHint{均匀缩小 $m \to m/4$ 会把相邻词元的微小高频相位差压缩 $4$ 倍，导致模型分不清紧邻两个词的先后关系！}
+
+  \item[\textbf{5.4.8}] \textbf{归纳头（Induction Heads）与上下文学习回路}：Olsson 等人（2022）在研究 Transformer 机械可解释性时发现，两层及以上自注意力模型会自发涌现一种由两层协同构成的\textbf{归纳头（Induction Head）}电路：第 1 层的“前词头”把位置 $i-1$ 的词元复制到位置 $i$ 的残差流中；第 2 层的“匹配头”看到当前词元 \texttt{A} 时，在历史中寻找“前一个词是 \texttt{A}”的位置（即曾紧跟在 \texttt{A} 后的词元 \texttt{B}），从而在上下文中直接完成模式补全 \texttt{[A][B] ... [A] -> [B]}。试结合本章迷你 GPT 的实验现象（第 20--40 步的相变跃迁），分析为什么单层无位置协同的注意力难以实现复杂多跳复制，而两层残差流组合如何构成可编程的符号电路？
+  \exHint{将残差流视作所有注意力头共同读写的“共享内存总线”，第 1 层写入位置/邻接标签，第 2 层按该标签发起第二跳查询。}
+\end{enumerate}

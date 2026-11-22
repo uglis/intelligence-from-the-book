@@ -1,0 +1,682 @@
+\chapter[马尔可夫决策过程与 Bellman 方程]{马尔可夫决策过程（MDP）\\与 Bellman 最优性方程}\label{ch:mdp}
+\chapEpigraph{最优策略具有这样的性质：无论初始状态与初始决策如何，其余决策对于由第一个决策所导致的状态而言，必构成一个最优策略。}{理查德·贝尔曼（Richard Bellman），《动态规划》（1957）}
+
+\begin{chapIntro}{本章导读}
+第 1 章的 A* 搜索在确定性世界里规划行动，第 4、5 章的概率图模型与 HMM 在不确定世界里被动推理状态。现在，让我们把这两条主线融为一体：如果智能体身处一个\textbf{充满随机扰动、且动作后果会延迟显现}的动态环境——比如轮子会打滑的机器人、瞬息万变的股市仓位、或者需要多步权衡的推理智能体——它该如何制定长远最优的闭环决策？本章建立\textbf{马尔可夫决策过程（MDP）}的数学框架，先用一个可手算的两状态例子建立直观，再系统推导 \textbf{Bellman 期望方程与最优性方程}，严格证明\textbf{值迭代的 $\gamma$-压缩映射定理}与\textbf{策略迭代的策略改进定理}，并在经典 $4\times 3$ 随机网格世界上亲手验算全部数值，为第 6 卷的深度强化学习（DQN / PPO）打下不可动摇的理论基石。
+\end{chapIntro}
+
+% ============================================================
+\section{MDP 形式化、折扣回报与价值函数}\label{sec:mdp-formulation}
+% ============================================================
+
+\subsection{为什么不能只规划一条开环动作序列？}
+
+在第 1 章的确定性迷宫中，A* 算法只需输出一条固定的动作序列 $\langle \text{右}, \text{右}, \text{上}, \text{右} \rangle$，智能体闭着眼睛按序执行即可精准抵达终点。但如果地面湿滑，每次尝试“向前走”只有 $80\%$ 的概率如愿以偿，另有 $10\%$ 向左偏滑、$10\%$ 向右偏滑，那么一条死板的开环动作序列在第一步打滑后就会彻底失灵！
+
+在随机环境中，智能体真正需要的是一个\textbf{策略（Policy）} $\pi$：它像一本完备的应急手册，告诉智能体\textbf{无论意外落入哪一个状态 $s$，此刻最明智的动作 $\pi(s)$ 是什么}。
+
+\begin{defBox}
+\begin{definition}[马尔可夫决策过程，Markov Decision Process]\label{def:mdp}
+一个有限离散时间\textbf{马尔可夫决策过程（MDP）}由五元组 $(S, A, P, R, \gamma)$ 定义：
+\begin{enumerate}
+  \item \textbf{状态空间} $S$：有限状态集合（大小记为 $|S|$）；
+  \item \textbf{动作空间} $A$：有限动作集合（大小记为 $|A|$，或与状态相关的 $A(s)$）；
+  \item \textbf{状态转移核} $P(s' \mid s, a) = \Prob(S_{t+1} = s' \mid S_t = s, A_t = a)$，满足归一化 $\sum_{s'\in S} P(s'\mid s, a) = 1$（\textbf{马尔可夫性}：下一状态仅依赖当前状态与动作，与更早历史无关）；
+  \item \textbf{奖励函数} $R(s, a, s') \in \R$（或期望即时奖励 $R(s, a) := \sum_{s'} P(s'\mid s, a) R(s, a, s')$），假定有界：$|R(s, a, s')| \le R_{\max}$；
+  \item \textbf{折扣因子（Discount Factor）} $\gamma \in (0, 1)$，刻画未来奖励相对于即时奖励的折现权重。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\subsection{折扣回报、有界性与价值函数}
+
+智能体从时刻 $t$ 起与环境持续交互，产生一条随机轨迹 $S_t, A_t, R_{t+1}, S_{t+1}, A_{t+1}, R_{t+2}, \dots$。我们定义从时刻 $t$ 开始的\textbf{无限期折扣累积回报（Discounted Return）}为
+\begin{equation}\label{eq:return}
+  G_t := R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + \cdots = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1}.
+\end{equation}
+为什么要引入 $\gamma \in (0, 1)$？除了经济学中“今日的一元钱比明年的一元钱更有价值”的直观外，它在数学上提供了至关重要的\textbf{收敛与有界性保证}：
+
+\begin{proposition}[折扣回报的一致有界性]\label{prop:return-bound}
+若单步奖励满足 $|R_{t+k+1}| \le R_{\max}$ 且 $\gamma \in [0, 1)$，则对任意无限长轨迹，级数~\eqref{eq:return} 绝对收敛且一致有界：
+\[
+  |G_t| \le \sum_{k=0}^{\infty} \gamma^k |R_{t+k+1}| \le R_{\max} \sum_{k=0}^{\infty} \gamma^k = \frac{R_{\max}}{1 - \gamma}.
+\]
+\end{proposition}
+反之，若在没有终止状态的循环任务中强行取 $\gamma = 1$，两条分别每步获得 $+1$ 和 $+2$ 的策略累积回报都是 $+\infty$，根本无法比较优劣！
+
+给定一个（平稳）策略 $\pi(a \mid s) = \Prob(A_t = a \mid S_t = s)$（若为确定性策略，记作 $a = \pi(s)$），我们用两个核心函数衡量它的长期价值：
+\begin{itemize}
+  \item \textbf{状态价值函数（State-Value Function）}：从状态 $s$ 出发、此后始终遵循策略 $\pi$ 的期望折扣回报：
+  \[
+    V^\pi(s) := \E_\pi\big[G_t \mid S_t = s\big] = \E_\pi\left[\sum_{k=0}^{\infty} \gamma^k R_{t+k+1} \;\middle|\; S_t = s\right];
+  \]
+  \item \textbf{动作价值函数（Action-Value / Q-Function）}：在状态 $s$ 先强行执行动作 $a$、此后全部遵循策略 $\pi$ 的期望折扣回报：
+  \[
+    Q^\pi(s, a) := \E_\pi\big[G_t \mid S_t = s, A_t = a\big].
+  \]
+\end{itemize}
+对所有可能策略取上界，便得到\textbf{最优状态价值函数} $V^*(s) := \max_\pi V^\pi(s)$ 与\textbf{最优动作价值函数} $Q^*(s, a) := \max_\pi Q^\pi(s, a)$，它们显然满足 $V^*(s) = \max_{a \in A} Q^*(s, a)$。
+
+\subsection{先手算一个两状态微型 MDP：打破“只顾眼前”的短视陷阱}
+
+在搬出一般性定理之前，让我们先彻底手算一个贴近备考生活的 2 状态 MDP（图~\ref{fig:toy-mdp}）：状态为 $S = \{s_0\text{（精力充沛）},\; s_1\text{（极度疲惫）}\}$，动作为 $A = \{a_0\text{（全力冲刺）},\; a_1\text{（休整恢复）}\}$，折扣因子 $\gamma = 0.8$：
+\begin{itemize}
+  \item 在\textbf{充沛态 $s_0$}：选择冲刺 $a_0$ 立即得高分 $R=+4$，但有 $0.5$ 概率变疲惫（转入 $s_1$）、$0.5$ 保持充沛（留在 $s_0$）；选择休整 $a_1$ 仅得 $R=+1$，以概率 $1.0$ 保持充沛；
+  \item 在\textbf{疲惫态 $s_1$}：硬撑冲刺 $a_0$ 仅得低分 $R=+1$，且有 $0.9$ 概率继续疲惫、仅 $0.1$ 恢复充沛；选择休整 $a_1$ 当下得分 $R=0$，却有高达 $0.8$ 的概率恢复充沛 $s_0$（仅 $0.2$ 留在 $s_1$）！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  st/.style={circle, draw=tealDark, very thick, fill=tealLight, minimum size=15mm, align=center, font=\sffamily\bfseries\small, text=ink},
+  act/.style={rectangle, rounded corners=1.2mm, draw=navy!50, fill=white, font=\scriptsize\sffamily, inner sep=2.5pt},
+  arr0/.style={-{Stealth[length=2.2mm]}, thick, ochre},
+  arr1/.style={-{Stealth[length=2.2mm]}, thick, teal}
+]
+  \node[st] (s0) at (-3.5, 0) {$s_0$\\[-1pt]{\scriptsize 充沛}};
+  \node[st] (s1) at ( 3.5, 0) {$s_1$\\[-1pt]{\scriptsize 疲惫}};
+
+  % a0 (冲刺) in ochre
+  \draw[arr0] (s0) to[bend left=22] node[above, font=\scriptsize, text=ochre] {$a_0$（冲刺）：$p=0.5,\; R=+4$} (s1);
+  \draw[arr0] (s0) to[out=140, in=220, looseness=5.2] node[left, font=\scriptsize, text=ochre, align=right] {$a_0$：$p=0.5$\\$R=+4$} (s0);
+  \draw[arr0] (s1) to[out=40, in=-40, looseness=5.2] node[right, font=\scriptsize, text=ochre, align=left] {$a_0$：$p=0.9$\\$R=+1$} (s1);
+  \draw[arr0, dashed] (s1) to[bend left=8] node[above, font=\scriptsize, text=ochre, pos=0.52] {$a_0$：$p=0.1,\; R=+1$} (s0);
+
+  % a1 (休整) in teal
+  \draw[arr1] (s1) to[bend left=26] node[below, font=\scriptsize, text=tealDark] {$a_1$（休整）：$p=0.8,\; R=0$（以退为进！）} (s0);
+  \draw[arr1, dashed] (s1) to[out=-65, in=-115, looseness=4.5] node[below, font=\scriptsize, text=tealDark] {$a_1$：$p=0.2,\; R=0$} (s1);
+  \draw[arr1, dashed] (s0) to[out=115, in=65, looseness=4.5] node[above, font=\scriptsize, text=tealDark] {$a_1$：$p=1.0,\; R=+1$} (s0);
+\end{tikzpicture}
+\caption{两状态微型 MDP（$\gamma = 0.8$）：橙色代表动作 $a_0$（冲刺），青色代表动作 $a_1$（休整）。在疲惫态 $s_1$ 下，短视贪心会因 $+1 > 0$ 选择硬撑，但长远最优策略宁愿当下拿 $0$ 分也要休整回血。}
+\label{fig:toy-mdp}
+\end{figure}
+
+先评估一个\textbf{短视贪心策略 $\pi_0$（永远冲刺）}：因为在 $s_0$ 有 $4>1$，在 $s_1$ 有 $1>0$，只看当下得分就会无脑选 $\pi_0(s_0)=a_0,\; \pi_0(s_1)=a_0$。把回报 $G_0 = R_1 + \gamma G_1$ 按一步递推展开，立即列出关于 $(V^{\pi_0}(s_0), V^{\pi_0}(s_1))$ 的二元一次方程组：
+\[
+  \begin{cases}
+    V^{\pi_0}(s_0) = 4 + 0.8\big(0.5\, V^{\pi_0}(s_0) + 0.5\, V^{\pi_0}(s_1)\big), \\
+    V^{\pi_0}(s_1) = 1 + 0.8\big(0.1\, V^{\pi_0}(s_0) + 0.9\, V^{\pi_0}(s_1)\big).
+  \end{cases}
+\]
+整理为 $3 V^{\pi_0}(s_0) - 2 V^{\pi_0}(s_1) = 20$ 与 $-2 V^{\pi_0}(s_0) + 7 V^{\pi_0}(s_1) = 25$，解得精确值：
+\[
+  V^{\pi_0}(s_0) = \frac{190}{17} \approx 11.1765, \qquad
+  V^{\pi_0}(s_1) = \frac{115}{17} \approx 6.7647.
+\]
+现在试探一个关键问题：在疲惫态 $s_1$，假如我\textbf{只改变今天一步}改为休整 $a_1$（今天拿 $0$ 分！），明天起仍然按老策略 $\pi_0$ 走，总价值 $Q^{\pi_0}(s_1, a_1)$ 是多少？
+\[
+  Q^{\pi_0}(s_1, a_1) = 0 + 0.8\Big(0.8 \times \frac{190}{17} + 0.2 \times \frac{115}{17}\Big)
+  = \frac{140}{17} \approx \mathbf{8.2353} \;>\; 6.7647 = Q^{\pi_0}(s_1, a_0)!
+\]
+仅仅牺牲今天的 $1$ 分，就能因为 $80\%$ 概率重回充沛态而净赚 $1.47$ 分的长期红利！于是我们把策略改为 $\pi_1(s_0)=a_0,\; \pi_1(s_1)=a_1$（充沛时冲刺、疲惫时休整），再次解线性方程组：
+\begin{gather*}
+  \begin{cases}
+    V^{\pi_1}(s_0) = 4 + 0.8\big(0.5\, V^{\pi_1}(s_0) + 0.5\, V^{\pi_1}(s_1)\big), \\
+    V^{\pi_1}(s_1) = 0 + 0.8\big(0.8\, V^{\pi_1}(s_0) + 0.2\, V^{\pi_1}(s_1)\big),
+  \end{cases} \\
+  \implies\quad
+  V^{\pi_1}(s_0) = \frac{420}{31} \approx \mathbf{13.5484}, \qquad
+  V^{\pi_1}(s_1) = \frac{320}{31} \approx \mathbf{10.3226}.
+\end{gather*}
+不仅 $s_1$ 的价值暴涨了 $52.6\%$，连动作没变过的 $s_0$ 价值也跟着水涨船高到 $13.5484$！读者可以随手验算：在 $V^{\pi_1}$ 下，$Q^{\pi_1}(s_0, a_0)=13.548 > 11.839=Q^{\pi_1}(s_0, a_1)$，且 $Q^{\pi_1}(s_1, a_1)=10.323 > 9.516=Q^{\pi_1}(s_1, a_0)$，说明两个状态都无法再单步改进——$\pi_1$ 正是全局最优策略 $\pi^*$！你刚才不知不觉间，已经亲手完整执行了一轮\textbf{策略迭代（Policy Iteration）}。
+
+% ============================================================
+\section{Bellman 期望方程与 Bellman 最优性方程}\label{sec:bellman}
+% ============================================================
+
+将上面手算的“把回报拆成第一步即时奖励 + 折扣后的未来价值”写成普适定理，便得到整个序贯决策与强化学习大厦的基石——\textbf{Bellman 方程}。
+
+\subsection{Bellman 期望方程及其矩阵可逆性证明}
+
+利用回报的递推恒等式 $G_t = R_{t+1} + \gamma G_{t+1}$ 与条件期望的塔性质（Tower Property），对任意固定策略 $\pi$，立刻得到\textbf{Bellman 期望方程（Bellman Expectation Equation）}：
+\begin{align}
+  V^\pi(s) &= \sum_{a \in A} \pi(a \mid s) \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma V^\pi(s')\Big], \label{eq:bellman-exp-v}\\
+  Q^\pi(s, a) &= \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma \sum_{a' \in A} \pi(a' \mid s') Q^\pi(s', a')\Big]. \label{eq:bellman-exp-q}
+\end{align}
+如果把 $V^\pi \in \R^{|S|}$ 写成列向量，定义策略 $\pi$ 诱导的\textbf{期望单步奖励向量} $R^\pi \in \R^{|S|}$ 和\textbf{行随机状态转移矩阵} $P^\pi \in \R^{|S|\times |S|}$：
+\[
+  R^\pi_s := \sum_{a} \pi(a\mid s) \sum_{s'} P(s'\mid s, a) R(s, a, s'), \qquad
+  P^\pi_{s, s'} := \sum_{a} \pi(a\mid s) P(s'\mid s, a),
+\]
+那么式~\eqref{eq:bellman-exp-v} 便优雅地浓缩为一个标准线性方程组：
+\begin{equation}\label{eq:bellman-matrix}
+  V^\pi = R^\pi + \gamma P^\pi V^\pi \iff (I - \gamma P^\pi)\, V^\pi = R^\pi.
+\end{equation}
+
+\begin{recallBox}{行随机矩阵的特征值上界（第 1 卷第 3 章回顾）}
+矩阵 $P^\pi$ 的每一行非负且行和恒为 $1$（行随机矩阵），因此其无穷算子范数 $\norm{P^\pi}_\infty = \max_s \sum_{s'} |P^\pi_{s, s'}| = 1$。对任意特征对 $P^\pi v = \lambda v$，取无穷范数得 $|\lambda|\norm{v}_\infty = \norm{P^\pi v}_\infty \le \norm{P^\pi}_\infty \norm{v}_\infty = \norm{v}_\infty$，故所有特征值均满足 $|\lambda_i(P^\pi)| \le 1$！
+\end{recallBox}
+
+\begin{thmBox}
+\begin{theorem}[矩阵 $I - \gamma P^\pi$ 的恒可逆性与单调性]\label{thm:bellman-invertible}
+对任意有限 MDP、任意平稳策略 $\pi$ 以及任意折扣因子 $\gamma \in [0, 1)$，矩阵 $(I - \gamma P^\pi)$ \textbf{必然可逆}，因此 Bellman 期望方程~\eqref{eq:bellman-matrix} 存在唯一解：
+\[
+  V^\pi = (I - \gamma P^\pi)^{-1} R^\pi = \sum_{k=0}^{\infty} \gamma^k (P^\pi)^k R^\pi.
+\]
+进一步，逆矩阵 $(I - \gamma P^\pi)^{-1}$ 的\textbf{所有元素均非负}（从而若向量 $u \ge v$ 逐分量成立，则 $(I - \gamma P^\pi)^{-1} u \ge (I - \gamma P^\pi)^{-1} v$）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+设 $\lambda_1, \dots, \lambda_{|S|}$ 为行随机矩阵 $P^\pi$ 的全部复特征值。由上述回顾，对每个 $i$ 均有 $|\lambda_i| \le 1$，从而矩阵 $\gamma P^\pi$ 的所有特征值满足 $|\gamma \lambda_i| \le \gamma < 1$。因此矩阵 $I - \gamma P^\pi$ 的特征值为 $1 - \gamma \lambda_i$，其模长下界满足
+\[
+  |1 - \gamma \lambda_i| \ge 1 - \gamma |\lambda_i| \ge 1 - \gamma > 0,
+\]
+绝不可能取到 $0$！故 $\det(I - \gamma P^\pi) = \prod_i (1 - \gamma \lambda_i) \neq 0$，矩阵 $I - \gamma P^\pi$ 恒可逆。又因谱半径 $\rho(\gamma P^\pi) \le \gamma < 1$，Neumann 矩阵级数 $\sum_{k=0}^\infty (\gamma P^\pi)^k$ 绝对收敛且精确等于 $(I - \gamma P^\pi)^{-1}$；由于 $\gamma \ge 0$ 且 $P^\pi$ 逐元素非负，幂级数的每一项 $(\gamma P^\pi)^k$ 均逐元素非负，故逆矩阵 $(I - \gamma P^\pi)^{-1}$ 逐元素非负。
+\end{proof}
+
+\subsection{Bellman 最优性方程：最优性的非线性自洽条件}
+
+现在我们把目光转向\textbf{最优价值函数 $V^*$ 与 $Q^*$}。正如本章扉页引用的 Bellman 最优性原理所言：无论第一步选了什么动作落入何处，剩下的子问题都必须是最优的。因此只需把式~\eqref{eq:bellman-exp-v} 中对策略 $\pi(a\mid s)$ 的加权平均替换为对所有动作取最大值 $\max_{a \in A}$，便得到\textbf{Bellman 最优性方程（Bellman Optimality Equation）}：
+\begin{align}
+  V^*(s) &= \max_{a \in A} \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma V^*(s')\Big], \label{eq:bellman-opt-v}\\
+  Q^*(s, a) &= \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma \max_{a' \in A} Q^*(s', a')\Big]. \label{eq:bellman-opt-q}
+\end{align}
+图~\ref{fig:backup-diagrams} 直观对比了 Bellman 期望回溯与最优性回溯的树状计算结构（请留意：这恰是第 2 章 Expectimax 博弈树在无限期折扣循环图上的直接升华！）。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  snode/.style={circle, draw=tealDark, very thick, fill=tealLight, minimum size=8.5mm, font=\sffamily\bfseries\small, text=ink},
+  qnode/.style={circle, draw=ochre, very thick, fill=ochre, minimum size=3.4mm, inner sep=0pt},
+  arr/.style={-{Stealth[length=2mm]}, thick, ink!70}
+]
+  % Left: Bellman Expectation Backup
+  \begin{scope}[xshift=-4.0cm]
+    \draw[rounded corners=2mm, draw=tealLine, fill=codebg!40] (-3.1,-3.1) rectangle (3.1,1.65);
+    \node[font=\sffamily\bfseries\small, text=tealDark] at (0,1.25) {(a) Bellman 期望回溯（线性）};
+    \node[snode] (s) at (0, 0.35) {$s$};
+    \node[qnode] (a1) at (-1.5,-0.9) {};
+    \node[qnode] (a2) at ( 1.5,-0.9) {};
+    \node[snode, minimum size=7mm, font=\scriptsize] (sp1) at (-2.3,-2.25) {$s'_1$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (sp2) at (-0.7,-2.25) {$s'_2$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (sp3) at ( 0.7,-2.25) {$s'_3$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (sp4) at ( 2.3,-2.25) {$s'_4$};
+
+    \draw[arr] (s) -- node[above left, font=\scriptsize, text=navy] {$\pi(a_1|s)$} (a1);
+    \draw[arr] (s) -- node[above right, font=\scriptsize, text=navy] {$\pi(a_2|s)$} (a2);
+    \draw[arr] (a1) -- (sp1); \draw[arr] (a1) -- (sp2);
+    \draw[arr] (a2) -- (sp3); \draw[arr] (a2) -- (sp4);
+    \node[font=\scriptsize\sffamily, text=tealDark] at (0,-0.62) {$\sum_a \pi(a\mid s)$};
+    \node[font=\scriptsize\sffamily, text=slate] at (0,-1.55) {$P(s'\mid s, a),\; R$};
+    \node[font=\scriptsize, text=ink] at (0,-2.82) {$V^\pi(s) = \sum_a \pi(a\mid s)\, Q^\pi(s,a)$};
+  \end{scope}
+
+  % Right: Bellman Optimality Backup
+  \begin{scope}[xshift=4.0cm]
+    \draw[rounded corners=2mm, draw=ochre!50, fill=ochreLight!30] (-3.1,-3.1) rectangle (3.1,1.65);
+    \node[font=\sffamily\bfseries\small, text=ochre] at (0,1.25) {(b) Bellman 最优性回溯（非线性 $\max$）};
+    \node[snode] (s2) at (0, 0.35) {$s$};
+    \node[qnode] (b1) at (-1.5,-0.9) {};
+    \node[qnode] (b2) at ( 1.5,-0.9) {};
+    \node[snode, minimum size=7mm, font=\scriptsize] (tp1) at (-2.3,-2.25) {$s'_1$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (tp2) at (-0.7,-2.25) {$s'_2$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (tp3) at ( 0.7,-2.25) {$s'_3$};
+    \node[snode, minimum size=7mm, font=\scriptsize] (tp4) at ( 2.3,-2.25) {$s'_4$};
+
+    \draw[arr, ochre] (s2) -- node[above left, font=\scriptsize, text=ochre] {$a_1$} (b1);
+    \draw[arr, ochre] (s2) -- node[above right, font=\scriptsize, text=ochre] {$a_2$} (b2);
+    \draw[arr] (b1) -- (tp1); \draw[arr] (b1) -- (tp2);
+    \draw[arr] (b2) -- (tp3); \draw[arr] (b2) -- (tp4);
+    % Max arc
+    \draw[very thick, ochre] (-0.52,-0.12) arc[start angle=-135, end angle=-45, radius=0.73cm];
+    \node[font=\scriptsize\sffamily\bfseries, text=ochre] at (0,-0.55) {$\max_a$};
+    \node[font=\scriptsize\sffamily, text=slate] at (0,-1.55) {$P(s'\mid s, a),\; R$};
+    \node[font=\scriptsize, text=ink] at (0,-2.82) {$V^*(s) = \max_a Q^*(s,a)$};
+  \end{scope}
+\end{tikzpicture}
+\caption{Bellman 期望回溯（左）与 Bellman 最优性回溯（右）示意。空心圆代表状态节点，实心橙点代表状态-动作对 $(s,a)$。因为最优性回溯引入了非线性 $\max_a$ 算子，我们无法用一步矩阵求逆解出 $V^*$，而必须借助下一节的迭代算法。}
+\label{fig:backup-diagrams}
+\end{figure}
+
+请注意一个根本差异：Bellman 期望方程~\eqref{eq:bellman-matrix} 是\textbf{线性的}，用 \texttt{np.linalg.solve} 一步就能求精确解；而 Bellman 最优性方程~\eqref{eq:bellman-opt-v} 含有 $\max_{a\in A}$ 运算，是一个关于 $|S|$ 个未知数的\textbf{非线性方程组}！它到底有没有解？解是不是唯一的？怎么求出来？下面两节给出两条美得令人屏息的经典解法——\textbf{值迭代}与\textbf{策略迭代}——并补齐全部严格数学证明。
+
+% ============================================================
+\section{值迭代（$\gamma$-压缩映射严格证明）与策略迭代}\label{sec:vi-pi}
+% ============================================================
+
+\subsection{值迭代（Value Iteration）与 Bellman 算子 $\gamma$-压缩性证明}
+
+值迭代的想法极度质朴：既然 $V^*$ 满足非线性方程 $V^* = \mathcal{T}^* V^*$，不妨把右端定义为一个映射算子（称为\textbf{Bellman 最优性算子} $\mathcal{T}^*: \R^{|S|} \to \R^{|S|}$）：
+\begin{equation}\label{eq:bellman-op}
+  (\mathcal{T}^* V)(s) := \max_{a \in A} \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma V(s')\Big],
+\end{equation}
+然后从任意初始估计 $V^{(0)} \in \R^{|S|}$（如全零向量）出发，不断反复套用该算子：
+\[
+  V^{(k+1)} \leftarrow \mathcal{T}^* V^{(k)}, \qquad k = 0, 1, 2, \dots
+\]
+这种不动点迭代为什么保证一定收敛，绝不会发散或震荡？答案藏在无穷范数 $\norm{U - V}_\infty := \max_{s\in S} |U(s) - V(s)|$ 下的\textbf{$\gamma$-压缩性质}里！我们先备一个三行小引理。
+
+\begin{lemma}[$\max$ 算子的非扩张性]\label{lem:max-nonexpansive}
+对有限集合 $A$ 上任意两个实值函数 $f, g: A \to \R$，恒有
+\[
+  \Big|\max_{a \in A} f(a) - \max_{a \in A} g(a)\Big| \le \max_{a \in A} |f(a) - g(a)|.
+\]
+\end{lemma}
+\begin{proof}
+设 $a^* = \argmax_{a\in A} f(a)$。则 $\max_a f(a) - \max_a g(a) = f(a^*) - \max_a g(a) \le f(a^*) - g(a^*) \le \max_a |f(a) - g(a)|$。交换 $f$ 与 $g$ 的角色同理可得 $\max_a g(a) - \max_a f(a) \le \max_a |f(a) - g(a)|$，合并两式即证。
+\end{proof}
+
+\begin{thmBox}
+\begin{theorem}[Bellman 最优性算子的 $\gamma$-压缩性与值迭代几何收敛定理]\label{thm:vi-contraction}
+对任意两个价值向量 $U, V \in \R^{|S|}$ 和折扣因子 $\gamma \in (0, 1)$，Bellman 最优性算子 $\mathcal{T}^*$ 是无穷范数空间 $(\R^{|S|}, \norm{\cdot}_\infty)$ 上的 \textbf{$\gamma$-压缩映射（$\gamma$-Contraction）}：
+\begin{equation}\label{eq:contraction}
+  \norm{\mathcal{T}^* U - \mathcal{T}^* V}_\infty \le \gamma \norm{U - V}_\infty.
+\end{equation}
+由此推出：（1）Bellman 最优性方程存在\textbf{唯一解} $V^* \in \R^{|S|}$；（2）对任意初始向量 $V^{(0)}$，值迭代 $V^{(k+1)} = \mathcal{T}^* V^{(k)}$ 以几何速率收敛到 $V^*$：
+\begin{equation}\label{eq:vi-geom-rate}
+  \norm{V^{(k)} - V^*}_\infty \le \gamma^k \norm{V^{(0)} - V^*}_\infty \xrightarrow{k \to \infty} 0.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+对任意固定状态 $s \in S$，记 $f_U(a) = \sum_{s'} P(s'\mid s,a)[R(s,a,s') + \gamma U(s')]$，$f_V(a)$ 同理。直接运用引理~\ref{lem:max-nonexpansive}、三角不等式与概率归一化 $\sum_{s'} P(s'\mid s,a) = 1$：
+\begin{align*}
+  \big|(\mathcal{T}^* U)(s) - (\mathcal{T}^* V)(s)\big|
+  &= \Big|\max_{a \in A} f_U(a) - \max_{a \in A} f_V(a)\Big| \\
+  &\le \max_{a \in A} \big|f_U(a) - f_V(a)\big| \\
+  &= \max_{a \in A} \left|\gamma \sum_{s' \in S} P(s' \mid s, a)\big(U(s') - V(s')\big)\right| \\
+  &\le \gamma \max_{a \in A} \sum_{s' \in S} P(s' \mid s, a)\, \big|U(s') - V(s')\big| \\
+  &\le \gamma \max_{a \in A} \left(\sum_{s' \in S} P(s' \mid s, a)\right) \norm{U - V}_\infty
+   = \gamma \norm{U - V}_\infty.
+\end{align*}
+由于右端与状态 $s$ 无关，对左端关于 $s \in S$ 取最大值，即得 $\norm{\mathcal{T}^* U - \mathcal{T}^* V}_\infty \le \gamma \norm{U - V}_\infty$！
+
+完备度量空间 $(\R^{|S|}, \norm{\cdot}_\infty)$ 上的 Banach 不动点定理立刻保证存在唯一不动点 $V^* = \mathcal{T}^* V^*$。重复应用式~\eqref{eq:contraction} $k$ 次，即得
+\[
+  \norm{V^{(k)} - V^*}_\infty = \norm{\mathcal{T}^* V^{(k-1)} - \mathcal{T}^* V^*}_\infty
+  \le \gamma \norm{V^{(k-1)} - V^*}_\infty \le \cdots \le \gamma^k \norm{V^{(0)} - V^*}_\infty.
+\]
+最后，由于最优价值函数必然满足 Bellman 最优性方程，该唯一不动点即是 $V^*$。
+\end{proof}
+
+\textbf{实用停机准则}：在编写值迭代代码时我们并不知道真值 $V^*$，如何确定何时停机能保证 $\norm{V^{(k+1)} - V^*}_\infty \le \varepsilon$？用三角不等式立得：
+\[
+  \norm{V^{(k+1)} - V^*}_\infty
+  \le \sum_{m=1}^{\infty} \norm{V^{(k+m+1)} - V^{(k+m)}}_\infty
+  \le \sum_{m=1}^{\infty} \gamma^m \norm{V^{(k+1)} - V^{(k)}}_\infty
+  = \frac{\gamma}{1 - \gamma} \norm{V^{(k+1)} - V^{(k)}}_\infty.
+\]
+因此，只要相邻两轮变化量满足 $\norm{V^{(k+1)} - V^{(k)}}_\infty \le \varepsilon (1-\gamma)/\gamma$，即可\textbf{数学严格担保}当前估计误差不超过 $\varepsilon$！迭代结束后，只需一步贪心提取即得最优策略 $\pi^*(s) = \argmax_a \sum_{s'} P(s'\mid s,a)[R(s,a,s') + \gamma V^*(s')]$。
+
+\subsection{策略迭代（Policy Iteration）与策略改进定理证明}
+
+值迭代虽然每步廉价（只需 $O(|S|^2 |A|)$），但在 $\gamma$ 接近 $1$（如 $\gamma = 0.99$）时，$(0.99)^k$ 衰减极慢；更重要的是，我们往往早就发现了最优策略 $\pi^*$，却还在苦等价值数字收敛到小数点后 6 位！
+
+\textbf{策略迭代（Policy Iteration, PI）}换了一种更果断的思路：直接在策略空间大步跳跃，反复交替执行两步：
+\begin{enumerate}
+  \item \textbf{策略评估（Policy Evaluation）}：给定当前确定性策略 $\pi_k$，直接求解线性方程组 $(I - \gamma P^{\pi_k}) V^{\pi_k} = R^{\pi_k}$，算出该策略的精确价值 $V^{\pi_k}$；
+  \item \textbf{策略改进（Policy Improvement）}：对每个状态 $s \in S$，计算 $Q^{\pi_k}(s, a)$ 并贪心选取更优动作：
+  \[
+    \pi_{k+1}(s) \leftarrow \argmax_{a \in A} \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma V^{\pi_k}(s')\Big].
+  \]
+  若对所有状态均有 $\pi_{k+1}(s) = \pi_k(s)$（或贪心值不再严格大于 $V^{\pi_k}(s)$），立刻停机并输出 $\pi_k$！
+\end{enumerate}
+
+为什么策略迭代保证每步只升不降、且一定在\textbf{有限步内}精确停机？关键在于下面这条经典的单调改进定理。
+
+\begin{thmBox}
+\begin{theorem}[策略改进定理与策略迭代有限收敛性]\label{thm:policy-improvement}
+设 $\pi$ 与 $\pi'$ 为有限 MDP 上的两个确定性策略。若对所有状态 $s \in S$ 均有
+\begin{equation}\label{eq:pi-cond}
+  Q^\pi\big(s, \pi'(s)\big) \ge V^\pi(s),
+\end{equation}
+则策略 $\pi'$ 在每一个状态上都不劣于 $\pi$：对所有 $s \in S$，均有 $V^{\pi'}(s) \ge V^\pi(s)$。并且：
+\begin{enumerate}
+  \item 若式~\eqref{eq:pi-cond} 在至少一个状态 $s_0$ 处严格成立（$>$），则 $V^{\pi'}(s_0) > V^\pi(s_0)$（严格改进）；
+  \item 若按贪心生成的 $\pi'$ 满足 $V^{\pi'} = V^\pi$，则 $V^\pi = V^*$ 且 $\pi$ 已是全局最优策略；
+  \item 由此推论：在有限 MDP 上，策略迭代至多经过有限步（不超过 $|A|^{|S|}$）必然终止于\textbf{精确最优策略 $\pi^*$}。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+我们给出简洁而无懈可击的矩阵证明（借助定理~\ref{thm:bellman-invertible} 的逆矩阵非负性！）。将条件~\eqref{eq:pi-cond} 写成向量不等式：
+\[
+  R^{\pi'} + \gamma P^{\pi'} V^\pi \ge V^\pi.
+\]
+另一方面，策略 $\pi'$ 自身满足 Bellman 期望方程 $R^{\pi'} + \gamma P^{\pi'} V^{\pi'} = V^{\pi'}$。用后者减去前者，移项得：
+\[
+  (I - \gamma P^{\pi'})\big(V^{\pi'} - V^\pi\big)
+  = \big(R^{\pi'} + \gamma P^{\pi'} V^\pi\big) - V^\pi
+  =: \boldsymbol{\delta} \ge \mathbf{0}.
+\]
+两边左乘逆矩阵 $(I - \gamma P^{\pi'})^{-1}$。由定理~\ref{thm:bellman-invertible}，$(I - \gamma P^{\pi'})^{-1} = I + \gamma P^{\pi'} + \gamma^2 (P^{\pi'})^2 + \cdots$ 逐元素非负，且对角线元素至少为 $1$！因此
+\[
+  V^{\pi'} - V^\pi = (I - \gamma P^{\pi'})^{-1} \boldsymbol{\delta} \ge \boldsymbol{\delta} \ge \mathbf{0},
+\]
+即对所有 $s \in S$ 均有 $V^{\pi'}(s) \ge V^\pi(s)$！且若 $\delta_{s_0} > 0$，由于 $(I - \gamma P^{\pi'})^{-1}_{s_0, s_0} \ge 1$，立得 $V^{\pi'}(s_0) - V^\pi(s_0) \ge \delta_{s_0} > 0$，证明了（1）。
+
+若贪心改进后 $V^{\pi'} = V^\pi$，则对所有 $s \in S$ 有
+\[
+  V^\pi(s) = V^{\pi'}(s) = Q^\pi(s, \pi'(s)) = \max_{a \in A} Q^\pi(s, a) = (\mathcal{T}^* V^\pi)(s).
+\]
+即 $V^\pi$ 是 $\mathcal{T}^*$ 的不动点。由定理~\ref{thm:vi-contraction} 不动点的唯一性，必有 $V^\pi = V^*$，故 $\pi$ 为全局最优策略，证毕（2）。因为每次非终止迭代都严格增大价值向量，策略永不回头重复；而确定性策略总数至多为有限数 $|A|^{|S|}$，因此必在有限步内终止于精确最优策略 $\pi^*$！
+\end{proof}
+
+\begin{table}[htbp]
+\centering
+\caption{值迭代（VI）与策略迭代（PI）的核心对比}
+\label{tab:vi-vs-pi}
+\small
+\begin{tabularx}{\linewidth}{@{}p{26mm}p{35mm}p{35mm}X@{}}
+\toprule
+\textbf{算法} & \textbf{单轮时间复杂度} & \textbf{收敛特性} & \textbf{工程选型建议} \\
+\midrule
+值迭代（VI） & $O(|S|^2 |A|)$（仅扫描回溯） & 渐近几何收敛 $O(\gamma^k)$ & 状态数极大（如上万）无法直接求逆矩阵时首选 \\
+策略迭代（PI） & $O(|S|^3 + |S|^2 |A|)$（含解线性方程） & 有限步精确收敛（常仅 $3\sim 10$ 轮！） & 中小规模精确求解极快，对 $\gamma \to 1$ 不敏感 \\
+修正策略迭代 & $O(m |S|^2 + |S|^2 |A|)$ & 近似评估 $m$ 步 + 贪心改进 & 兼具两者优点，也是第 6 卷 Actor-Critic 的古典原型 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{failBox}{MDP 实现中最易踩的两大数值与建模坑}
+\begin{enumerate}
+  \item \textbf{忘记冻结终止吸收态的价值}：如果把网格世界的终点 $+1$ 或陷阱 $-1$ 当作普通状态继续套用 $V(s) = R(s) + \gamma V(s)$，终点会不断自环套娃，价值暴涨至 $1/(1-\gamma) = +10$，彻底毁掉整张价值表！正确做法是把终止态的退出奖励直接固定（如 $V(s_{\text{term}}) \equiv \pm 1$，不再有后续转移），或引入一个奖励恒为 $0$ 的虚设吸收态 $s_{\text{abs}}$，规定终止态执行唯一退出动作拿取 $\pm 1$ 后以概率 $1$ 进入 $s_{\text{abs}}$。
+  \item \textbf{混淆奖励下标约定}：不同教材可能用 $R(s)$（到达/离开状态得分）、$R(s, a)$ 或 $R(s, a, s')$。编写代码前务必统一：例如在本章下一节的 $4\times 3$ 网格中，所有非终止态执行任意动作均承担单步生活成本 $R = -0.04$，而两个终止态直接固定为吸收终值 $+1.0$ 与 $-1.0$。
+\end{enumerate}
+\end{failBox}
+
+% ============================================================
+\section{经典 $4\times 3$ 随机网格世界实测与迈向后续卷次}\label{sec:gridworld}
+% ============================================================
+
+\subsection{Russell-Norvig $4\times 3$ 随机网格世界精确解}
+
+现在我们把理论落地到人工智能史上最具代表性的试金石——Russell 与 Norvig 的 \textbf{$4\times 3$ 随机网格世界}（对应 \texttt{code/vol3\_experiments.py} 中的 \texttt{exp6\_mdp\_gridworld}）：
+\begin{itemize}
+  \item \textbf{地图格局}：3 行（$r=0$ 底层至 $r=2$ 顶层）$\times$ 4 列（$c=0$ 至 $c=3$）；格子 $(1, 1)$ 是不可穿越的墙壁；右上角 $(2, 3)$ 为宝藏终止态（$+1.000$），其正下方 $(1, 3)$ 为深渊陷阱终止态（$-1.000$）；其余 $9$ 个普通格子每走一步需付出生活成本 $R = -0.04$；
+  \item \textbf{随机打滑动力学}：智能体可选四个方向 $A = \{\text{N, S, E, W}\}$。选定意图方向后，有 $0.8$ 概率朝意图方向移动一格，各有 $0.1$ 概率向左偏 $90^\circ$ 或向右偏 $90^\circ$；若撞到外边界或墙壁 $(1, 1)$，则弹回原格不动；
+  \item \textbf{折扣因子}：$\gamma = 0.9$。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  scale=1.18,
+  cell/.style={rectangle, draw=tealDark!70, thick, minimum width=24mm, minimum height=17.5mm, inner sep=0pt},
+  arr/.style={-{Stealth[length=2.4mm]}, very thick, tealDark}
+]
+  % Grid background cells: rows r=0 (bottom) to r=2 (top), cols c=0 to c=3
+  % Draw helper: coordinates (c*2.4, r*1.75)
+  \def\cw{2.4}
+  \def\ch{1.75}
+
+  % Normal cells with soft value tint
+  \fill[tealLight!65]  (0*\cw, 2*\ch) rectangle (1*\cw, 3*\ch);
+  \fill[tealLight!95]  (1*\cw, 2*\ch) rectangle (2*\cw, 3*\ch);
+  \fill[tealMist!95]   (2*\cw, 2*\ch) rectangle (3*\cw, 3*\ch);
+  \fill[teal!28]       (3*\cw, 2*\ch) rectangle (4*\cw, 3*\ch); % +1 terminal
+
+  \fill[tealLight!45]  (0*\cw, 1*\ch) rectangle (1*\cw, 2*\ch);
+  \fill[slate!25]      (1*\cw, 1*\ch) rectangle (2*\cw, 2*\ch); % WALL
+  \fill[tealLight!60]  (2*\cw, 1*\ch) rectangle (3*\cw, 2*\ch);
+  \fill[ochre!25]      (3*\cw, 1*\ch) rectangle (4*\cw, 2*\ch); % -1 terminal
+
+  \fill[tealLight!30]  (0*\cw, 0*\ch) rectangle (1*\cw, 1*\ch);
+  \fill[tealLight!25]  (1*\cw, 0*\ch) rectangle (2*\cw, 1*\ch);
+  \fill[tealLight!38]  (2*\cw, 0*\ch) rectangle (3*\cw, 1*\ch);
+  \fill[ochreLight!85] (3*\cw, 0*\ch) rectangle (4*\cw, 1*\ch); % (0,3) highlighted!
+
+  % Outer and inner grid borders
+  \draw[tealDark, very thick] (0,0) rectangle (4*\cw, 3*\ch);
+  \foreach \c in {1,2,3} {
+    \draw[tealDark!65, thick] (\c*\cw, 0) -- (\c*\cw, 3*\ch);
+  }
+  \foreach \r in {1,2} {
+    \draw[tealDark!65, thick] (0, \r*\ch) -- (4*\cw, \r*\ch);
+  }
+
+  % Diagonal hatching look for WALL at (1,1)
+  \draw[slate!65, thick] (1*\cw, 1*\ch) -- (2*\cw, 2*\ch);
+  \draw[slate!65, thick] (1*\cw, 2*\ch) -- (2*\cw, 1*\ch);
+  \node[fill=slate!25, font=\sffamily\bfseries\small, text=slate!95, inner sep=2.5pt]
+    at (1.5*\cw, 1.5*\ch) {墙\ 壁};
+
+  % Coordinate tags (tiny top-left in each cell)
+  \foreach \r in {0,1,2} {
+    \foreach \c in {0,1,2,3} {
+      \ifnum\r=1 \ifnum\c=1 \tikzset{coordtag/.style={fill=slate!25}}\else\tikzset{coordtag/.style={}}\fi\else\tikzset{coordtag/.style={}}\fi
+      \node[coordtag, anchor=north west, font=\tiny\ttfamily, text=slate]
+        at (\c*\cw + 0.06, \r*\ch + \ch - 0.05) {(\r,\c)};
+    }
+  }
+
+  % Terminal boxes
+  \node[font=\sffamily\bfseries\large, text=tealDark] at (3.5*\cw, 2.58*\ch) {$+1.000$};
+  \node[font=\scriptsize\sffamily\bfseries, text=teal] at (3.5*\cw, 2.25*\ch) {宝藏终点};
+
+  \node[font=\sffamily\bfseries\large, text=ochre] at (3.5*\cw, 1.58*\ch) {$-1.000$};
+  \node[font=\scriptsize\sffamily\bfseries, text=ochre] at (3.5*\cw, 1.25*\ch) {深渊陷阱};
+
+  % Values + Policy arrows for all 9 non-terminal cells
+  % Row 2 (top): (2,0)=+0.509 E, (2,1)=+0.650 E, (2,2)=+0.795 E
+  \node[font=\sffamily\bfseries\small, text=ink] at (0.5*\cw, 2.26*\ch) {$+0.509$};
+  \draw[arr] (0.30*\cw, 2.60*\ch) -- (0.72*\cw, 2.60*\ch);
+  \node[font=\sffamily\bfseries\small, text=ink] at (1.5*\cw, 2.26*\ch) {$+0.650$};
+  \draw[arr] (1.30*\cw, 2.60*\ch) -- (1.72*\cw, 2.60*\ch);
+  \node[font=\sffamily\bfseries\small, text=ink] at (2.5*\cw, 2.26*\ch) {$+0.795$};
+  \draw[arr] (2.30*\cw, 2.60*\ch) -- (2.72*\cw, 2.60*\ch);
+
+  % Row 1 (mid): (1,0)=+0.399 N, (1,2)=+0.486 N
+  \node[font=\sffamily\bfseries\small, text=ink] at (0.5*\cw, 1.24*\ch) {$+0.399$};
+  \draw[arr] (0.5*\cw, 1.44*\ch) -- (0.5*\cw, 1.80*\ch);
+  \node[font=\sffamily\bfseries\small, text=ink] at (2.5*\cw, 1.24*\ch) {$+0.486$};
+  \draw[arr] (2.5*\cw, 1.44*\ch) -- (2.5*\cw, 1.80*\ch);
+
+  % Row 0 (bottom): (0,0)=+0.296 N, (0,1)=+0.254 E, (0,2)=+0.345 N, (0,3)=+0.130 W (ochre highlight!)
+  \node[font=\sffamily\bfseries\small, text=ink] at (0.5*\cw, 0.24*\ch) {$+0.296$};
+  \draw[arr] (0.5*\cw, 0.44*\ch) -- (0.5*\cw, 0.80*\ch);
+  \node[font=\sffamily\bfseries\small, text=ink] at (1.5*\cw, 0.26*\ch) {$+0.254$};
+  \draw[arr] (1.30*\cw, 0.60*\ch) -- (1.72*\cw, 0.60*\ch);
+  \node[font=\sffamily\bfseries\small, text=ink] at (2.5*\cw, 0.24*\ch) {$+0.345$};
+  \draw[arr] (2.5*\cw, 0.44*\ch) -- (2.5*\cw, 0.80*\ch);
+
+  % Special highlight on (0,3) -> W!
+  \draw[ochre, very thick, dashed] (3*\cw+0.06, 0.06) rectangle (4*\cw-0.06, \ch-0.06);
+  \node[font=\sffamily\bfseries\small, text=ochre] at (3.5*\cw, 0.26*\ch) {$+0.130$};
+  \draw[-{Stealth[length=2.5mm]}, ultra thick, ochre] (3.72*\cw, 0.60*\ch) -- (3.26*\cw, 0.60*\ch);
+  \node[font=\scriptsize\sffamily\bfseries, text=ochre, anchor=north] at (3.5*\cw, -0.14)
+    {反直觉亮点：坚决\textbf{向左（W）}绕开 $-1$ 陷阱！};
+\end{tikzpicture}
+\caption{$4\times 3$ 随机网格世界（$\gamma = 0.9$，步长奖励 $-0.04$，打滑概率 $0.8/0.1/0.1$）的精确最优状态价值 $V^*$ 与最优策略 $\pi^*$（全部数值经 \texttt{code/vol3\_experiments.py} 核验）。}
+\label{fig:gridworld-optimal}
+\end{figure}
+
+请重点欣赏图~\ref{fig:gridworld-optimal} 中右下角格子 $(0, 3)$ 的精妙决策：它紧挨着正上方的 $-1.000$ 深渊陷阱 $(1, 3)$，四个方向的精确动作价值分别为：
+\[
+  Q^*\big((0,3), \text{N}\big) = -0.717,\quad
+  Q^*\big((0,3), \text{E}\big) = -0.025,\quad
+  Q^*\big((0,3), \text{S}\big) = +0.096,\quad
+  Q^*\big((0,3), \text{W}\big) = \mathbf{+0.130}.
+\]
+\begin{itemize}
+  \item 向北（N）虽然看似离 $+1$ 直线更近，却有 $80\%$ 概率一头栽进 $-1$ 陷阱，价值惨淡至 $-0.717$；
+  \item 向南（S）撞底墙虽然完全避免了滑入 $-1$ 的风险，但只有 $10\%$ 概率向左滑出角落，拖延折现损耗太大（$+0.096$）；
+  \item 最优策略果断选择\textbf{向西（W）}：尽管向西仍有 $10\%$ 概率向右打滑坠入 $-1$，但 $80\%$ 概率快速逃向安全通道 $(0,2)\to(1,2)\to(2,2)\to +1$ 的期望回报高达 $+0.130$，在风险与效率之间取得了数学最优平衡！
+\end{itemize}
+
+\subsection{真实收敛曲线对比：值迭代几何衰减 vs 策略迭代 3 轮精确收敛}
+
+图~\ref{fig:mdp-conv} 直接绘制了 \texttt{data/mdp\_convergence.csv} 的真实实测轨迹：从非终止态全零初值 $V^{(0)} = 0$（初始误差 $\norm{V^{(0)} - V^*}_\infty = 0.795362$）出发，值迭代的实际无穷范数误差一路贴着甚至大幅低于理论包络 $\gamma^k \norm{V^{(0)} - V^*}_\infty$ 指数级俯冲，在第 $20$ 轮左右即突破 $10^{-6}$；而同一问题上，\textbf{策略迭代仅用 $3$ 轮即抵达机器精度精确解 $V^*$ 与 $\pi^*$！}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{semilogyaxis}[
+  width=0.84\linewidth,
+  height=6.2cm,
+  xlabel={迭代轮数 $k$},
+  ylabel={值函数无穷范数误差 $\norm{V^{(k)} - V^*}_\infty$（对数刻度）},
+  xmin=-0.6, xmax=35.6,
+  ymin=6e-7, ymax=1.6,
+  grid=both,
+  major grid style={tealLine!60, line width=0.45pt},
+  minor grid style={tealLine!25, line width=0.25pt},
+  legend style={at={(0.98,0.57)},anchor=east},
+  legend style={font=\footnotesize\sffamily, fill=white, draw=tealLine, rounded corners=1mm},
+  tick label style={font=\footnotesize},
+  label style={font=\small\sffamily, color=ink}
+]
+  \addplot[color=teal, very thick, mark=*, mark size=1.7pt, mark repeat=2]
+    table[x=iter, y=inf_err, col sep=comma] {data/mdp_convergence.csv};
+  \addlegendentry{值迭代实测误差 $\norm{V^{(k)} - V^*}_\infty$}
+
+  \addplot[color=ochre, very thick, dashed]
+    table[x=iter, y=gamma_bound, col sep=comma] {data/mdp_convergence.csv};
+  \addlegendentry{理论压缩上界 $\gamma^k \norm{V^{(0)} - V^*}_\infty$（$\gamma=0.9$）}
+
+  % Vertical reference line for Policy Iteration (3 iterations!)
+  \draw[navy, very thick, dotted] (axis cs:3, 6e-7) -- (axis cs:3, 1.6);
+  \node[font=\scriptsize\sffamily\bfseries, color=navy, fill=navyLight, draw=navy!40,
+        rounded corners=1mm, inner sep=3pt, align=left, anchor=west]
+    at (axis cs:3.6, 1.5e-5) {策略迭代（PI）\\仅 \textbf{3 轮} 精确收敛至 $V^*$！};
+
+  \node[font=\scriptsize\sffamily, color=tealDark, anchor=south west]
+    at (axis cs:18.5, 1.8e-6) {第 20 轮误差已 $< 10^{-6}$};
+\end{semilogyaxis}
+\end{tikzpicture}
+\caption{$4\times 3$ 随机网格世界的值迭代与策略迭代收敛曲线对比（真实数据来自 \texttt{data/mdp\_convergence.csv}）。半对数坐标下，理论压缩上界 $\gamma^k \norm{V^{(0)}-V^*}_\infty$ 呈严格直线，实测值迭代误差在信息传遍全图后以更快斜率骤降，而策略迭代仅 3 轮便精确收敛。}
+\label{fig:mdp-conv}
+\end{figure}
+
+\subsection{可运行的 Python/NumPy 值迭代与策略迭代完整代码}
+
+\begin{lstlisting}[caption={$4\times 3$ 随机网格世界的值迭代与策略迭代完整实现},label={lst:mdp}]
+import numpy as np
+
+# 4x3 Gridworld: rows 0..2 (bottom..top), cols 0..3; wall at (1,1)
+STATES = [(r, c) for r in range(3) for c in range(4) if (r, c) != (1, 1)]
+TERMINALS = {(2, 3): 1.0, (1, 3): -1.0}
+ACTIONS = ["N", "S", "E", "W"]
+DIRS = {"N": (1, 0), "S": (-1, 0), "E": (0, 1), "W": (0, -1)}
+SLIP = {"N": ("W", "E"), "S": ("E", "W"), "E": ("N", "S"), "W": ("S", "N")}
+
+def transitions(s, a):
+    if s in TERMINALS:
+        return []
+    def step(d):
+        nr, nc = s[0] + DIRS[d][0], s[1] + DIRS[d][1]
+        return (nr, nc) if (0 <= nr < 3 and 0 <= nc < 4 and (nr, nc) != (1, 1)) else s
+    l, r = SLIP[a]
+    probs = {}
+    for d, p in [(a, 0.8), (l, 0.1), (r, 0.1)]:
+        ns = step(d)
+        probs[ns] = probs.get(ns, 0.0) + p
+    return list(probs.items())
+
+def value_iteration(gamma=0.9, step_r=-0.04, eps=1e-7):
+    V = {s: (TERMINALS[s] if s in TERMINALS else 0.0) for s in STATES}
+    for it in range(1, 500):
+        V_new, delta = {}, 0.0
+        for s in STATES:
+            if s in TERMINALS:
+                V_new[s] = TERMINALS[s]
+            else:
+                V_new[s] = max(step_r + gamma * sum(p * V[ns] for ns, p in transitions(s, a))
+                               for a in ACTIONS)
+            delta = max(delta, abs(V_new[s] - V[s]))
+        V = V_new
+        if delta < eps * (1 - gamma) / gamma:
+            break
+    pi = {s: max(ACTIONS, key=lambda a: step_r + gamma * sum(p * V[ns] for ns, p in transitions(s, a)))
+          for s in STATES if s not in TERMINALS}
+    return V, pi, it
+
+def policy_iteration(gamma=0.9, step_r=-0.04):
+    pi = {s: "N" for s in STATES if s not in TERMINALS}
+    idx = {s: i for i, s in enumerate(STATES)}
+    n = len(STATES)
+    for it in range(1, 100):
+        # Exact policy evaluation: solve (I - gamma P^pi) V = R^pi
+        A_mat, b_vec = np.eye(n), np.zeros(n)
+        for s in STATES:
+            i = idx[s]
+            if s in TERMINALS:
+                b_vec[i] = TERMINALS[s]
+            else:
+                b_vec[i] = step_r
+                for ns, p in transitions(s, pi[s]):
+                    A_mat[i, idx[ns]] -= gamma * p
+        v_sol = np.linalg.solve(A_mat, b_vec)
+        V = {s: float(v_sol[idx[s]]) for s in STATES}
+        # Greedy policy improvement
+        stable = True
+        for s in STATES:
+            if s in TERMINALS:
+                continue
+            best_a = max(ACTIONS, key=lambda a: step_r + gamma * sum(p * V[ns] for ns, p in transitions(s, a)))
+            if best_a != pi[s]:
+                pi[s] = best_a
+                stable = False
+        if stable:
+            return V, pi, it
+
+V_vi, pi_vi, it_vi = value_iteration()
+V_pi, pi_pi, it_pi = policy_iteration()
+max_diff = max(abs(V_vi[s] - V_pi[s]) for s in STATES)
+print(f"VI converged in {it_vi} iters, PI converged in {it_pi} iters (max |V_vi - V_pi| = {max_diff:.2e})")
+assert pi_vi == pi_pi and max_diff < 1e-6
+\end{lstlisting}
+
+\begin{insightBox}{第 3 卷总结与通往第 4 卷、第 6 卷的宏伟桥梁}
+至此，我们圆满走完了\textbf{《第 3 卷：经典人工智能》}的全部六章旅程！回顾全卷，你会发现一个共同的前提：\textbf{世界模型是预先已知的}（我们知道迷宫地图、棋类规则、CSP 约束、贝叶斯网络 CPT、HMM 的 $T/E$ 矩阵以及 MDP 的 $P/R$）。当走出经典 AI、迈向当代机器学习与大模型前沿时，这道前提将被逐一打破：
+\begin{enumerate}
+  \item \textbf{通往第 4 卷《凸优化与经典机器学习》}：当概率图与 HMM 的参数未知时，我们从数据中用极大似然（MLE）、EM 算法与凸优化学习模型；第 3 章的局部搜索直觉也将升级为严谨的梯度下降与泛化理论；
+  \item \textbf{通往第 6 卷《强化学习与对齐前沿》}：当 MDP 的转移概率 $P$ 与奖励函数 $R$ \textbf{完全未知}、且状态空间是百万维像素或自然语言词元序列时，本章的 Bellman 最优性方程依然是唯一指南针——我们只需把精确期望替换为环境交互采样，把值迭代变成 \textbf{Q-Learning / DQN}，把策略迭代变成 \textbf{Actor-Critic 与 PPO / GRPO}（这正是大模型后训练推理对齐的底层引擎）！
+\end{enumerate}
+\end{insightBox}
+
+% ============================================================
+\section{本章习题}\label{sec:ch6-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{掌握折扣回报计算、Bellman 方程手写与一步值迭代}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}]
+  \item \textbf{折扣因子对长远决策的影响}：某智能体站在一条直线上，选择动作 A 可在第 1 步立即获得 $+5$ 分随后永远得 $0$ 分；选择动作 B 前两步得 $0$ 分，在第 3 步获得 $+10$ 分随后永远得 $0$ 分（记 $G_0 = R_1 + \gamma R_2 + \gamma^2 R_3 + \cdots$）。请计算当折扣因子 $\gamma$ 满足什么临界不等式时，智能体应当放弃眼前小利选择动作 B？并计算当 $\gamma = 0.9$ 时，若策略每步恒获奖励 $+2$，其无限期折扣总回报是多少？
+  \exHint{比较 $G_0(A) = 5$ 与 $G_0(B) = 10\gamma^2$；无穷等比级数求和公式为 $\sum_{k=0}^\infty \gamma^k = 1/(1-\gamma)$。}
+
+  \item \textbf{微型 MDP 手工值迭代两步演算}：沿用第~\ref{sec:mdp-formulation} 节图~\ref{fig:toy-mdp} 的两状态 MDP（$s_0$ 充沛、$s_1$ 疲惫，$\gamma = 0.8$），从初始全零价值向量 $V^{(0)} = (0, 0)$ 出发，严格按值迭代公式 $V^{(k+1)} = \mathcal{T}^* V^{(k)}$ 手工计算 $V^{(1)}$ 与 $V^{(2)}$，并写出基于 $V^{(2)}$ 提取的贪心策略 $\pi^{(2)}$。观察此时 $\pi^{(2)}$ 是否已经等于最优策略 $\pi^*$！
+  \exHint{先算 $V^{(1)}(s_0) = \max\{4, 1\} = 4$ 与 $V^{(1)}(s_1) = \max\{1, 0\} = 1$，再代入算 $V^{(2)}$。}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{运用线性方程组求解策略价值与推导 $Q$ 算子压缩性}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{三状态循环 MDP 的策略迭代全流程}：考虑一个三状态机器人充放电 MDP，状态包含高电 $H$、低电 $L$ 与没电 $D$，折扣因子 $\gamma = 0.5$。在 $H$ 可选“工作”（$R=+4$，各 $0.5$ 留 $H$ 或降 $L$）；在 $L$ 可选“工作”（$R=+2$，$0.8$ 降 $D$、$0.2$ 留 $L$）或“充电”（$R=-1$，$1.0$ 升回 $H$）；在 $D$ 只能选“救援充电”（$R=-6$，$1.0$ 升回 $H$）。从初始策略 $\pi_0(L)=\text{工作}$ 出发，手工执行完整的策略迭代（策略评估解线性方程组 + 策略改进），求精确最优价值 $V^*$ 与最优策略 $\pi^*$。
+  \exHint{唯一可自由选择动作的状态只有 $L$，因此只需检查 $\pi_0(L)=\text{工作}$ 与 $\pi_1(L)=\text{充电}$ 两种策略即可！}
+
+  \item \textbf{$Q$-值 Bellman 最优性算子的 $\gamma$-压缩性}：类比式~\eqref{eq:bellman-op}，定义作用在动作价值表 $Q \in \R^{|S|\times |A|}$ 上的 Bellman 最优性算子：
+  \[
+    (\mathcal{T}_Q^* Q)(s, a) := \sum_{s' \in S} P(s' \mid s, a)\Big[R(s, a, s') + \gamma \max_{a' \in A} Q(s', a')\Big].
+  \]
+  模仿定理~\ref{thm:vi-contraction}，给出 $\norm{\mathcal{T}_Q^* Q_1 - \mathcal{T}_Q^* Q_2}_\infty \le \gamma \norm{Q_1 - Q_2}_\infty$ 的完整证明，并说明为什么第 6 卷的无模型算法（Q-Learning）更偏好迭代 $Q$ 而不是 $V$。
+  \exHint{先对每个 $(s,a)$ 应用期望绝对值不等式，再对每个 $s'$ 内的 $\max_{a'}$ 套用引理~\ref{lem:max-nonexpansive}。}
+\end{enumerate}
+
+\exTier{C 层：深入证明与反例}{剖析奖励平移不变性、近似值函数策略损失界与 $\gamma=1$ 失效}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{奖励线性变换与最优策略不变性（及反例警示）}：在无限期折扣 MDP（所有状态均无终止退出，每步必转移）中，将全部单步奖励加上同一常数 $c \in \R$，即 $\tilde{R}(s, a, s') = R(s, a, s') + c$。（1）证明新价值函数满足 $\tilde{V}^\pi(s) = V^\pi(s) + c/(1-\gamma)$，因此\textbf{最优策略 $\pi^*$ 完全不变}；（2）举出 $4\times 3$ 网格世界（含终止吸收态）中的具体反例，说明当存在终止态时，仅给非终止态步长奖励加上常数（例如把 $-0.04$ 改成 $-2.0$ 或 $+0.01$）会\textbf{彻底改变最优策略}！
+  \exHint{在含终止态的网格世界里，步长奖励变成 $+0.01$ 时，智能体会为了刷分永不进入终点；变成 $-2.0$ 时，宁愿就近跳进 $-1$ 深渊也不愿多走一步！}
+
+  \item \textbf{贪心提取策略的性能损失上界定理}：假设通过近似方法（如神经网络或截断值迭代）得到了一个与真值相差不超过 $\varepsilon$ 的价值估计 $\hat{V}$，即 $\norm{\hat{V} - V^*}_\infty \le \varepsilon$，并据此提取贪心策略 $\hat{\pi}(s) = \argmax_a \sum_{s'} P(s'\mid s,a)[R(s,a,s') + \gamma \hat{V}(s')]$。证明该贪心策略的真实价值满足如下次优性上界：
+  \[
+    \norm{V^* - V^{\hat{\pi}}}_\infty \le \frac{2\gamma \varepsilon}{1 - \gamma}.
+  \]
+  \exHint{利用 $\mathcal{T}^{\hat{\pi}} \hat{V} = \mathcal{T}^* \hat{V}$ 与三角不等式：先证明 $\norm{V^* - \mathcal{T}^{\hat{\pi}} V^*}_\infty \le 2\gamma\varepsilon$，再展开 $V^* - V^{\hat{\pi}} = (I - \gamma P^{\hat{\pi}})^{-1}(V^* - \mathcal{T}^{\hat{\pi}} V^*)$ 取无穷范数。}
+\end{enumerate}
+
+\exTier{D 层：编程实践与基准自检}{探索环境步长惩罚相变与异步值迭代加速}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{$4\times 3$ 网格世界的步长惩罚相变实验}：基于代码~\ref{lst:mdp} 的 \texttt{policy\_iteration} 函数，取高耐心折扣因子 $\gamma = 0.99$（仍保持 $0.8/0.1/0.1$ 随机打滑），扫描 4 种非终止步长奖励 $r_{\text{step}} \in \{-2.0,\; -0.4,\; -0.04,\; -0.01\}$，打印每种设定下的最优策略地图 $\pi^*$ 与价值 $V^*((0,0)), V^*((0,3))$。
+  \textbf{数值自检基准}：（1）当 $r_{\text{step}} = -2.0$（剧烈扣分，极度怕拖延）时，$(0,3)$ 与 $(1,2)$ 策略分别变为 \textbf{\texttt{N}} 与 \textbf{\texttt{E}}（宁可就近跳进 $-1$ 结束痛苦！）；（2）当 $r_{\text{step}} = -0.04$ 时，$(0,1)$ 改为 \textbf{\texttt{W}}（宁可从墙壁左侧绕远路避开中间险道）；（3）当 $r_{\text{step}} = -0.01$（极低步长成本）时，$(0,3)$ 变为 \textbf{\texttt{S}}（靠撞底墙安全磨蹭出角落，彻底规避滑入 $-1$ 的风险），且 $(1,2)$ 变为 \textbf{\texttt{W}}（靠撞墙防滑！），此时 $V^*((0,3)) = +0.6398$、$V^*((0,0)) = +0.8533$（误差 $< 10^{-3}$）。
+  \exHint{只需将 \texttt{gamma=0.99} 与不同的 \texttt{step\_r} 传入 \texttt{policy\_iteration}，并将每个格子的最优箭头按 $3\times 4$ 网格打印即可直观见证四重“策略相变”。}
+
+  \item \textbf{同步 vs 异步（Gauss-Seidel）值迭代与策略迭代效率对比}：编写一个 $10 \times 10$ 随机网格世界（设置 15 个墙壁障碍、右上角 $+1$ 宝藏、两个 $-1$ 陷阱，$\gamma = 0.95$，步长 $-0.02$，随机打滑 $0.8/0.1/0.1$），分别用：（a）同步值迭代（每轮读取上一轮旧表 $V^{(k)}$）；（b）\textbf{原地异步值迭代（In-place / Gauss-Seidel VI）}（就地覆盖更新 $V[s]$）；（c）精确策略迭代，求收敛至 $\norm{V - V^*}_\infty < 10^{-6}$ 所需的迭代轮数与总耗时（毫秒）。
+  \textbf{数值自检基准}：（1）三种算法求出的最优价值表两两最大差值 $< 10^{-5}$，最优策略完全一致；（2）异步值迭代所需扫描轮数应明显少于同步值迭代（通常减少 $25\%\sim 45\%$）；（3）策略迭代仅需 $\le 12$ 轮即可精确收敛，总轮数远少于值迭代（常 $> 80$ 轮）。
+  \exHint{在原地更新时，无需分配新字典 \texttt{V\_new}，直接在原字典 \texttt{V[s] = ...} 上覆盖即可使新信息在同一轮内立即传给相邻格子。}
+\end{enumerate}

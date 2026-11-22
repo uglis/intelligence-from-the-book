@@ -1,0 +1,635 @@
+\chapter[自监督预训练、对比学习与缩放律]{自监督表示学习、预训练范式与缩放定律}
+\label{ch:pretrain-scaling}
+
+\chapEpigraph{观其伴，知其词。}{J. R. Firth（约翰·鲁珀特·弗斯，1957）}
+
+\begin{chapIntro}{本章导读：从“人工标注红利”迈向“无监督规模红利”}
+在深度学习的前十年（2012--2018），几乎所有耀眼的突破都建立在\textbf{有监督学习}之上：人类花费数年时间为百万张图像贴上“波斯猫”“消防车”标签，神经网络再通过交叉熵拟合这些离散标签。但有监督范式很快触及天花板——人工标注既昂贵又充满偏见，且标签里的信息量极其稀疏（一张百万像素图像往往只配了一个 $10$ 比特的类别编号）。
+
+真正的范式大迁徙始于\textbf{自监督预训练（Self-Supervised Pretraining）}：既然互联网上流淌着数以万亿计的原始文本、代码与图文对，我们完全可以把\textbf{数据本身的一部分遮盖起来，让模型用另一部分去预测它}——无需任何人工标注，便能把整个人类文明的语言、逻辑与视觉常识压缩进神经网络的权重中！本章将系统建立这一当代基础模型范式的四大支柱：
+\begin{enumerate}
+  \item \textbf{词元化与 BPE 算法}：在微型语料上手工推演字节对编码（BPE）的逐轮合并过程，剖析词表大小 $|V|$ 与序列长度 $T$ 之间的系统权衡；
+  \item \textbf{语言预训练双轨}：深入剖析双向掩码去噪（BERT / MLM）的训练--推理失配难题，以及因果自回归（GPT / CLM）的概率链式分解与困惑度（Perplexity）信息论本质；
+  \item \textbf{对比学习与 InfoNCE 互信息下界定理}：从第一性原理给出\textbf{零近似的有限样本严格证明} $I(X; Y) \ge \ln N - \mathcal{L}_N^{\mathrm{InfoNCE}}$，阐明超球面 $\mathbb{S}^{d-1}$ 上的对齐--均匀性平衡与温度 $\tau$ 的硬负样本聚焦效应，并用双模态 CLIP 风格实测（\texttt{data/infonce\_train.csv}）验证 Top-1 检索率从 $0\%$ 跃升至 $100.00\%$；
+  \item \textbf{神经缩放定律与 Chinchilla 最优算力分配}：调用第 4 卷第 2 章的拉格朗日乘数法，严格推导出在固定算力预算 $C \approx 6ND$ 下的最优参数量与数据量幂律指数 $a = \frac{\beta}{\alpha+\beta},\; b = \frac{\alpha}{\alpha+\beta}$ 与 $D^* \approx 20 N^*$ 黄金法则。
+\end{enumerate}
+\end{chapIntro}
+
+\section{从监督标注到词元化：BPE 算法与词表权衡}
+\label{sec:bpe}
+
+神经网络只能吞吐整数索引序列与浮点数张量，无法直接阅读原始字符串。如何把连续文本切分为离散词元（Token）——即\textbf{词元化（Tokenization）}——是大模型输入管道的第一道精密阀门。
+
+两种朴素方案都存在致命短板：
+\begin{itemize}
+  \item \textbf{词级切分（Word-level）}：按空格和标点切词。英语屈折变化（\texttt{play/played/playing}）、拼写错误、代码标识符与专有名词会让词表轻松膨胀至数百万，不仅撑爆嵌入矩阵 $E \in \R^{|V|\times d}$，还会对一切未登录词（OOV）退化为丧失信息的 \texttt{<UNK>}；
+  \item \textbf{字符级切分（Char-level）}：词表极小（如 ASCII 仅 128 个），绝无 OOV，但一个词被拆成 $5\sim 10$ 个字符，序列长度 $T$ 暴增数倍——对第~\ref{ch:attention-transformer} 章注意力 $O(T^2)$ 复杂度而言无异于性能灾难。
+\end{itemize}
+
+现代大语言模型（GPT-2/3/4、Llama、Qwen、DeepSeek）一致采用\textbf{子词（Subword）词元化}，其中最核心的算法是由 Gage（1994）发明、Sennrich 等人（2016）引入 NLP 并由 GPT-2 推广至字节级的\textbf{字节对编码（Byte Pair Encoding, BPE）}。
+
+\begin{defBox}
+\begin{definition}[字节对编码（BPE）贪心合并算法]
+给定训练语料（预先按空白/正则粗切为带频次的词列表）及目标词表大小 $|V_{\text{target}}|$：
+\begin{enumerate}
+  \item \textbf{初始化}：将每个词拆分为基本符号序列（字符或 UTF-8 字节，共 256 个基础字节，确保任何语言与表情符号都\textbf{永不出现 \texttt{<UNK>}}），并在词尾附加边界标记 \texttt{</w>}（或 GPT-2 的词首空格符号），形成初始词表 $V_0$；
+  \item \textbf{贪心迭代}：在当前语料中统计所有\textbf{相邻符号对} $(u, v)$ 的出现总频次，选出频次最高的一对 $(u^*, v^*)$，将其合并为新符号 $w = u^* v^*$ 加入词表，并把语料中所有相邻的 $(u^*, v^*)$ 替换为 $w$；
+  \item \textbf{终止}：重复步骤 2 直至 $|V| = |V_{\text{target}}|$，并按顺序保存全部合并规则表（Merge Table）。推理编码新文本时，严格按合并规则表的优先级依次合并即可。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\begin{example}[手算全过程：微型语料上的 5 轮 BPE 合并追踪]
+\label{ex:bpe-trace}
+设微型语料包含 4 个词及其频次：\texttt{low}（5 次）、\texttt{lower}（2 次）、\texttt{newest}（6 次）、\texttt{widest}（3 次）。添加词尾标记 \texttt{</w>} 后，初始字符词表为 $\{d, e, i, l, n, o, r, s, t, w, \texttt{</w>}\}$（共 11 个符号），语料表示为：
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lclc@{}}
+\toprule
+\textbf{初始切分} & \textbf{频次} & \textbf{5 轮合并后切分} & \textbf{频次} \\
+\midrule
+\texttt{l o w </w>} & 5 & \texttt{low </w>} & 5 \\
+\texttt{l o w e r </w>} & 2 & \texttt{low e r </w>} & 2 \\
+\texttt{n e w e s t </w>} & 6 & \texttt{n e w est</w>} & 6 \\
+\texttt{w i d e s t </w>} & 3 & \texttt{w i d est</w>} & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+逐轮统计最高频相邻对并合并：
+\begin{enumerate}
+  \item \textbf{第 1 轮}：\texttt{(e, s)} 在 \texttt{newest}（6）与 \texttt{widest}（3）中共现 $6+3 = 9$ 次（全场最高）$\implies$ 合并为 \texttt{es}；
+  \item \textbf{第 2 轮}：\texttt{(es, t)} 共现 $6+3 = 9$ 次 $\implies$ 合并为 \texttt{est}；
+  \item \textbf{第 3 轮}：\texttt{(est, </w>)} 共现 $6+3 = 9$ 次 $\implies$ 合并为 \texttt{est</w>}（自动习得了英语最高级后缀！）；
+  \item \textbf{第 4 轮}：\texttt{(l, o)} 在 \texttt{low}（5）与 \texttt{lower}（2）中共现 $5+2 = 7$ 次 $\implies$ 合并为 \texttt{lo}；
+  \item \textbf{第 5 轮}：\texttt{(lo, w)} 共现 $5+2 = 7$ 次 $\implies$ 合并为 \texttt{low}（自动习得了词根！）。
+\end{enumerate}
+经过仅仅 5 轮合并，词表从 11 个符号温和增至 16 个，但整部语料的总词元数从 $5\times 4 + 2\times 6 + 6\times 7 + 3\times 7 = 95$ 骤降至 $5\times 2 + 2\times 4 + 6\times 4 + 3\times 4 = 54$（压缩率达 $43\%$）！更妙的是，即使测试时遇到从未见过的生词 \texttt{lowest}，该规则表也会优雅地切分为 \texttt{[low, est</w>]}——精准复用了“词根 + 最高级后缀”的形态学结构！
+\end{example}
+
+\begin{insightBox}{词表大小 $|V|$ 与序列长度 $T$ 的现代工程权衡}
+为什么早期 GPT-2 用 $|V| \approx 50\text{K}$，而现代 Llama-3 与 Qwen-2.5 纷纷将词表扩大至 $128\text{K} \sim 152\text{K}$？
+\begin{itemize}
+  \item \textbf{大词表的收益}：更低的\textbf{词元生育率（Fertility，每词或每汉字平均所需词元数）}，大幅缩短同等文本的序列长度 $T$——尤其对中文、代码和多语言文本，能将推理生成速度与等效上下文窗口提升 $30\% \sim 50\%$；
+  \item \textbf{大词表的代价}：输入嵌入与顶层 LM Head 矩阵各占 $|V| \cdot d_{\text{model}}$ 参数（若 $d_{\text{model}}=4096,\; |V|=128\text{K}$，仅这两张表就占超过 $10$ 亿参数，且末层 $\softmax$ 需在 $128\text{K}$ 维上计算）；此外，过于庞大的词表会制造大量低频“幽灵词元”，在有限预训练数据下得不到充分梯度更新。
+\end{itemize}
+\end{insightBox}
+
+\section{语言预训练双雄：掩码去噪（BERT）与因果自回归（GPT）}
+\label{sec:mlm-clm}
+
+语言学家 Firth 在 1957 年写下名言：“观其伴，知其词（You shall know a word by the company it keeps）。” 现代大语言模型的全部魔力，正是把这句分布式语义假说翻译成了两种可微分的自监督损失函数。
+
+\subsection{掩码语言建模（BERT / MLM）：双向去噪与训练--推理失配}
+
+BERT（Devlin et al., 2019）采用\textbf{仅编码器（Encoder-only）}双向 Transformer（无因果掩码，每个位置都能同时看见左侧与右侧全部上下文）。训练时，从输入序列 $x = (x_1, \dots, x_T)$ 中随机挑选 $15\%$ 的位置集合 $\mathcal{M}$，构造损坏输入 $\tilde{x}$，最大化被遮盖词元的条件对数似然：
+\begin{equation}
+  \mathcal{L}_{\mathrm{MLM}}(\theta) = -\frac{1}{|\mathcal{M}|} \sum_{i \in \mathcal{M}} \ln p_\theta\!\left(x_i \mid \tilde{x}\right).
+  \label{eq:mlm-loss}
+\end{equation}
+MLM 的双向语境使其在文本分类、命名实体识别与语义检索（句子嵌入）上极为出色，但它有两项与生俱来的局限：
+\begin{enumerate}
+  \item \textbf{\texttt{[MASK]} 训练--推理失配}：预训练时输入里充斥着人工占位符 \texttt{[MASK]}，可下游微调和真实推理时句子里根本不会出现 \texttt{[MASK]}！为此 BERT 发明了著名的 \textbf{80--10--10 补丁}（被选中的 $15\%$ 词元中，仅 $80\%$ 替换为 \texttt{[MASK]}，$10\%$ 替换为随机词，$10\%$ 保持原词不变），但也仅能缓解而无法根除失配，且无法直接按联合概率逐词生成流畅长文。
+  \item \textbf{样本计算效率偏低}：每跑完一整趟前向传播，只有 $15\%$ 的位置产生损失与梯度信号，其余 $85\%$ 位置的隐藏输出未被直接用于预测监督。
+\end{enumerate}
+
+\subsection{因果自回归语言建模（GPT / CLM）与困惑度的信息论本质}
+
+GPT 系列（Radford et al., 2018--2020）回归概率论最纯粹的\textbf{乘法链式法则}：任何长度为 $T$ 的文本序列的联合概率都可以\textbf{零近似地精确分解}为一系列下一词条件概率之积：
+\begin{equation}
+  p_\theta(x_1, x_2, \dots, x_T) = \prod_{t=1}^{T} p_\theta(x_t \mid x_{<t})
+  \;\iff\;
+  \mathcal{L}_{\mathrm{CLM}}(\theta) = -\frac{1}{T}\sum_{t=1}^{T} \ln p_\theta(x_t \mid x_{<t}).
+  \label{eq:clm-loss}
+\end{equation}
+配合第~\ref{ch:attention-transformer} 章的因果掩码，单次并行前向传播就能同时对序列中\textbf{全部 $100\%$ 词元}施加监督信号，而且不存在任何人工占位符，预训练目标与推理自回归生成完全一致！
+
+评估语言模型最核心的指标是\textbf{困惑度（Perplexity, PPL）}，它就是每词元平均负对数似然（交叉熵损失）的自然指数：
+\begin{equation}
+  \mathrm{PPL}(\theta) = \exp\!\left(\mathcal{L}_{\mathrm{CLM}}(\theta)\right)
+  = \left(\prod_{t=1}^{T} p_\theta(x_t \mid x_{<t})\right)^{-1/T}.
+  \label{eq:ppl}
+\end{equation}
+困惑度有一个极直观的物理含义——\textbf{等效均匀分支因子}：如果模型在每一步都像投掷一枚 $K$ 面均匀骰子（$p = 1/K$），那么 $\mathcal{L}_{\mathrm{CLM}} = \ln K$，从而 $\mathrm{PPL} = K$！因此 $\mathrm{PPL} = 8$ 意味着模型在预测下一个词时，平均只在 $8$ 个等可能候选中犹豫；而在信息论视角下，期望交叉熵恰好分解为：
+\[
+  \E_{x \sim p_{\text{data}}}\!\left[-\ln p_\theta(x)\right]
+  = \underbrace{H(p_{\text{data}})}_{\text{自然语言固有熵（常数）}} + \underbrace{\DKL\!\left(p_{\text{data}} \,\|\, p_\theta\right)}_{\ge 0},
+\]
+因此最小化下一词预测损失严格等价于压缩真实人类语言分布与模型分布之间的 KL 散度！
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{24mm}p{26mm}p{24mm}X@{}}
+\toprule
+\textbf{预训练范式} & \textbf{代表架构与掩码} & \textbf{单次监督比例} & \textbf{核心优势与适用场景} \\
+\midrule
+掩码去噪（MLM） & BERT / RoBERTa（双向无掩码） & $15\%$（仅被遮盖位） & 双向上下文表征强，适合检索嵌入、分类与序列标注；无法直接自回归生成 \\
+因果自回归（CLM） & GPT / Llama / Qwen（下三角因果） & $100\%$（全序列） & 训练与生成完全统一，极易规模化，具备上下文学习与通用推理涌现能力 \\
+编解码去噪（Seq2Seq） & T5 / BART（编码双向 + 解码因果） & 损坏跨度（约 $15\%\sim 30\%$） & 兼顾双向上下文理解与自由生成，常见于翻译、摘要与多模态条件生成 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{对比学习、CLIP 与 InfoNCE 互信息下界定理}
+\label{sec:contrastive-infonce}
+
+语言天然由离散词元构成，可以轻松计算词表上的 $\softmax$；但图像、音频和传感器信号是高维连续像素——直接在像素空间做“下一像素预测”会把大量算力浪费在高频纹理噪声上。怎样在不做像素重建的情况下，迫使神经网络学出高层语义表征？
+
+\textbf{对比学习（Contrastive Learning）}给出了一个极简而震撼的答案：\textbf{拉近语义一致的“正样本对”，推远无关的“负样本对”！}
+\begin{itemize}
+  \item \textbf{单模态自监督（SimCLR；Chen et al., 2020）}：把同一张图像经两次随机裁剪与色彩抖动得到的两个视图视为正样本对 $(x_i, x_i^+)$，把同批次中其余所有图像视为负样本；
+  \item \textbf{跨模态图文对齐（CLIP；Radford et al., 2021）}：从互联网抓取 4 亿组（图像 $x_i^A$, 配对文本 $x_i^B$），用视觉编码器 $f_A$ 和文本编码器 $f_B$ 将它们分别映射到同一个单位超球面 $\mathbb{S}^{d-1}$ 上（即 $L_2$ 归一化 $\hat{z}_i^A = f_A(x_i^A)/\norm{f_A(x_i^A)}_2,\; \hat{z}_i^B = f_B(x_i^B)/\norm{f_B(x_i^B)}_2$），并在 $N \times N$ 余弦相似度矩阵 $S_{ij} = \inner{\hat{z}_i^A}{\hat{z}_j^B}$ 上执行对称对比分类！
+\end{itemize}
+
+\begin{defBox}
+\begin{definition}[对称温度缩放 InfoNCE 对比损失]
+给定一个包含 $N$ 个配对样本的批次 $\{(\hat{z}_i^A, \hat{z}_i^B)\}_{i=1}^N \subset \mathbb{S}^{d-1} \times \mathbb{S}^{d-1}$ 与温度超参数 $\tau > 0$，记余弦相似度矩阵 $S_{ij} = \inner{\hat{z}_i^A}{\hat{z}_j^B} \in [-1, 1]$。按行（以 $A$ 检索 $B$）与按列（以 $B$ 检索 $A$）的对称 InfoNCE 损失定义为：
+\begin{equation}
+  \mathcal{L}_{A \to B} = -\frac{1}{N}\sum_{i=1}^{N} \ln \frac{\exp(S_{ii}/\tau)}{\sum_{j=1}^{N} \exp(S_{ij}/\tau)},
+  \qquad
+  \mathcal{L}_{B \to A} = -\frac{1}{N}\sum_{j=1}^{N} \ln \frac{\exp(S_{jj}/\tau)}{\sum_{i=1}^{N} \exp(S_{ij}/\tau)},
+  \label{eq:infonce-dir}
+\end{equation}
+\begin{equation}
+  \mathcal{L}_{\mathrm{InfoNCE}} = \frac{1}{2}\left(\mathcal{L}_{A \to B} + \mathcal{L}_{B \to A}\right).
+  \label{eq:infonce-sym}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+从直观上看，式~\eqref{eq:infonce-dir} 不过是把 $N \times N$ 相似度矩阵 $S/\tau$ 的每一行和每一列都当成一个 $N$ 分类问题，正确标签恰好落在主对角线 $(i, i)$ 上！但它在信息论深处蕴藏着一条极其优美的核心定理（Oord et al., 2018; Poole et al., 2019）：\textbf{最小化 InfoNCE 损失，严格等价于最大化两个模态表征之间互信息 $I(X; Y)$ 的变分下界！} 下面我们给出一个完全无需大 $N$ 渐近近似、对任意有限批大小 $N \ge 2$ 皆精确成立的“天书级”证明。
+
+\begin{thmBox}
+\begin{theorem}[InfoNCE 互信息下界定理]
+\label{thm:infonce-mi}
+设随机变量 $(X, Y) \sim p(x, y)$ 具有联合分布与边缘分布 $p(x), p(y)$。考虑如下 $N$ 选 $1$ 对比采样过程：先均匀抽取正样本槽位 $K \sim \operatorname{Unif}\{1, \dots, N\}$，采样 $X \sim p(x)$，令 $Y_K \sim p(y \mid X)$，而其余 $N-1$ 个负样本 $Y_j \sim p(y)$（$j \ne K$）相互独立且独立于 $(X, Y_K)$。对任意可测打分函数 $f: \mathcal{X} \times \mathcal{Y} \to \R$，定义总体 InfoNCE 损失：
+\begin{equation}
+  \mathcal{L}_N^{\mathrm{InfoNCE}}(f)
+  := \E_{K, X, Y_{1:N}}\!\left[-\ln \frac{\exp\big(f(X, Y_K)\big)}{\sum_{j=1}^{N} \exp\big(f(X, Y_j)\big)}\right].
+  \label{eq:infonce-pop}
+\end{equation}
+则对任意打分函数 $f$ 与任意有限批大小 $N \ge 2$，恒有严格互信息下界：
+\begin{equation}
+  I(X; Y) \ge \ln N - \mathcal{L}_N^{\mathrm{InfoNCE}}(f).
+  \label{eq:infonce-mi-bound}
+\end{equation}
+并且当且仅当打分函数满足 $e^{f(x, y)} \propto \frac{p(y \mid x)}{p(y)} = \frac{p(x, y)}{p(x)p(y)}$（即 $f(x, y) = \ln \frac{p(x, y)}{p(x)p(y)} + c(x)$，点互信息加任意仅依赖 $x$ 的常数）时，变分交叉熵间隙归零。
+\end{theorem}
+\begin{proof}
+记 $q(k \mid x, y_{1:N}) := \frac{\exp(f(x, y_k))}{\sum_{j=1}^N \exp(f(x, y_j))}$ 为由打分函数诱导的关于槽位 $K$ 的变分后验，而 $p(k \mid x, y_{1:N})$ 为真实的贝叶斯后验。由式~\eqref{eq:infonce-pop}，期望交叉熵可精确拆分为条件熵加非负 KL 散度：
+\begin{align}
+  \mathcal{L}_N^{\mathrm{InfoNCE}}(f)
+  &= \E_{X, Y_{1:N}}\!\left[\sum_{k=1}^{N} p(k \mid X, Y_{1:N})\big(-\ln q(k \mid X, Y_{1:N})\big)\right] \nonumber \\
+  &= H(K \mid X, Y_{1:N}) + \E_{X, Y_{1:N}}\!\Big[\DKL\!\big(p(K \mid X, Y_{1:N}) \,\|\, q(K \mid X, Y_{1:N})\big)\Big] \nonumber \\
+  &\ge H(K \mid X, Y_{1:N}), \label{eq:infonce-step1}
+\end{align}
+等号成立当且仅当 $q(k \mid x, y_{1:N}) = p(k \mid x, y_{1:N})$。利用贝叶斯公式算出真实后验：
+\[
+  p(k \mid x, y_{1:N})
+  = \frac{\frac{1}{N} p(y_k \mid x) \prod_{j \ne k} p(y_j)}{\sum_{m=1}^{N} \frac{1}{N} p(y_m \mid x) \prod_{j \ne m} p(y_j)}
+  = \frac{p(y_k \mid x)/p(y_k)}{\sum_{m=1}^{N} p(y_m \mid x)/p(y_m)},
+\]
+可见取 $e^{f(x, y)} \propto \frac{p(y\mid x)}{p(y)}$ 时变分后验与真实后验完全重合，KL 间隙归零！
+
+接下来将 $H(K \mid X, Y_{1:N})$ 与 $I(X; Y)$ 精确相连。由互信息定义与 $K \sim \operatorname{Unif}\{1,\dots,N\}$：
+\begin{equation}
+  H(K \mid X, Y_{1:N}) = H(K) - I(K; X, Y_{1:N}) = \ln N - I(K; X, Y_{1:N}).
+  \label{eq:infonce-step2}
+\end{equation}
+关键一步在于界定 $I(K; X, Y_{1:N})$。注意两项精确独立性：
+\begin{itemize}
+  \item 当 $X$ 被边缘积分掉后，给定 $K = k$ 时 $Y_k$ 的边缘分布仍是 $p(y)$，故整个元组 $Y_{1:N}$ 的边缘联合分布恒为 $\prod_{j=1}^N p(y_j)$，完全不依赖 $k$！因此 $K \perp\!\!\!\perp Y_{1:N}$，即 $I(K; Y_{1:N}) = 0$。
+  \item 生成过程中 $K$ 与 $X$ 独立抽取，故 $I(X; K) = 0$。
+\end{itemize}
+现在用互信息链式法则以两种顺序展开 $I(X; K, Y_{1:N})$：
+\begin{align*}
+  \text{顺序一：}\quad I(X; K, Y_{1:N})
+  &= \underbrace{I(X; K)}_{=\,0} + I(X; Y_{1:N} \mid K) \\
+  &= \frac{1}{N}\sum_{k=1}^{N} I(X; Y_k, Y_{-k} \mid K = k) = I(X; Y),
+\end{align*}
+最后一步是因为给定 $K=k$ 时，负样本 $Y_{-k}$ 独立于 $(X, Y_k)$，不携带关于 $X$ 的任何额外信息。
+\begin{align*}
+  \text{顺序二：}\quad I(X; K, Y_{1:N})
+  &= \underbrace{I(X; Y_{1:N})}_{\ge\, 0} + I(X; K \mid Y_{1:N})
+   \ge I(X; K \mid Y_{1:N}).
+\end{align*}
+同时对 $I(K; X, Y_{1:N})$ 使用链式法则并代入 $I(K; Y_{1:N}) = 0$：
+\[
+  I(K; X, Y_{1:N}) = \underbrace{I(K; Y_{1:N})}_{=\,0} + I(K; X \mid Y_{1:N}) = I(X; K \mid Y_{1:N}) \le I(X; Y).
+\]
+将 $I(K; X, Y_{1:N}) \le I(X; Y)$ 代回式~\eqref{eq:infonce-step2} 与式~\eqref{eq:infonce-step1}，立得：
+\[
+  \mathcal{L}_N^{\mathrm{InfoNCE}}(f) \ge \ln N - I(X; Y)
+  \;\iff\;
+  I(X; Y) \ge \ln N - \mathcal{L}_N^{\mathrm{InfoNCE}}(f).
+\]
+\end{proof}
+\end{thmBox}
+
+定理~\ref{thm:infonce-mi} 立刻解开了一个困扰工程界多年的核心直觉：\textbf{为什么 CLIP 和 SimCLR 执着于把批大小 $N$ 推到 $4{,}096$ 甚至 $32{,}768$？} 因为式~\eqref{eq:infonce-mi-bound} 的右端被 $\ln N$ 死死封顶！即使损失降到 $0$，批大小 $N = 8$ 最多只能保证 $\ln 8 \approx 2.08$ nats（$3$ 比特）的互信息下界；只有把负样本数 $N$ 做大，$\ln N$ 上限才会随之抬高，从而把互信息下界收紧到真正高语义容量区间！
+
+\subsection{超球面上的对齐与均匀性，以及温度 $\tau$ 的硬负样本聚焦}
+
+把式~\eqref{eq:infonce-dir} 的单样本损失改写展开（利用 $\ln(\exp(a) + \sum \exp(b)) = \ln\sum \exp$）：
+\begin{equation}
+  \ell_i = \underbrace{-\frac{1}{\tau} \inner{\hat{z}_i^A}{\hat{z}_i^B}}_{\text{对齐项（Alignment）：拉近正对}}
+  + \underbrace{\ln \sum_{j=1}^{N} \exp\!\left(\frac{\inner{\hat{z}_i^A}{\hat{z}_j^B}}{\tau}\right)}_{\text{均匀项（Uniformity）：超球面上排斥负对}}.
+  \label{eq:align-uniform}
+\end{equation}
+Wang 与 Isola（2020）揭示了对比学习的优雅几何本质：在单位超球面 $\mathbb{S}^{d-1}$ 上，InfoNCE 同时优化两个相互制衡的几何目标——\textbf{对齐性（Alignment）}将语义相同的正对推向同一点（$\cos \to +1$），而\textbf{均匀性（Uniformity）}如电荷排斥般把所有样本近似均匀地铺满整个超球面（平均负对余弦 $\cos \approx 0$），从而最大化信息熵并彻底杜绝表征坍缩！
+
+再对 $\ell_i$ 求关于锚点向量 $\hat{z}_i^A$ 的梯度（记 $p_{ij} = \frac{\exp(S_{ij}/\tau)}{\sum_m \exp(S_{im}/\tau)}$）：
+\begin{equation}
+  \frac{\partial \ell_i}{\partial \hat{z}_i^A}
+  = \frac{1}{\tau}\left[-(1 - p_{ii}) \hat{z}_i^B + \sum_{j \ne i} p_{ij}\, \hat{z}_j^B\right].
+  \label{eq:infonce-grad}
+\end{equation}
+式~\eqref{eq:infonce-grad} 一眼揭露了温度 $\tau$ 的物理作用：
+\begin{itemize}
+  \item \textbf{较小温度 $\tau$（如 $0.05 \sim 0.15$）}：$\softmax$ 权重 $p_{ij}$ 急剧向那些余弦相似度较高、最容易混淆的\textbf{硬负样本（Hard Negatives）}集中，产生精准的局部斥力；
+  \item \textbf{过大温度 $\tau$（如 $\tau \gg 1$）}：$p_{ij} \approx 1/N$ 趋于平坦，模型对早已推远的简单负样本和难分伯仲的硬负样本“一视同仁”，梯度辨别力大幅稀释；
+  \item \textbf{过小温度 $\tau$（如 $\tau \to 0.005$）}：梯度幅值乘上 $1/\tau$ 剧烈放大，且容易把批次中偶然语义相近的“假负样本（如另一张也拍着金毛犬的照片）”强行拆散，破坏全局语义拓扑！因此 CLIP 将 $\ln(1/\tau)$ 设为可学习参数，并严格截断上界 $1/\tau \le 100$（即 $\tau \ge 0.01$）。
+\end{itemize}
+
+图~\ref{fig:clip-matrix} 直观描绘了 CLIP 双编码器、$N\times N$ 余弦相似度矩阵与超球面 $\mathbb{S}^{d-1}$ 对齐--均匀几何。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+  enc/.style={rectangle, rounded corners=1.5mm, draw=#1, thick, fill=#1!10, minimum width=24mm, minimum height=9mm, align=center, font=\sffamily\footnotesize, text=ink},
+  arr/.style={-{Stealth[length=2mm]}, thick, slate}
+]
+  % Left: Modality A & B encoders
+  \node[font=\sffamily\bfseries\small, color=tealDark] at (1.5, 4.9) {(a) 双模态编码器与 $N\times N$ 相似度矩阵};
+
+  \node[enc=teal] (ea) at (-0.6, 3.5) {模态 A 编码器\\$f_A \to L_2\text{ 归一}$};
+  \node[enc=navy] (eb) at (-0.6, 1.3) {模态 B 编码器\\$f_B \to L_2\text{ 归一}$};
+
+  \node[font=\scriptsize\sffamily, color=tealDark] at (-0.6, 4.3) {$\hat{z}_1^A, \dots, \hat{z}_N^A \in \mathbb{S}^{d-1}$};
+  \node[font=\scriptsize\sffamily, color=navy] at (-0.6, 0.5) {$\hat{z}_1^B, \dots, \hat{z}_N^B \in \mathbb{S}^{d-1}$};
+
+  % 4x4 similarity matrix
+  \begin{scope}[shift={(1.7, 0.9)}]
+    \foreach \i in {0,...,3} {
+      \foreach \j in {0,...,3} {
+        \pgfmathsetmacro{\x}{\j * 0.78}
+        \pgfmathsetmacro{\y}{(3 - \i) * 0.78}
+        \ifnum\i=\j
+          \fill[teal!28] (\x, \y) rectangle (\x+0.74, \y+0.74);
+          \draw[tealDark, thick] (\x, \y) rectangle (\x+0.74, \y+0.74);
+          \node[font=\scriptsize\bfseries, color=tealDark] at (\x+0.37, \y+0.37) {$+$};
+        \else
+          \fill[ochreLight] (\x, \y) rectangle (\x+0.74, \y+0.74);
+          \draw[ochre!45] (\x, \y) rectangle (\x+0.74, \y+0.74);
+          \node[font=\scriptsize, color=ochre!80] at (\x+0.37, \y+0.37) {$-$};
+        \fi
+      }
+    }
+    \node[font=\scriptsize\sffamily, color=navy] at (1.56, 3.38) {$\hat{z}_1^B \;\;\; \hat{z}_2^B \;\;\; \hat{z}_3^B \;\;\; \hat{z}_4^B$};
+    \node[font=\scriptsize\sffamily, color=tealDark, rotate=90] at (-0.30, 1.56) {$\hat{z}_1^A \;\; \cdots \;\; \hat{z}_4^A$};
+    \node[font=\scriptsize\sffamily, color=ink, align=center] at (1.56, -0.45) {主对角线拉近（$\cos \to +1$）\\非对角线排斥（$\cos \to 0$）};
+  \end{scope}
+
+  \draw[arr, teal] (ea.east) -- (1.35, 3.5);
+  \draw[arr, navy] (eb.east) -- (1.35, 1.3);
+
+  % Right: Hypersphere S^{d-1} Alignment & Uniformity
+  \begin{scope}[shift={(8.4, 2.45)}]
+    \node[font=\sffamily\bfseries\small, color=tealDark] at (0, 2.45) {(b) 超球面 $\mathbb{S}^{d-1}$ 上的对齐与均匀};
+    \draw[tealLine, very thick, fill=tealLight!35] (0,0) circle (1.75cm);
+    \draw[tealLine, dashed] (-1.75,0) arc (180:360:1.75 and 0.45);
+    \draw[tealLine, dotted] (1.75,0) arc (0:180:1.75 and 0.45);
+
+    % 3 positive pairs well separated on sphere
+    \coordinate (a1) at (38:1.75);
+    \coordinate (b1) at (48:1.75);
+    \coordinate (a2) at (158:1.75);
+    \coordinate (b2) at (168:1.75);
+    \coordinate (a3) at (276:1.75);
+    \coordinate (b3) at (286:1.75);
+
+    \foreach \p in {a1, a2, a3} {\fill[teal] (\p) circle (2.6pt);}
+    \foreach \p in {b1, b2, b3} {\fill[navy] (\p) circle (2.6pt);}
+
+    % Alignment arrows (pull together)
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, tealDark, thick] (a1) -- (b1);
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, tealDark, thick] (a2) -- (b2);
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, tealDark, thick] (a3) -- (b3);
+
+    % Uniformity repulsion dashed arcs inside
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, ochre, dashed, thick] (43:1.25) to[bend right=15] (163:1.25);
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, ochre, dashed, thick] (163:1.25) to[bend right=15] (281:1.25);
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, ochre, dashed, thick] (281:1.25) to[bend right=15] (43:1.25);
+
+    \node[font=\scriptsize\sffamily, color=tealDark, anchor=west] at (43:1.9) {对齐正对};
+    \node[font=\scriptsize\sffamily, color=ochre] at (0, -0.05) {均匀斥力};
+    \node[font=\scriptsize\sffamily, color=slate] at (0, -2.15) {$\bullet$ 模态 A（青） \quad $\bullet$ 模态 B（蓝）};
+  \end{scope}
+\end{tikzpicture}}
+\caption{CLIP 风格跨模态对比学习几何机制。(a) 两个独立编码器将异构模态投射到共享超球面并构造 $N \times N$ 相似度矩阵，通过对称交叉熵拉升主对角线；(b) 超球面上正对对齐靠拢、不同语义概念均匀铺开。}
+\label{fig:clip-matrix}
+\end{figure}
+
+\section{实测实验：双模态 CLIP 风格 InfoNCE 对比对齐}
+\label{sec:exp-infonce}
+
+为了亲手验证式~\eqref{eq:infonce-sym} 与定理~\ref{thm:infonce-mi}，我们运行 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp5\_infonce\_contrastive}：合成 $N = 128$ 个共享 $8$ 维潜在概念 $Z \in \R^{128 \times 8}$，分别经由\textbf{两种截然不同的非线性观测模态}生成输入数据（维度 $D_{\text{in}} = 16$）：
+\[
+  X_A = \tanh(Z W_A) + 0.08\,\varepsilon_A, \qquad
+  X_B = \sin(Z W_B) + 0.08\,\varepsilon_B.
+\]
+原始特征空间 $X_A$ 与 $X_B$ 的坐标毫无对齐关系（初始平均余弦相似度为负！）。我们用两个独立的 2 层 ReLU MLP 编码器 \texttt{enc\_a}, \texttt{enc\_b}（$16 \to 32 \to 16$）将它们映射到共享单位超球面 $\mathbb{S}^{15}$，取温度 $\tau = 0.15$，以 AdamW（$\eta = 5\times 10^{-3}$）优化对称 InfoNCE 损失 200 轮：
+
+\begin{lstlisting}[caption={纯 PyTorch 对称 CLIP 风格 InfoNCE 核心训练步（与 \texttt{vol5\_experiments.py} 一致）},label={lst:infonce}]
+tau = 0.15
+labels = torch.arange(N)                         # 正确配对全在主对角线 0..N-1
+for ep in range(201):
+    za = F.normalize(enc_a(Xa), dim=-1)          # 投影至单位超球面 S^{d-1}
+    zb = F.normalize(enc_b(Xb), dim=-1)
+    sim = za @ zb.T                              # (N, N) 余弦相似度矩阵
+    logits = sim / tau
+    loss = 0.5 * (F.cross_entropy(logits, labels)
+                + F.cross_entropy(logits.T, labels))
+    opt.zero_grad(); loss.backward(); opt.step()
+\end{lstlisting}
+
+实测记录文件 \texttt{data/infonce\_train.csv} 清晰刻画了超球面几何的自发成型（绘制于图~\ref{fig:infonce-train}）：
+\begin{itemize}
+  \item \textbf{第 0 轮（未对齐随机投影）}：InfoNCE 损失高达 \texttt{5.5298}（高于均匀随机基线 $\ln 128 \approx 4.8520$），跨模态 Top-1 检索准确率为 \texttt{0.00\%}，正对平均余弦 \texttt{pos\_cos = -0.204} 与负对平均余弦 \texttt{neg\_cos = -0.190} 几乎完全混在一起；
+  \item \textbf{第 50 轮}：损失骤降至 \texttt{1.3946}，Top-1 跨模态检索准确率飙升至 \texttt{90.62\%}，正对余弦拉升至 \texttt{+0.840}，而负对余弦被精准压制在正交零点附近（\texttt{-0.006}）；
+  \item \textbf{第 90--100 轮}：损失进一步跌至 \texttt{0.8177} 与 \texttt{0.7531}，Top-1 检索准确率触顶 \textbf{\texttt{100.00\%}}（正对余弦 \texttt{0.931}）；
+  \item \textbf{第 200 轮}：损失降至 \texttt{0.5099}，Top-1 保持 \textbf{\texttt{100.00\%}}，\texttt{pos\_cos = +0.967}，\texttt{neg\_cos = -0.008}！代入定理~\ref{thm:infonce-mi}，此时学得的双模态互信息下界达到 $\ln 128 - 0.5099 = 4.342\text{ nats}$（约 $6.26$ 比特，已逼近 $128$ 样本所能承载的理论信息上限 $\log_2 128 = 7$ 比特）！
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left plot: Loss and Top-1 Retrieval Acc (two axes cleanly or separate panels -> separate panels!)
+  \begin{axis}[
+    name=leftp,
+    width=0.47\linewidth, height=5.8cm,
+    title={\sffamily\bfseries\footnotesize (a) InfoNCE 损失与跨模态 Top-1 检索率},
+    xlabel={训练轮数（Epoch）},
+    ylabel={Top-1 检索准确率（\%）},
+    xmin=-4, xmax=204, ymin=-4, ymax=108,
+    xtick={0,50,100,150,200},
+    ytick={0,25,50,75,100},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.22)}, anchor=east, font=\scriptsize, fill=white, draw=tealLine, legend cell align=left}
+  ]
+    \addplot[teal, very thick, mark=*, mark size=1.5pt]
+      table[x=epoch, y=top1_acc, col sep=comma]{data/infonce_train.csv};
+    \addlegendentry{Top-1 检索率（\%）}
+
+    % Overlay scaled loss? Better: show loss right-axis OR annotate clearly! Let's use clean right y-axis on panel (a).
+    \node[font=\scriptsize\sffamily, color=tealDark, fill=white, inner sep=1pt]
+      at (axis cs:142, 86) {ep $\ge 90$: 100.00\%};
+    \node[font=\scriptsize\sffamily, color=ochre, anchor=west]
+      at (axis cs:18, 12) {Loss: 5.53 $\to$ 0.51};
+  \end{axis}
+
+  % Right plot: Alignment (pos_cos) vs Uniformity (neg_cos)
+  \begin{axis}[
+    at={(leftp.east)}, anchor=west, xshift=1.45cm,
+    width=0.47\linewidth, height=5.8cm,
+    title={\sffamily\bfseries\footnotesize (b) 超球面余弦：正对对齐 vs 负对均匀},
+    xlabel={训练轮数（Epoch）},
+    ylabel={平均余弦相似度 $\cos(\hat{z}^A, \hat{z}^B)$},
+    xmin=-4, xmax=204, ymin=-0.32, ymax=1.08,
+    xtick={0,50,100,150,200},
+    ytick={-0.2,0,0.2,0.4,0.6,0.8,1.0},
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.48)}, anchor=east, font=\scriptsize, fill=white, draw=tealLine, legend cell align=left}
+  ]
+    \addplot[navy, very thick, mark=*, mark size=1.5pt]
+      table[x=epoch, y=pos_cos, col sep=comma]{data/infonce_train.csv};
+    \addlegendentry{正对 \texttt{pos\_cos}（对齐）}
+
+    \addplot[ochre, very thick, dashed, mark=square*, mark size=1.4pt]
+      table[x=epoch, y=neg_cos, col sep=comma]{data/infonce_train.csv};
+    \addlegendentry{负对 \texttt{neg\_cos}（均匀）}
+
+    \draw[slate, dotted, thick] (axis cs:0, 0) -- (axis cs:200, 0);
+    \node[font=\scriptsize\sffamily, color=navy, anchor=east] at (axis cs:195, 0.84) {ep=200: +0.967};
+    \node[font=\scriptsize\sffamily, color=ochre, anchor=east] at (axis cs:195, -0.14) {ep=200: -0.008};
+  \end{axis}
+\end{tikzpicture}
+\caption{纯 PyTorch 双模态对称 InfoNCE 对比对齐实测结果（读取自 \texttt{data/infonce\_train.csv}，$N=128,\; \tau=0.15$）。两个非线性失配模态在 100 轮内实现 \texttt{100.00\%} 跨模态检索，正对余弦升至 \texttt{+0.967}，负对余弦收敛于超球面正交基线 \texttt{-0.008}。}
+\label{fig:infonce-train}
+\end{figure}
+
+\section{神经缩放定律与 Chinchilla 算力最优分配}
+\label{sec:scaling-laws}
+
+当架构固定为 Pre-LN Transformer、目标固定为自回归下一词预测后，深度学习界迎来了一个堪比统计物理热力学定律的惊人经验发现——\textbf{神经缩放定律（Neural Scaling Laws）}（Kaplan et al., 2020; Hoffmann et al., 2022）：大语言模型的测试交叉熵损失并不随架构微调剧烈抖动，而是关于模型非嵌入参数量 $N$、训练词元总数 $D$ 与总训练算力 $C$ 的极其平滑的\textbf{幂律函数}！
+
+\subsection{算力预算 $C \approx 6ND$ 的第一性原理核算}
+
+训练一个拥有 $N$ 个参数、吃进 $D$ 个词元的稠密 Transformer 需要多少浮点运算（FLOPs）？我们用第 1 章的矩阵乘法规则直接心算：
+\begin{itemize}
+  \item \textbf{前向传播}：每个参数权重在每个词元上恰好参与一次乘法与一次加法（即 $1\text{ MAC} = 2\text{ FLOPs}$），故单个词元的前向主计算量约为 $2N$ FLOPs（当序列长 $T$ 不算极端庞大时，线性投影主导于注意力内积）；
+  \item \textbf{反向传播}：回顾第 1 章线性层 VJP，每个矩阵层需算两次同等规模矩阵乘——一次传给激活输入 $\bar{X} = \bar{Y} W^\top$（$2N$ FLOPs），一次累积权重梯度 $\bar{W} = X^\top \bar{Y}$（$2N$ FLOPs），合计 $4N$ FLOPs；
+  \item \textbf{训练总算力}：前向加反向每词元耗费 $2N + 4N = 6N$ FLOPs，乘以总词元数 $D$，即得著名近似公式：
+  \begin{equation}
+    C \approx 6 N D.
+    \label{eq:compute-6nd}
+  \end{equation}
+\end{itemize}
+
+\subsection{Chinchilla 算力最优分配定理（拉格朗日乘数法严格推导）}
+
+DeepMind 的 Hoffmann 等人（2022）拟合了跨五个算力数量级的 400 余个语言模型实验，提出如下参数化损失模型：
+\begin{equation}
+  L(N, D) = E + \frac{A}{N^\alpha} + \frac{B}{D^\beta},
+  \label{eq:chinchilla-loss}
+\end{equation}
+其中 $E > 0$ 代表自然语言的不可约熵下限（即使无限大模型与无限数据也无法低于 $E$），第二项 $A N^{-\alpha}$ 刻画模型容量不足的逼近误差，第三项 $B D^{-\beta}$ 刻画有限训练数据的统计估计误差。
+
+现在假设你手握一笔固定且昂贵的 GPU 集群总算力预算 $C$（例如耗资数百万美元的 $C = 5 \times 10^{23}$ FLOPs）：\textbf{究竟应该训一个“巨无霸参数但数据少”的模型，还是“参数适中但充分喂饱海量词元”的模型？} 这正是第 4 卷第 2 章拉格朗日乘数法的完美舞台！
+
+\begin{thmBox}
+\begin{theorem}[Chinchilla 算力最优缩放定理]
+\label{thm:chinchilla}
+在固定总训练算力约束 $C = 6 N D$ 下，最小化参数化损失函数 $L(N, D) = E + A N^{-\alpha} + B D^{-\beta}$（$A, B, \alpha, \beta > 0$），其唯一全局最优的模型参数量 $N^*(C)$ 与训练词元数 $D^*(C)$ 严格服从如下幂律：
+\begin{equation}
+  N^*(C) = G \left(\frac{C}{6}\right)^a,
+  \qquad
+  D^*(C) = G^{-1} \left(\frac{C}{6}\right)^b,
+  \label{eq:chinchilla-opt}
+\end{equation}
+其中最优缩放指数与比例常数精确为：
+\begin{equation}
+  a = \frac{\beta}{\alpha + \beta}, \qquad
+  b = \frac{\alpha}{\alpha + \beta}, \qquad
+  G = \left(\frac{\alpha A}{\beta B}\right)^{\frac{1}{\alpha + \beta}}.
+  \label{eq:chinchilla-exp}
+\end{equation}
+\end{theorem}
+\begin{proof}
+构造带等式约束的拉格朗日函数（为简化代数，记 $M := C / 6$，约束为 $N D = M$）：
+\[
+  \Lambda(N, D, \lambda) = E + A N^{-\alpha} + B D^{-\beta} + \lambda (N D - M).
+\]
+对 $N$ 与 $D$ 分别求一阶驻点条件 $\frac{\partial \Lambda}{\partial N} = 0$ 与 $\frac{\partial \Lambda}{\partial D} = 0$：
+\begin{align*}
+  -\alpha A N^{-\alpha - 1} + \lambda D &= 0 \implies \alpha A N^{-\alpha} = \lambda N D = \lambda M, \\
+  -\beta B D^{-\beta - 1} + \lambda N &= 0 \implies \beta B D^{-\beta} = \lambda N D = \lambda M.
+\end{align*}
+两式右端相等，立得容量误差与数据误差的\textbf{最优均衡方程}：
+\begin{equation}
+  \alpha A N^{-\alpha} = \beta B D^{-\beta}
+  \implies D^\beta = \frac{\beta B}{\alpha A} N^\alpha.
+  \label{eq:chinchilla-balance}
+\end{equation}
+将算力约束 $D = M / N$ 代入式~\eqref{eq:chinchilla-balance}：
+\[
+  \left(\frac{M}{N}\right)^\beta = \frac{\beta B}{\alpha A} N^\alpha
+  \implies N^{\alpha + \beta} = \frac{\alpha A}{\beta B}\, M^\beta.
+\]
+两端同时开 $(\alpha + \beta)$ 次方，立即解出：
+\[
+  N^*(C) = \left(\frac{\alpha A}{\beta B}\right)^{\frac{1}{\alpha + \beta}} M^{\frac{\beta}{\alpha + \beta}}
+  = G \left(\frac{C}{6}\right)^a, \qquad a = \frac{\beta}{\alpha + \beta}.
+\]
+再代回 $D^*(C) = M / N^*(C)$，注意 $1 - a = \frac{\alpha}{\alpha + \beta} = b$，得：
+\[
+  D^*(C) = G^{-1} \left(\frac{C}{6}\right)^b, \qquad b = \frac{\alpha}{\alpha + \beta}.
+\]
+最后验证二阶充分性：消去 $D = M/N$ 后，单变量目标 $\phi(N) = E + A N^{-\alpha} + B M^{-\beta} N^{\beta}$ 的二阶导数为
+\[
+  \phi''(N) = \alpha(\alpha + 1) A N^{-\alpha - 2} + \beta(\beta - 1) B M^{-\beta} N^{\beta - 2}.
+\]
+在驻点处由式~\eqref{eq:chinchilla-balance} 有 $B M^{-\beta} N^{\beta} = \frac{\alpha}{\beta} A N^{-\alpha}$，代入得
+\[
+  \phi''(N^*) = \alpha A (N^*)^{-\alpha - 2}\Big[(\alpha + 1) + (\beta - 1)\Big]
+  = \alpha(\alpha + \beta) A (N^*)^{-\alpha - 2} > 0,
+\]
+故 $(N^*, D^*)$ 为严格全局极小值点！
+\end{proof}
+\end{thmBox}
+
+式~\eqref{eq:chinchilla-exp} 具有极深的直觉美感：指数 $a$ 和 $b$ 恰好与 $\alpha, \beta$ \textbf{交叉对应}，且 $a + b = 1$！如果损失对参数更敏感（$\alpha > \beta$），最优策略反而应把更多比例的增量算力倾注在相对“落后”的数据维度 $D$ 上（$b > a$），使两项边际收益始终保持式~\eqref{eq:chinchilla-balance} 的动态平衡。
+
+代入 Hoffmann 等人（2022）的实测拟合值：
+\[
+  E \approx 1.69, \quad A \approx 406.4, \quad B \approx 410.7, \quad \alpha \approx 0.34, \quad \beta \approx 0.28,
+\]
+立得：
+\[
+  a = \frac{0.28}{0.34 + 0.28} \approx 0.452, \qquad
+  b = \frac{0.34}{0.34 + 0.28} \approx 0.548.
+\]
+这彻底推翻了早期 Kaplan 等人（2020）“参数应远快于数据扩张（$a \approx 0.73, b \approx 0.27$）”的旧认知，揭示出\textbf{参数规模与训练词元数应当近乎等比例（$\approx 1:1$）随 $\sqrt{C}$ 同步扩张}！在百亿至千亿参数量级上，最优词元与参数比恰好落在著名的 \textbf{Chinchilla 黄金法则}附近：
+\[
+  D^* \approx 20\, N^*.
+\]
+
+\begin{example}[Gopher 280B vs Chinchilla 70B：同等算力的戏剧性逆转]
+在总算力预算均为 $C \approx 5.76 \times 10^{23}$ FLOPs 下：
+\begin{itemize}
+  \item \textbf{旧路线 Gopher}：堆出了 $N = 280\text{B}$ 参数，但受算力所限只喂了 $D = 300\text{B}$ 词元（$D/N \approx 1.07$，严重“饥饿欠训”）；
+  \item \textbf{Chinchilla 最优配比}：将参数缩小 4 倍至 $N = 70\text{B}$，把省下的算力全部用来喂饱 $D = 1.4\text{T}$ 词元（$D/N = 20$）。结果 $70\text{B}$ 的 Chinchilla 不仅在几乎全部基准上碾压 $4$ 倍大的 Gopher，而且部署推理成本也骤降为四分之一！
+\end{itemize}
+\textbf{当代延伸（推理最优的“过训练”范式）}：Chinchilla 定律优化的是\emph{纯训练算力}。但在实际工业部署中，一个开源模型（如 Llama-3 8B）会被全球用户推理数十亿次！把推理成本摊入生命周期总成本后，最划算的策略是有意\textbf{超越 Chinchilla 比例做“过训练（Over-training）”}——例如 Llama-3 8B 喂入了高达 $15\text{T}$ 词元（$D/N \approx 1875$），用一次性的超额预训练算力换取了一个极小、极快、极强的推理利器。
+\end{example}
+
+\begin{failBox}{自监督预训练与对比学习三大高频踩坑}
+\begin{enumerate}
+  \item \textbf{对比学习没有负样本导致“表征坍缩（Representation Collapse）”}：若只保留式~\eqref{eq:align-uniform} 中的正对对齐项 $-\inner{\hat{z}_i^A}{\hat{z}_i^B}$ 而删去负样本分母，优化器会在三步之内找到一个完美零损失的作弊解——把所有输入统统映射为同一个常向量 $\hat{z} \equiv c$！所有样本余弦相似度全为 $+1$，表征彻底报废。
+  \item \textbf{温度 $\tau$ 设定极端导致训练停滞或发散}：在单位超球面上 $\cos \in [-1, 1]$，若忘记除以温度（即默认 $\tau = 1$），$\exp(\pm 1)$ 仅相差 $7.4$ 倍，哪怕有 128 个负样本，损失也很难压低、梯度软弱无力；反之若把 $\tau$ 设得过小（如 $0.002$），logits 高达 $500$，瞬间触发 $\exp$ 上溢 \texttt{NaN} 或梯度爆炸。经验甜蜜区通常在 $\tau \in [0.05, 0.2]$。
+  \item \textbf{盲目追求大参数量而忽视数据配比（算力次优陷阱）}：在个人或实验室有限算力下，强行训练一个数十亿参数却只看了一点数据的“欠训巨兽”，不仅验证困惑度远逊于同算力充分训练的小模型，还会消耗成倍的显存与推理延迟。先按式~\eqref{eq:chinchilla-opt} 核算 $C \approx 6ND$ 与数据预算，是当代训练大模型的第一铁律。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{视觉自监督（MAE / DINO）与大模型“涌现能力”之辩}
+\begin{itemize}
+  \item \textbf{掩码自编码器（MAE；He et al., 2022）}：为何把 BERT 的 $15\%$ 掩码直接照搬到图像上效果平平？因为图像像素具有极高的空间冗余（遮掉 $15\%$ 靠周边插值就能猜出，无需理解物体）。MAE 将掩码比例大幅拉高至惊人的 \textbf{$75\%$}，且仅将可见的 $25\%$ 图像块送入重型 ViT 编码器（提速 $3\sim 4\times$），再配一个极轻量解码器重建被遮盖像素，彻底激发了视觉高层语义！
+  \item \textbf{无需负样本也能防坍缩的 DINO（Caron et al., 2021）}：通过\textbf{动量教师（EMA Teacher）自蒸馏}与两大对称破缺技巧——\textbf{中心化（Centering，防模型坍缩到单一类别）}与\textbf{锐化（Sharpening，防输出退化为均匀分布）}，在完全不使用负样本的情况下让 ViT 自发学会了像素级前景物体分割！
+  \item \textbf{“涌现能力（Emergent Abilities）”是物理相变还是度量幻觉？}：随着模型参数与算力跨越临界点，算术推理与代码生成准确率常呈现“先躺平为零、后突然飙升”的陡峭曲线。Schaeffer 等人（2023）提出尖锐反驳：底层交叉熵损失其实一直沿着式~\eqref{eq:chinchilla-loss} 平滑幂律下降！所谓的“陡崖涌现”，很大程度上源于\textbf{整句精确匹配（Exact Match）等非线性指标的指数放大效应}——回忆第~\ref{ch:attention-transformer} 章图~\ref{fig:minigpt-train} 中的 6 词序列反转实验：当逐词准确率 $p$ 从 $0.4$ 升至 $0.99$ 时，整句 6 词全对概率 $p^6$ 会从 $0.004$ 突然跳变到 $0.94$！平滑的逐词对数似然改进，经过连乘度量后就会折射出惊艳的宏观相变。
+\end{itemize}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章打通了现代基础模型从“原始无标注数据”成长为“通用智能底座”的完整数学链条：
+\begin{itemize}
+  \item \textbf{BPE 子词词元化}以贪心高频合并平衡了词表规模与序列长度，同时彻底消灭了 OOV；
+  \item \textbf{MLM 与 CLM} 揭示了自监督学习的两种核心构造，而因果下一词预测凭借 $100\%$ 词元监督效率与精确概率链式分解，奠定了现代大语言模型的主流地位；
+  \item \textbf{对比学习 InfoNCE} 在信息论上严格给出互信息下界 $I(X; Y) \ge \ln N - \mathcal{L}_N^{\mathrm{InfoNCE}}$，在几何上统一了超球面 $\mathbb{S}^{d-1}$ 的正对对齐与负对均匀排斥，双模态实测以 10 行核心代码取得 $100\%$ 跨模态检索；
+  \item \textbf{Chinchilla 缩放定律}用拉格朗日乘数法证明了最优算力分配幂律 $a = \frac{\beta}{\alpha+\beta},\; b = \frac{\alpha}{\alpha+\beta}$，将大模型研发从“盲目炼丹”带入了可预测的定量工程科学。
+\end{itemize}
+至此，我们已经能用深度网络做判别、表征对齐与离散文本自回归生成。但对于连续世界里绚丽多彩的图像、音频与分子三维构象，该如何从纯噪声中凭空“画”出栩栩如生的样本？下一章（本卷压轴章），我们将从第 4 卷 EM 算法的 ELBO 启程，一举征服 \textbf{VAE、扩散模型（DDPM）与流匹配（Flow Matching）}！
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{熟练掌握 BPE 合并追踪、困惑度计算与算力配比估算}
+
+\begin{enumerate}
+  \item[\textbf{5.5.1}] \textbf{BPE 分词手算与新词切分}：给定微型语料及词频：\texttt{hug}（10）、\texttt{pug}（5）、\texttt{pun}（12）、\texttt{bun}（4）、\texttt{hugs}（5），均在词尾加 \texttt{</w>}。
+  \begin{enumerate}
+    \item 列出初始字符词表，并手工追踪前 4 轮 BPE 合并（给出每轮最高频符号对、频次与新符号）；
+    \item 使用这 4 条合并规则，切分未登录测试词 \texttt{bugs</w>} 与 \texttt{puns</w>}。
+  \end{enumerate}
+  \exHint{第 1 轮统计 \texttt{(u, g)} 出现 $10+5+5 = 20$ 次，\texttt{(u, n)} 出现 $12+4 = 16$ 次，故先合并 \texttt{ug}！}
+
+  \item[\textbf{5.5.2}] \textbf{困惑度、交叉熵与 Chinchilla 算力预算换算}：
+  \begin{enumerate}
+    \item 某中文大模型词表 $|V| = 100{,}000$。若模型在某测试集上每词元平均交叉熵损失为 $\mathcal{L}_{\mathrm{CE}} = 2.3026$ nats，其困惑度 $\mathrm{PPL}$ 是多少？若采用每词元平均信息量（单位：比特/词元，即 bits-per-token），该模型相比完全盲猜压缩了多少倍？
+    \item 假设你拥有 $64$ 张峰值 BF16 算力为 $1000\text{ TFLOPS}$、实际算力利用率（MFU）为 $40\%$ 的 GPU，连续训练 $14$ 天。计算总有效算力 $C$（单位 FLOPs），并按 Chinchilla 法则 $C \approx 6ND$ 与 $D^* \approx 20 N^*$，算出你应当训练的最优模型参数量 $N^*$ 与词元数 $D^*$。
+  \end{enumerate}
+  \exHint{14 天 $= 14 \times 86{,}400 = 1{,}209{,}600$ 秒；由 $C = 6 N (20 N) = 120 N^2$ 立得 $N^* = \sqrt{C / 120}$。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{严格推导 InfoNCE 梯度动力学与缩放定律约束极值}
+
+\begin{enumerate}
+  \item[\textbf{5.5.3}] \textbf{InfoNCE 的硬负样本聚焦定理}：给定单位球面上的锚点 $\hat{z}_i^A$ 与负样本集合 $\{\hat{z}_j^B\}_{j\ne i}$，记余弦相似度 $s_j = \inner{\hat{z}_i^A}{\hat{z}_j^B}$。根据式~\eqref{eq:infonce-grad}，负样本 $j$ 贡献的相对梯度权重为 $w_j(\tau) = \frac{p_{ij}}{\sum_{m \ne i} p_{im}} = \frac{\exp(s_j / \tau)}{\sum_{m \ne i} \exp(s_m / \tau)}$。
+  \begin{enumerate}
+    \item 证明当 $\tau \to 0^+$ 时，$w_j(\tau)$ 趋近于仅在最难负样本 $j^* = \argmax_{j \ne i} s_j$ 上取 $1$ 的单热分布（假设最大值唯一），此时 InfoNCE 退化为经典的\textbf{三元组硬挖掘损失（Hard-Negative Triplet Loss）}；
+    \item 证明当 $\tau \to +\infty$ 时，$w_j(\tau) \to \frac{1}{N-1}$，且一阶泰勒展开显示所有负样本按相等权重贡献排斥力。
+  \end{enumerate}
+  \exHint{分子分母同除以 $\exp(s_{j^*} / \tau)$ 即可立得 $\tau \to 0^+$ 极限。}
+
+  \item[\textbf{5.5.4}] \textbf{含推理摊销成本的广义缩放最优解}：真实工业大模型不仅要付训练算力 $C_{\text{train}} = 6 N D$，上线后还要服务总计 $D_{\text{inf}}$ 个推理词元（每个生成词元的前向主计算量约为 $2 N$ FLOPs），故全生命周期总算力为：
+  \[
+    C_{\text{total}} = 6 N D + 2 N D_{\text{inf}}.
+  \]
+  在固定总预算 $C_{\text{total}}$ 下最小化式~\eqref{eq:chinchilla-loss} 的测试损失 $L(N, D)$。用拉格朗日乘数法推导新的均衡方程，并证明：只要 $D_{\text{inf}} > 0$，最优词元参数比 $D^* / N^*$ 严格\textbf{大于}纯训练最优的 Chinchilla 比值（解释为何 Llama-3 8B 要在 15T 词元上“过训练”！）。
+  \exHint{新约束对 $N$ 求导多出 $2\lambda D_{\text{inf}}$，均衡条件变为 $\alpha A N^{-\alpha} = \beta B D^{-\beta}\!\left(1 + \frac{D_{\text{inf}}}{3D}\right) > \beta B D^{-\beta}$。}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{亲手编写 BPE 分词器与温度/批大小消融实验}
+
+\begin{enumerate}
+  \item[\textbf{5.5.5}] \textbf{30 行纯 Python 从零实现微型 BPE 分词器}：不依赖任何第三方库，编写 \texttt{train\_bpe(corpus, num\_merges)} 与 \texttt{encode(word, merges)} 两个函数，在例~\ref{ex:bpe-trace} 的语料与《天书中的智能》一段 500 词英文技术段落上运行 50 轮合并。打印前 15 条学到的合并规则以及压缩前后的总词元数对比。
+  \exHint{用 \texttt{collections.Counter} 统计相邻二元组频次，合并时线性扫描替换即可。}
+
+  \item[\textbf{5.5.6}] \textbf{InfoNCE 温度 $\tau$ 与批大小 $N$ 消融实验}：基于代码~\ref{lst:infonce} 与实验脚本 \texttt{vol5\_experiments.py} 中的对比函数 \texttt{exp5\_\allowbreak infonce\_\allowbreak contrastive}：
+  \begin{enumerate}
+    \item 固定 $N = 128$，对比 $\tau \in \{0.02,\; 0.15,\; 1.0,\; 5.0\}$ 四组温度在 200 轮后的 Top-1 检索率、\texttt{pos\_cos} 与 \texttt{neg\_cos}；
+    \item 固定 $\tau = 0.15$，分别用小批对比（每次从 128 样本中随机抽子批 $B \in \{8, 32, 128\}$）训练 200 轮，在全部 128 样本上评测全局 Top-1 检索率，定量验证定理~\ref{thm:infonce-mi} 中批大小对互信息下界的收紧作用！
+  \end{enumerate}
+  \exHint{注意在 $\tau = 1.0$ 和 $5.0$ 时观察 \texttt{neg\_cos} 与收敛速度是否显著恶化。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{探索 SigLIP、数据质量缩放律与合成数据坍缩}
+
+\begin{enumerate}
+  \item[\textbf{5.5.7}] \textbf{从 Softmax InfoNCE 到 Sigmoid 逐对对比（SigLIP）}：标准 CLIP 的 $\softmax$ 分母需要跨所有 GPU 执行全局 \texttt{all-gather} 同步才能拼出完整的 $N \times N$ 矩阵，成为超大规模分布式训练的通信瓶颈。Zhai 等人（2023）提出的 \textbf{SigLIP} 彻底放弃了 $\softmax$，把 $N \times N$ 矩阵的每一格当作独立的二元逻辑回归（正对标签 $+1$，负对标签 $-1$，配可学习偏置 $b$ 与温度 $t$）：
+  \[
+    \mathcal{L}_{\mathrm{SigLIP}} = -\frac{1}{N}\sum_{i=1}^{N}\sum_{j=1}^{N} \ln \frac{1}{1 + \exp\!\big(-y_{ij}(t\, S_{ij} + b)\big)}.
+  \]
+  分析 SigLIP 为何在分布式显存和通信上极具优势，且为何必须引入负初始化偏置 $b \approx -10$ 才能防止初期压倒性多数的负样本淹没正样本梯度？
+  \exHint{当 $N = 32768$ 时正负样本比例高达 $1 : 32767$，初始 $b \approx -\ln N$ 恰好把先验赔率拉平！}
+
+  \item[\textbf{5.5.8}] \textbf{高质量数据饱和与“模型坍缩（Model Collapse）”}：随着全网高质量公开人类文本接近被消费殆尽（约 $10^{13}\sim 10^{14}$ 词元），Chinchilla 公式~\eqref{eq:chinchilla-loss} 隐含的“每词元独立同分布且永不重复”假设面临挑战。查阅 Muennighoff 等人（2023）的\textbf{数据受限缩放定律（Data-Constrained Scaling Laws）}（重复训练至多 4 轮几乎无损，超过后边际收益指数衰减）以及 Shumailov 等人（2024）关于用 AI 生成数据递归训练下一代模型引发\textbf{分布尾部退化（Model Collapse）}的理论，探讨为何“可验证的合成数据（如数学证明验证器与代码单元测试筛选）”有望打破这一诅咒？
+  \exHint{纯无筛选自采样会因有限样本方差逐代抹除长尾概率质量；而外部验证器（如 Lean 证明检查器或编译器）注入了真实的新信息（负熵）！}
+\end{enumerate}

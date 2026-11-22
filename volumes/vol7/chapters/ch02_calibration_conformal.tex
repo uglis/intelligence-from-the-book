@@ -1,0 +1,628 @@
+\chapter[不确定性量化、模型校准与共形预测]{不确定性量化、模型校准\\与分布无关共形预测}\label{ch:calibration-conformal}
+
+\chapEpigraph{知之为知之，不知为不知，是知也。}{孔子（《论语·为政》）}
+
+\begin{chapIntro}{本章核心问题与学习地图}
+在医疗影像辅助诊断、自动驾驶感知、金融风控与大语言模型推理等高风险场景中，“分类准确率有多高”只是硬币的一面；同等甚至更关键的另一面是：\textbf{当模型给出 $95\%$ 置信度时，它真的有 $95\%$ 的把握吗？当遇到训练分布之外的陌生输入时，模型是否知道自己“不知道”并主动拒答或交给人来复核？}
+
+遗憾的是，现代高容量深度神经网络普遍存在严重的\textbf{过度自信（Overconfidence）}：即便实际准确率只有 $60\%$，Softmax 输出的最大概率也常常高达 $0.95$ 以上。本章将建立一套从“概率语义”到“有限样本数学保证”的完整不确定性量化体系：
+\begin{enumerate}
+  \item \textbf{不确定性分解与恰当评分规则}：区分偶然不确定性与认知不确定性，严格证明对数评分（NLL）与 Brier 评分的严格恰当性；
+  \item \textbf{模型校准与温度缩放}：定义期望校准误差（ECE）与可靠性图，证明温度缩放（Temperature Scaling）的保序准确率不变性与逆温度凸性，并用实测数据见证 ECE 骤降 $12\times$；
+  \item \textbf{分布外（OOD）检测}：对比最大 Softmax 概率（MSP）与能量分数（Energy Score），联通对数配分函数与输入密度估计；
+  \item \textbf{分裂共形预测（Split Conformal Prediction）}：本章的桂冠定理——仅凭可交换性，证明任意黑箱模型、任意未知分布下的有限样本分布无关覆盖率保证。
+\end{enumerate}
+\end{chapIntro}
+
+\section{两类不确定性与深度神经网络的过度自信根源}
+
+在讨论任何概率校准方法之前，必须先厘清不确定性的两种截然不同的物理与统计来源：
+
+\begin{itemize}
+  \item \textbf{偶然不确定性（Aleatoric Uncertainty，又称数据不确定性）}：源于数据生成过程本身固有的随机性、传感器噪声或标注歧义（例如模糊的 X 光片、人类标注员本身也存在 $30\%$ 分歧的样本）。即便给你无限多训练数据，条件分布 $p^*(Y \mid X=x)$ 的熵 $H(Y \mid X=x)$ 也无法进一步压低——它是贝叶斯最优风险的不可约下界。
+  \item \textbf{认知不确定性（Epistemic Uncertainty，又称模型不确定性）}：源于训练样本有限或测试输入落在了训练数据从未覆盖的区域（分布外样本，OOD）。随着收集更多相关数据，认知不确定性原则上可以不断缩小直至趋近于 $0$。
+\end{itemize}
+
+\subsection{为什么现代深度神经网络越来越“盲目自信”？}
+
+Guo 等人（ICML 2017）在一项里程碑式的实证研究中发现了一个令人震惊的反差：1998 年的浅层 LeNet 虽然准确率不高，但概率校准相当良好；而 2016 年的 110 层 ResNet 虽然准确率遥遥领先，其预测概率却严重偏离真实频率——置信度 $0.95$ 的样本组里，真实正确率往往只有 $0.70$ 左右。
+
+这一现象背后有着非常清晰的优化动力学原因。考虑多分类交叉熵损失（即负对数似然 NLL）：
+\[
+  \ell(z, y) = -\ln \softmax(z)_y = \ln\!\left(\sum_{k=1}^K e^{z_k}\right) - z_y,
+\]
+其中 $z = f_\theta(x) \in \R^K$ 是未归一化的逻辑值（Logits）。现代过参数化网络（如 ResNet、Transformer）在训练中期往往已经达到 $0\%$ 训练分类错误率，即对每条训练样本都有 $z_{i,y_i} > \max_{k\neq y_i} z_{i,k}$。此时，交叉熵损失尚未等于 $0$！梯度下降依然会持续推动网络\textbf{把权重范数 $\|\theta\|_2$ 不断拉大}：若把所有逻辑值整体放大 $c > 1$ 倍（$z \mapsto c z$），只要预测类别本就是对的，就有
+\[
+  \lim_{c\to +\infty} \Big(-\ln \softmax(c z)_{y_i}\Big) = 0.
+\]
+在训练集上，放大逻辑值可以无代价地把交叉熵一路压到 $0$；但在测试集上，一旦遇到分错的样本或存在固有歧义的样本，被放大了数倍的逻辑值就会经过指数函数 $\exp(\cdot)$ 产生极端尖锐的 Softmax 分布（例如 $[0.992,\, 0.004,\, 0.003,\, 0.001]$），从而制造出灾难性的过度自信。
+
+\begin{recallBox}{KL 散度非负性与吉布斯不等式（第 2 卷）}
+设 $q, p \in \Delta^{K-1}$ 为两个离散概率分布（满足 $q_k, p_k > 0$ 且 $\sum_{k=1}^K q_k = \sum_{k=1}^K p_k = 1$）。由凹函数 $\ln u \le u - 1$（等号当且仅当 $u=1$ 成立），立即得到 Kullback--Leibler 散度非负性（吉布斯不等式）：
+\[
+  \DKL(q \,\|\, p) = \sum_{k=1}^K q_k \ln \frac{q_k}{p_k}
+  = -\sum_{k=1}^K q_k \ln \frac{p_k}{q_k}
+  \ge -\sum_{k=1}^K q_k \left(\frac{p_k}{q_k} - 1\right) = 1 - 1 = 0,
+\]
+且等号 $\DKL(q \,\|\, p) = 0$ 成立的充要条件是 $p_k = q_k$ 对所有 $k=1,\dots,K$ 成立。
+\end{recallBox}
+
+\section{恰当评分规则（Proper Scoring Rules）的严格证明}
+
+如何从数学上评判一个模型输出的“概率分布 $p$”到底好不好？如果只用 0-1 分类错误率来考核，模型把真实概率 $[0.6, 0.4]$ 虚报成 $[0.9999, 0.0001]$ 不会受到任何惩罚！因此，我们需要能够\textbf{激励模型诚实汇报真实条件概率 $q(Y \mid X)$} 的损失函数——这就是\textbf{恰当评分规则（Proper Scoring Rules）}。
+
+\begin{defBox}
+\begin{definition}[恰当评分规则与严格恰当评分规则]\label{def:proper-scoring}
+设类别空间为 $\mathcal{Y} = \{1,\dots,K\}$，概率单纯形为 $\Delta^{K-1} = \{p \in \R_{\ge 0}^K : \sum_{k=1}^K p_k = 1\}$。损失型评分规则 $S: \Delta^{K-1} \times \mathcal{Y} \to \R \cup \{+\infty\}$（值越小越好）称为：
+\begin{itemize}
+  \item \textbf{恰当的（Proper）}：若对任意真实分布 $q \in \Delta^{K-1}$ 与任意预测分布 $p \in \Delta^{K-1}$，均有
+  \[
+    \E_{Y \sim q}[S(q, Y)] \le \E_{Y \sim q}[S(p, Y)];
+  \]
+  \item \textbf{严格恰当的（Strictly Proper）}：若上述不等式的等号成立\textbf{当且仅当} $p = q$。
+\end{itemize}
+\end{definition}
+\end{defBox}
+
+下面证明机器学习中最核心的两种概率评估指标——\textbf{负对数似然（Log Score / NLL）}与\textbf{Brier 评分（Brier Score）}——都是严格恰当评分规则。
+
+\begin{thmBox}
+\begin{theorem}[NLL 与 Brier 评分的严格恰当性定理]\label{thm:proper-rules}
+设真实类别分布为 $q \in \Delta^{K-1}$，模型预测分布为 $p \in \Delta^{K-1}$。
+\begin{enumerate}
+  \item \textbf{对数评分（负对数似然）} $S_{\mathrm{NLL}}(p, y) = -\ln p_y$ 是严格恰当的，且期望损失满足精确分解：
+  \begin{equation}\label{eq:nll-decomp}
+    \E_{Y \sim q}\big[-\ln p_Y\big] = H(q) + \DKL(q \,\|\, p) \ge H(q),
+  \end{equation}
+  等号成立当且仅当 $p = q$。
+  \item \textbf{二分类 Brier 评分}（$Y \in \{0,1\} \sim \operatorname{Bernoulli}(q)$，预测正类概率 $p \in [0,1]$）$S_{\mathrm{BS}}(p, y) = (p - y)^2$ 是严格恰当的，且精确满足方差--偏差分解：
+  \begin{equation}\label{eq:brier-binary}
+    \E_{Y \sim \operatorname{Bern}(q)}\big[(p - Y)^2\big] = \Var(Y) + (p - q)^2 = q(1-q) + (p - q)^2,
+  \end{equation}
+  唯一在 $p = q$ 处取得极小值 $q(1-q)$。
+  \item \textbf{多分类 Brier 评分} $S_{\mathrm{BS}}(p, y) = \norm{p - e_y}_2^2$（其中 $e_y \in \{0,1\}^K$ 为第 $y$ 类的独热向量）同样是严格恰当的，且满足
+  \begin{equation}\label{eq:brier-multi}
+    \E_{Y \sim q}\!\left[\norm{p - e_Y}_2^2\right] = \sum_{k=1}^K q_k(1-q_k) + \norm{p - q}_2^2,
+  \end{equation}
+  唯一在 $p = q$ 处取得极小值。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一部分（NLL）：}
+按期望定义展开并加减真实分布的信息熵 $H(q) = -\sum_{k=1}^K q_k \ln q_k$（约定 $0\ln 0 = 0$）：
+\begin{align*}
+  \E_{Y \sim q}[-\ln p_Y]
+  &= -\sum_{k=1}^K q_k \ln p_k
+   = -\sum_{k=1}^K q_k \ln q_k + \sum_{k=1}^K q_k \ln \frac{q_k}{p_k}
+   = H(q) + \DKL(q \,\|\, p).
+\end{align*}
+注意 $H(q)$ 仅依赖于数据固有的偶然不确定性，与模型预测 $p$ 无关。由吉布斯不等式，对所有 $p \in \Delta^{K-1}$ 均有 $\DKL(q \,\|\, p) \ge 0$，且等号成立当且仅当 $p = q$。因此 $p^* = q$ 是全局唯一极小值点。
+
+\textbf{第二部分（二分类 Brier 评分）：}
+由于 $\E[Y] = q$，在平方项内加减 $q$ 并展开：
+\begin{align*}
+  \E\big[(p - Y)^2\big]
+  &= \E\Big[\big((p - q) + (q - Y)\big)^2\Big] \\
+  &= (p - q)^2 + 2(p - q)\underbrace{\E[q - Y]}_{=\,q - q \,=\, 0} + \E\big[(Y - q)^2\big] \\
+  &= \Var(Y) + (p - q)^2 = q(1-q) + (p - q)^2.
+\end{align*}
+因为 $\Var(Y) = q(1-q)$ 与 $p$ 无关，而 $(p-q)^2 \ge 0$ 仅在 $p=q$ 时取 $0$，故二分类 Brier 评分严格恰当。
+
+\textbf{第三部分（多分类 Brier 评分）：}
+注意到随机独热向量 $e_Y$ 的期望向量恰为 $\E[e_Y] = q$。对欧氏平方范数做完全类似的正交分解：
+\begin{align*}
+  \E\big[\norm{p - e_Y}_2^2\big]
+  &= \E\big[\norm{(p - q) + (q - e_Y)}_2^2\big] \\
+  &= \norm{p - q}_2^2 + 2\inner{p - q}{\underbrace{\E[q - e_Y]}_{=\,0}} + \E\big[\norm{e_Y - q}_2^2\big].
+\end{align*}
+而对每一坐标 $k \in \{1,\dots,K\}$，指示变量 $(e_Y)_k \sim \operatorname{Bernoulli}(q_k)$，故 $\E[\norm{e_Y - q}_2^2] = \sum_{k=1}^K \Var((e_Y)_k) = \sum_{k=1}^K q_k(1-q_k)$。代入即得式 \eqref{eq:brier-multi}，显然在且仅在 $p = q$ 时取到严格极小值。
+\end{proof}
+
+\begin{insightBox}{NLL 与 Brier 评分在惩罚过度自信上的行为差异}
+虽然两者都是严格恰当评分规则，但它们的尾部惩罚截然不同：当真实事件发生（$Y=1$）而模型极度自信地预测 $p = 0.001$ 时，Brier 评分的损失有界（$(1 - 0.001)^2 \approx 0.998 \le 1$），而 NLL 会给出高达 $-\ln(0.001) \approx 6.91$ 的严厉惩罚（当 $p \to 0$ 时发散到 $+\infty$）。因此，NLL 对“极度自信的错判”极为敏感，非常适合用作校准拟合目标；而 Brier 评分由于有界，对偶发标注噪声（Label Noise）更为稳健。
+\end{insightBox}
+
+\section{期望校准误差（ECE）与可靠性图}
+
+一个分类器输出预测类别 $\hat{Y} = \argmax_k \hat{p}_k(X)$ 与其最高置信度 $\hat{P} = \max_k \hat{p}_k(X) \in [1/K, 1]$。所谓\textbf{完美置信度校准（Perfect Confidence Calibration）}，要求模型声称的把握与经验真实命中率处处一致：
+\begin{equation}\label{eq:perfect-calib}
+  \Prob\!\big(\hat{Y} = Y \;\big|\; \hat{P} = p\big) = p, \qquad \forall p \in [0, 1].
+\end{equation}
+由于有限样本中几乎不会有两条样本的连续置信度 $\hat{P}_i$ 恰好相等，工程上将区间 $[0,1]$ 均匀划分为 $B$ 个互不相交的分箱（Bins，常取 $B=10$ 或 $B=15$）：$I_b = \big(\frac{b-1}{B}, \frac{b}{B}\big]$（首箱含 $0$）。落入第 $b$ 个分箱的测试样本索引集合记为 $B_b = \{i \in \{1,\dots,N\} : \hat{P}_i \in I_b\}$。
+
+对每个非空分箱 $B_b$，定义该箱的\textbf{平均准确率}与\textbf{平均置信度}：
+\[
+  \mathrm{acc}(B_b) = \frac{1}{|B_b|}\sum_{i \in B_b} \mathbf{1}\{\hat{y}_i = y_i\},
+  \qquad
+  \mathrm{conf}(B_b) = \frac{1}{|B_b|}\sum_{i \in B_b} \hat{p}_i.
+\]
+据此，\textbf{期望校准误差（Expected Calibration Error, ECE）}定义为各箱置信度与准确率之差的样本加权平均绝对偏差：
+\begin{equation}\label{eq:ece-def}
+  \ECE = \sum_{b=1}^B \frac{|B_b|}{N}\,\abs{\mathrm{acc}(B_b) - \mathrm{conf}(B_b)}.
+\end{equation}
+在以分箱置信度为横轴、分箱准确率为纵轴的\textbf{可靠性图（Reliability Diagram）}中：
+\begin{itemize}
+  \item 完美的校准曲线应当严丝合缝地贴合 $45^\circ$ 对角线 $y = x$；
+  \item 若曲线整体位于对角线\textbf{下方}（$\mathrm{acc}(B_b) < \mathrm{conf}(B_b)$），说明模型\textbf{过度自信}；
+  \item 若曲线位于对角线\textbf{上方}（$\mathrm{acc}(B_b) > \mathrm{conf}(B_b)$），说明模型\textbf{欠自信（保守）}。
+\end{itemize}
+此外，在高风险安全审计中还常汇报\textbf{最大校准误差} $\operatorname{MCE} = \max_{b:|B_b|>0} |\mathrm{acc}(B_b) - \mathrm{conf}(B_b)|$，以刻画最差置信区间的失准程度。需要提醒的是，等宽分箱 ECE 对箱数 $B$ 和稀疏分箱有一定敏感性（例如所有预测都挤在 $[0.9, 1.0]$ 时，前 9 个分箱几乎为空）；严谨分析中常辅以等样本量自适应分箱（Adaptive ECE）以及无需分箱的 NLL 与 Brier 评分交叉印证。
+
+\section{温度缩放（Temperature Scaling）与保序不变性定理}
+
+既然深度网络过度自信的罪魁祸首是逻辑值尺度被过度拉伸，最简洁而惊人有效的事后校准方法（Post-Hoc Calibration）便是 Guo 等人（2017）推广的\textbf{温度缩放（Temperature Scaling）}：冻结已训练好的模型权重，仅引入\textbf{唯一一个标量温度参数 $T > 0$}，将每条样本的逻辑向量 $z_i \in \R^K$ 统一缩放后再送入 Softmax：
+\begin{equation}\label{eq:temp-scaling}
+  p_i(T) = \softmax\!\left(\frac{z_i}{T}\right),
+  \qquad
+  p_{i,k}(T) = \frac{\exp(z_{i,k} / T)}{\sum_{j=1}^K \exp(z_{i,j} / T)}.
+\end{equation}
+当 $T > 1$ 时，逻辑值差距被“降温软化”，输出分布趋向平滑（抑制过度自信）；当 $T \to +\infty$ 时趋于均匀分布 $[1/K,\dots,1/K]$；当 $0 < T < 1$ 时分布变尖锐。最优温度 $T^*$ 在独立的\textbf{校准验证集} $\mathcal{D}_{\text{cal}} = \{(z_i, y_i)\}_{i=1}^{N_{\text{cal}}}$ 上通过最小化严格恰当的负对数似然（NLL）求解：
+\begin{equation}\label{eq:temp-opt}
+  T^* = \argmin_{T > 0}\; \left\{ -\frac{1}{N_{\text{cal}}} \sum_{i=1}^{N_{\text{cal}}} \ln \softmax\!\left(\frac{z_i}{T}\right)_{y_i} \right\}.
+\end{equation}
+
+温度缩放之所以成为工业界与学术界默认首选的事后校准基准，依托于下面两条美妙的数学性质。
+
+\begin{thmBox}
+\begin{theorem}[温度缩放的保序准确率不变性与逆温度凸性]\label{thm:temp-scaling}
+对任意逻辑向量 $z = (z_1,\dots,z_K) \in \R^K$ 与任意正温度 $T > 0$，温度缩放 \eqref{eq:temp-scaling} 满足：
+\begin{enumerate}
+  \item \textbf{严格保序性与 Top-1 准确率绝对不变}：对任意两类别 $j, k \in \{1,\dots,K\}$，
+  \begin{equation}\label{eq:order-preserving}
+    z_j > z_k \;\Longleftrightarrow\; \softmax(z/T)_j > \softmax(z/T)_k.
+  \end{equation}
+  因此，校准前后模型的预测类别集合完全一致：
+  \[
+    \argmax_{1\le k\le K} \softmax\!\left(\frac{z}{T}\right)_k \;=\; \argmax_{1\le k\le K} z_k,
+  \]
+  从而 Top-1 准确率（乃至任意 Top-$m$ 排序准确率）\textbf{百分百保持不变}！
+  \item \textbf{关于逆温度 $\beta = 1/T > 0$ 的全局凸性}：记校准集负对数似然为 $\mathcal{L}(\beta) = \frac{1}{N_{\text{cal}}}\sum_{i=1}^{N_{\text{cal}}}\big(\ln\sum_{k=1}^K e^{\beta z_{i,k}} - \beta z_{i,y_i}\big)$。则 $\mathcal{L}(\beta)$ 是关于 $\beta \in (0, +\infty)$ 的光滑凸函数，其二阶导数恰为逻辑值在当前预测分布下的平均方差：
+  \begin{equation}\label{eq:temp-convex}
+    \frac{\mathrm{d}^2 \mathcal{L}}{\mathrm{d}\beta^2}
+    = \frac{1}{N_{\text{cal}}} \sum_{i=1}^{N_{\text{cal}}} \Var_{k \sim p_i(\beta)}\!\big(z_{i,k}\big) \;\ge\; 0.
+  \end{equation}
+  因此一维优化问题 \eqref{eq:temp-opt} 不存在任何伪局部极小值，牛顿法或一维网格搜索都能稳健收敛到全局最优 $T^*$。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一部分（保序不变性）：}
+给定 $T > 0$，线性缩放 $u \mapsto u/T$ 严格单调递增；自然指数函数 $v \mapsto e^v$ 在 $\R$ 上严格单调递增；归一化常数 $Z(T) = \sum_{r=1}^K e^{z_r/T} > 0$ 是严格正数且对所有类别 $k$ 相同。于是对任意 $j, k$：
+\[
+  z_j > z_k
+  \;\Longleftrightarrow\; \frac{z_j}{T} > \frac{z_k}{T}
+  \;\Longleftrightarrow\; e^{z_j/T} > e^{z_k/T}
+  \;\Longleftrightarrow\; \frac{e^{z_j/T}}{Z(T)} > \frac{e^{z_k/T}}{Z(T)}.
+\]
+因为严格偏序完全保持不变，最大值（以及从大到小的前 $m$ 个类别）下标集合绝不发生改变，故 Top-1 准确率严格不变。
+
+\textbf{第二部分（逆温度凸性）：}
+令 $A_i(\beta) = \ln\sum_{k=1}^K e^{\beta z_{i,k}}$（对数配分函数，第 2 卷与第 4 卷的 Log-Sum-Exp 凸函数）。对其关于 $\beta$ 求一阶导数，得
+\[
+  A_i'(\beta) = \frac{\sum_{k=1}^K z_{i,k}\, e^{\beta z_{i,k}}}{\sum_{j=1}^K e^{\beta z_{i,j}}} = \sum_{k=1}^K p_{i,k}(\beta)\, z_{i,k} = \E_{k \sim p_i(\beta)}[z_{i,k}].
+\]
+再对 $\beta$ 求二阶导数（利用 $\frac{\mathrm{d}}{\mathrm{d}\beta} p_{i,k}(\beta) = p_{i,k}(\beta)\big(z_{i,k} - A_i'(\beta)\big)$）：
+\begin{align*}
+  A_i''(\beta)
+  &= \sum_{k=1}^K z_{i,k}\, p_{i,k}(\beta)\big(z_{i,k} - \E_{p_i}[z_i]\big) \\
+  &= \sum_{k=1}^K p_{i,k}(\beta)\, z_{i,k}^2 - \big(\E_{p_i}[z_i]\big)^2
+   = \Var_{k \sim p_i(\beta)}(z_{i,k}) \ge 0.
+\end{align*}
+由于线性项 $-\beta z_{i,y_i}$ 的二阶导数为 $0$，对所有样本求平均即得式 \eqref{eq:temp-convex}，证明 $\mathcal{L}(\beta)$ 在 $(0,+\infty)$ 上全局凸。只要至少存在一条样本的逻辑值不是全相等常数，就有严格凸性 $A_i''(\beta) > 0$，保证全局最优解唯一。
+\end{proof}
+
+\subsection{实测验证：温度缩放如何将 ECE 骤降 12 倍且丝毫不伤准确率}
+
+配套实验 \texttt{code/vol7\_experiments.py} 中的 \texttt{exp2\_calibration\_and\_conformal} 构造了一个标准的四分类过度自信场景（$K=4$，真实逻辑值 $z_{\text{true}} \sim \mathcal{N}(0, 1.3^2 I_4)$，标签由真实 Softmax 分布采样，而过度自信模型输出放大了 $3.2\times$ 的逻辑值 $z = 3.2 z_{\text{true}}$；校准集 $N_{\text{cal}}=500$，测试集 $N_{\text{te}}=1000$）。
+
+在独立校准集上最小化 NLL 后，算法自动寻得最优温度 \textbf{$T^* = 3.35$}（非常贴近真实放大倍数 $3.2$）。在 $1000$ 条未见测试样本上的实测对比见表 \ref{tab:calib-results}，对应的可靠性图（直接读取 \texttt{data/calib\_temp.csv}）见图 \ref{fig:reliability-diagram}。
+
+\begin{table}[htbp]
+  \centering
+  \caption{四分类过度自信模型的温度缩放实测效果（$N_{\text{cal}}=500, N_{\text{te}}=1000$，Fitted $T^*=3.35$）}
+  \label{tab:calib-results}
+  \small
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    评估模型 & 温度参数 $T$ & Top-1 准确率（\%） & 期望校准误差 $\ECE$ & 测试集负对数似然 NLL \\
+    \midrule
+    原始过度自信模型 & $T = 1.00$ & $56.50\%$ & $0.2624$ & $1.5879$ \\
+    温度缩放校准后 & $T^* = 3.35$ & $56.50\%$（\textbf{严格不变}） & \textbf{$0.0221$（骤降 $12\times$）} & \textbf{$1.0198$} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.80\linewidth,
+      height=6.6cm,
+      xlabel={预测置信度分箱中点 $\mathrm{conf}(B_b)$},
+      ylabel={分箱经验准确率 $\mathrm{acc}(B_b)$},
+      xmin=0.30, xmax=1.00,
+      ymin=0.25, ymax=1.00,
+      xtick={0.35,0.45,0.55,0.65,0.75,0.85,0.95},
+      ytick={0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.00},
+      grid=major,
+      grid style={dashed, tealLine!70},
+      legend style={at={(0.03,0.97)}, anchor=north west, font=\footnotesize, fill=white, draw=tealLine},
+      label style={font=\small\sffamily, color=ink},
+      tick label style={font=\footnotesize, color=slate},
+      axis line style={color=slate}
+    ]
+      \addplot[color=navy, thick, dashed, domain=0.30:1.00] {x};
+      \addlegendentry{完美校准对角线（$y = x$）}
+
+      \addplot[color=ochre, very thick, mark=triangle*, mark size=2.4pt]
+        table[x=bin_mid, y=raw_acc, col sep=comma]{data/calib_temp.csv};
+      \addlegendentry{校准前（$T=1.00$，$\ECE=0.2624$）}
+
+      \addplot[color=teal, very thick, mark=*, mark size=2.2pt]
+        table[x=bin_mid, y=cal_acc, col sep=comma]{data/calib_temp.csv};
+      \addlegendentry{温度缩放后（$T^*=3.35$，$\ECE=0.0221$）}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{温度缩放前后的可靠性图对比（数据来源：\texttt{data/calib\_temp.csv}）。校准前（赤褐色曲线）在 $0.95$ 置信度箱中真实准确率仅 $68.51\%$，严重偏离对角线下方；仅拟合单个标量 $T^*=3.35$ 后（青色曲线），各分箱准确率紧密贴合 $45^\circ$ 对角线，ECE 从 $0.2624$ 骤降至 $0.0221$（缩减约 $12\times$）。}
+  \label{fig:reliability-diagram}
+\end{figure}
+
+\section{分布外（OOD）检测：最大 Softmax 概率与能量分数}
+
+温度缩放解决的是\textbf{分布内（In-Distribution, ID）}样本的置信度失准问题；但在开放世界部署时，模型还会遭遇训练分布中从未出现过的\textbf{分布外（Out-of-Distribution, OOD）}样本（例如用猫狗分类器去识别一张交通路标，或用户向领域大模型提出完全陌生的乱码问题）。
+
+最直观的 OOD 检测基线是 Hendrycks 与 Gimpel（ICLR 2017）提出的\textbf{最大 Softmax 概率（Maximum Softmax Probability, MSP）}：若 $\max_k \softmax(z(x))_k < \tau$，则判定为 OOD 并触发拒答。然而，MSP 存在一个结构性短板：Softmax 具有\textbf{平移不变性}（把所有逻辑值同时加减常数 $c$ 不会改变概率），而且即使逻辑值整体很小、信息极度匮乏，只要其中一维略高，经指数放大后 MSP 仍可能偏高。
+
+为了保留逻辑值中蕴含的输入密度信息，Liu 等人（NeurIPS 2020）提出了\textbf{能量分数（Energy Score）}：
+\begin{equation}\label{eq:energy-score}
+  E(x;\, T) = -T \ln \sum_{k=1}^K \exp\!\left(\frac{z_k(x)}{T}\right).
+\end{equation}
+这一公式并非凭空发明，而是直接联通了统计物理的玻尔兹曼分布与第 5 卷的能量模型（Energy-Based Model, EBM）：若把分类器的类别条件概率写成能量形式 $p(y \mid x) = \frac{\exp(-E(x,y)/T)}{\sum_k \exp(-E(x,k)/T)}$（其中 $E(x,y) = -z_y(x)$），同时把联合密度写成 $p(x,y) = \frac{\exp(-E(x,y)/T)}{Z(T)}$，那么对 $y$ 边缘化求和立即得到输入边际密度：
+\[
+  p(x) = \sum_{k=1}^K p(x, k) = \frac{\sum_{k=1}^K \exp(z_k(x)/T)}{Z(T)} = \frac{\exp(-E(x;\,T)/T)}{Z(T)},
+\]
+两边取对数即有
+\begin{equation}\label{eq:energy-density}
+  \ln p(x) = -\frac{1}{T} E(x;\, T) - \ln Z(T).
+\end{equation}
+由于配分函数 $Z(T)$ 是与具体输入 $x$ 无关的全局常数，\textbf{负能量 $-E(x;T)$ 与真实对数输入密度 $\ln p(x)$ 呈严格线性正相关！}能量越低（越负），样本越像训练分布内的数据；能量越高（越接近 $0$ 甚至为正），越应当判为 OOD。
+
+\begin{example}[同一 MSP、截然不同的能量分数]\label{ex:energy-vs-msp}
+考虑二分类器（取 $T=1$）面对两条不同输入输出的逻辑向量：
+\begin{itemize}
+  \item 分布内高歧义样本 $x_1$（猫和狗特征都极其显著，属于高偶然不确定性）：$z(x_1) = (4.0,\, 4.0)$；
+  \item 分布外陌生样本 $x_2$（所有特征检测器几乎不激活，属于高认知不确定性）：$z(x_2) = (0.0,\, 0.0)$。
+\end{itemize}
+计算两者的 MSP：$\softmax(z(x_1)) = \softmax(z(x_2)) = (0.5,\, 0.5)$，因此 $\mathrm{MSP}(x_1) = \mathrm{MSP}(x_2) = 0.50$，MSP 完全无法区分“熟悉但模棱两可的样本”与“完全陌生的 OOD 样本”！
+再计算能量分数 \eqref{eq:energy-score}：
+\[
+  E(x_1;\,1) = -\ln(e^4 + e^4) = -4 - \ln 2 \approx -4.693,
+  \qquad
+  E(x_2;\,1) = -\ln(e^0 + e^0) = -\ln 2 \approx -0.693.
+\]
+能量分数立刻拉开了高达 $4.0$ 个对数单位的巨大鸿沟，精准地把陌生样本 $x_2$ 识别为 OOD。
+\end{example}
+
+\section{分裂共形预测（Split Conformal Prediction）：有限样本分布无关覆盖定理}
+
+温度缩放虽然能大幅降低 ECE，但它有一个本质局限：它只保证\textbf{经验统计校准}，并不能在有限样本下给出关于单次预测容错率的严格数学保证；而且如果模型结构本身存在系统性失配，单一标量 $T$ 也未必能把 ECE 压到 $0$。
+
+能否换一种更强大的思路？当模型对某条样本不够有把握时，不要硬逼它只猜\textbf{一个}类别，而是允许它输出一个\textbf{预测集合（Prediction Set）} $\mathcal{C}(X_{\text{new}}) \subseteq \mathcal{Y}$——把握大时只输出 $1$ 个类别（如 $\{\text{猫}\}$），模糊时输出 $2$ 个候选（如 $\{\text{猫}, \text{狐狸}\}$），并从数学上\textbf{无条件保证}真实标签落入预测集合的概率至少为 $1 - \alpha$（例如 $90\%$）！
+
+这正是 Vladimir Vovk 等人奠基、近年在顶会与可信 AI 领域爆发的\textbf{分裂共形预测（Split Conformal Prediction）}。它堪称现代统计机器学习的“桂冠定理”之一：不需要任何正态分布假设，不需要渐近大样本 $n \to \infty$，甚至不需要你的神经网络本身很准——哪怕底层是一个任意黑箱大模型，只要数据满足\textbf{可交换性}，覆盖率不等式就以有限样本精确形式成立！
+
+\subsection{核心概念：可交换性与非共形分数}
+
+\begin{defBox}
+\begin{definition}[可交换性（Exchangeability）与分裂共形预测构造]\label{def:conformal}
+\begin{enumerate}
+  \item \textbf{可交换性}：随机变量序列 $Z_1,\dots,Z_{n+1}$ 称为可交换的，如果对 $\{1,\dots,n+1\}$ 的任意排列 $\pi \in S_{n+1}$，联合分布保持完全不变：
+  \[
+    (Z_{\pi(1)},\dots,Z_{\pi(n+1)}) \;\stackrel{d}{=}\; (Z_1,\dots,Z_{n+1}).
+  \]
+  显然，所有独立同分布（i.i.d.）样本必然可交换；但可交换性比 i.i.d. 更弱（例如无放回抽样也满足可交换性）。
+  \item \textbf{分裂共形预测三步协议}：
+  \begin{itemize}
+    \item \textbf{第一步（模型冻结与打分）}：用独立训练集训练好任意模型 $\hat{p}(x)$ 并冻结权重。定义\textbf{非共形分数（Non-conformity Score）} $s(x, y) \in \R$（分数越大表示 $(x,y)$ 越“出乎意料”、越不符合模型预测），对于分类任务最经典的选取是
+    \[
+      s(x, y) = 1 - \hat{p}_y(x).
+    \]
+    在 $n$ 条未参与训练的校准样本 $\{(X_i, Y_i)\}_{i=1}^n$ 上计算校准分数 $S_i = s(X_i, Y_i)$（$i=1,\dots,n$）。
+    \item \textbf{第二步（有限样本分位数校准）}：给定目标误覆盖率 $\alpha \in (0, 1)$，令整数秩
+    \begin{equation}\label{eq:conformal-k}
+      k := \big\lceil (n + 1)(1 - \alpha) \big\rceil,
+    \end{equation}
+    取 $\hat{q}$ 为校准分数 $\{S_1,\dots,S_n\}$ 中\textbf{第 $k$ 小}的值（若 $k > n$ 则令 $\hat{q} = +\infty$），等价于经验分布的 $\frac{\lceil(n+1)(1-\alpha)\rceil}{n}$-分位数。
+    \item \textbf{第三步（构造预测集）}：对任意新测试样本 $X_{\text{new}}$，把所有非共形分数不超过阈值 $\hat{q}$ 的候选标签收入预测集：
+    \begin{equation}\label{eq:conformal-set}
+      \mathcal{C}(X_{\text{new}}) = \big\{ y \in \mathcal{Y} : s(X_{\text{new}},\, y) \le \hat{q} \big\}.
+    \end{equation}
+  \end{itemize}
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\subsection{桂冠定理：有限样本分布无关覆盖保证}
+
+\begin{thmBox}
+\begin{theorem}[分裂共形预测的有限样本分布无关覆盖定理]\label{thm:conformal-coverage}
+设校准样本 $(X_1, Y_1), \dots, (X_n, Y_n)$ 与新测试样本 $(X_{n+1}, Y_{n+1})$ 联合满足\textbf{可交换性}，且打分函数 $s(\cdot,\cdot)$ 在独立训练集上已固定。对任意目标水平 $\alpha \in (0,1)$，按定义 \ref{def:conformal} 构造预测集 $\mathcal{C}(X_{n+1})$，则对\textbf{任意黑箱模型、任意未知数据分布、任意有限校准样本量 $n$}，恒有覆盖率下界：
+\begin{equation}\label{eq:conformal-lower}
+  \Prob\!\big(Y_{n+1} \in \mathcal{C}(X_{n+1})\big) \;\ge\; 1 - \alpha.
+\end{equation}
+进一步地，若非共形分数 $S_1,\dots,S_{n+1}$ 几乎必然互不相等（无结值 / No Ties a.s.），则精确满足双边夹逼不等式：
+\begin{equation}\label{eq:conformal-sandwich}
+  1 - \alpha \;\le\; \Prob\!\big(Y_{n+1} \in \mathcal{C}(X_{n+1})\big) \;\le\; 1 - \alpha + \frac{1}{n+1}.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+这是整套七卷书中堪称“天书（THE BOOK）”级别的极简论证。核心只用到对称性与秩统计！
+
+\textbf{第一步：将可交换性传递到分数序列。}
+因为打分函数 $s(\cdot,\cdot)$ 仅依赖独立训练集，与样本序列 $(X_1,Y_1),\dots,$ $(X_{n+1},Y_{n+1})$ 完全无关，把同一个确定性函数 $s$ 逐个作用在可交换随机向量上，得到的 $n+1$ 个实值随机变量
+\[
+  S_1 = s(X_1,Y_1),\;\; \dots,\;\; S_n = s(X_n,Y_n),\;\; S_{n+1} = s(X_{n+1},Y_{n+1})
+\]
+依然保持严格可交换性！
+
+\textbf{第二步：先证无结值（No Ties a.s.）情形。}
+将全部 $n+1$ 个分数严格从小到大排序为 $S_{(1)} < S_{(2)} < \dots < S_{(n+1)}$，记 $R \in \{1,2,\dots,n+1\}$ 为测试点分数 $S_{n+1}$ 在全体 $n+1$ 个分数中的排名（即 $S_{n+1} = S_{(R)}$）。
+
+因为 $(S_1,\dots,S_{n+1})$ 的联合分布对任意 $(n+1)!$ 种排列完全对称，$S_{n+1}$ 落在这 $n+1$ 个排序位置中任意一个的概率必然完全相等！故秩 $R$ 严格服从离散均匀分布：
+\begin{equation}\label{eq:rank-uniform}
+  \Prob(R = r) = \frac{1}{n+1}, \qquad \forall r \in \{1,2,\dots,n+1\}.
+\end{equation}
+
+\textbf{第三步：建立覆盖事件与秩事件的精确等价关系。}
+令 $k = \lceil (n+1)(1-\alpha) \rceil$（若 $k = n+1$ 则 $\hat{q} = +\infty$，覆盖概率为 $1$，显然落在 $[1-\alpha, 1-\alpha+\frac{1}{n+1}]$ 内；下设 $1 \le k \le n$）。回想 $\hat{q}$ 是前 $n$ 个校准分数 $\{S_1,\dots,S_n\}$ 中的第 $k$ 小值。我们断言：
+\begin{equation}\label{eq:equiv-event}
+  \big\{Y_{n+1} \in \mathcal{C}(X_{n+1})\big\}
+  \;=\; \big\{S_{n+1} \le \hat{q}\big\}
+  \;\Longleftrightarrow\; \big\{R \le k\big\}.
+\end{equation}
+逐方向核验这极其精巧的一步：
+\begin{itemize}
+  \item \textbf{（$\Leftarrow$）} 若 $R \le k$，说明在全部 $n+1$ 个分数中，严格小于 $S_{n+1}$ 的分数恰好有 $R-1 \le k-1$ 个，它们全部属于 $\{S_1,\dots,S_n\}$。既然校准集 $\{S_1,\dots,S_n\}$ 中至多只有 $k-1$ 个元素小于 $S_{n+1}$，那么校准集中第 $k$ 小的元素 $\hat{q}$ 必然大于 $S_{n+1}$，故 $S_{n+1} < \hat{q}$（从而 $S_{n+1} \le \hat{q}$）。
+  \item \textbf{（$\Rightarrow$）} 反过来，若 $R \ge k+1$，则全体中严格小于 $S_{n+1}$ 的分数有 $R-1 \ge k$ 个，且全部来自 $\{S_1,\dots,S_n\}$。既然校准集中至少有 $k$ 个元素严格小于 $S_{n+1}$，那么校准集中第 $k$ 小的元素 $\hat{q}$ 必然严格小于 $S_{n+1}$，即 $S_{n+1} > \hat{q}$。逆否命题即得 $S_{n+1} \le \hat{q} \implies R \le k$。
+\end{itemize}
+
+\textbf{第四步：代入均匀秩分布完成夹逼。}
+结合 \eqref{eq:rank-uniform} 与 \eqref{eq:equiv-event}，立刻得到精确覆盖概率：
+\[
+  \Prob\!\big(Y_{n+1} \in \mathcal{C}(X_{n+1})\big)
+  = \Prob(R \le k)
+  = \frac{k}{n+1}
+  = \frac{\lceil (n+1)(1-\alpha) \rceil}{n+1}.
+\]
+最后，由向上取整函数的基本定义，对任意实数 $u$ 均有 $u \le \lceil u \rceil < u + 1$。取 $u = (n+1)(1-\alpha)$ 并同除以 $n+1$：
+\[
+  1 - \alpha \;\le\; \frac{\lceil (n+1)(1-\alpha) \rceil}{n+1} \;<\; 1 - \alpha + \frac{1}{n+1}.
+\]
+这就严格证明了双边夹逼式 \eqref{eq:conformal-sandwich}！
+
+\textbf{第五步（处理可能出现结值 / Ties 的一般情况）：}
+若存在相等分数，仍令 $S_{(1)} \le \dots \le S_{(n+1)}$ 为全体 $n+1$ 个分数的有序多重集。由于校准集的第 $k$ 小值 $\hat{q}$ 总是满足 $S_{n+1} \le \hat{q} \iff S_{n+1} \le S_{(k)}$（因为一旦 $S_{n+1} \le S_{(k)}$，移走 $S_{n+1}$ 后剩余 $n$ 个数的第 $k$ 小值必 $\ge S_{(k)} \ge S_{n+1}$），而在条件于有序多重集 $\{S_{(1)},\dots,S_{(n+1)}\}$ 下，由可交换性 $S_{n+1}$ 等可能地取这 $n+1$ 个带重数的槽位，其中至少有 $k$ 个槽位满足值 $\le S_{(k)}$，因此 $\Prob(S_{n+1} \le \hat{q}) \ge \frac{k}{n+1} \ge 1-\alpha$ 无条件成立（若对相等分数附加微小随机抖动打破平局，上界 $1-\alpha+\frac{1}{n+1}$ 也同样成立）。
+\end{proof}
+
+图 \ref{fig:conformal-rank} 用几何槽位直观呈现了定理 \ref{thm:conformal-coverage} 的对称秩证明：为什么分母里必然出现那个看似不起眼、却至关重要的小修正项 $n+1$，而非 $n$！
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.97\linewidth}{!}{%
+  \begin{tikzpicture}[
+    dot/.style={circle, fill=teal, inner sep=2.2pt},
+    dotout/.style={circle, fill=ochre, inner sep=2.2pt},
+    slot/.style={font=\scriptsize\sffamily}
+  ]
+    % Axis line
+    \draw[thick, slate, -{Stealth[length=2.4mm]}] (0,0) -- (14.2,0) node[right, font=\footnotesize\sffamily, text=ink]{非共形分数 $S$};
+
+    % Shaded covered region (first k slots up to x=8.3) vs miscovered region (right of x=8.3)
+    \fill[tealLight, opacity=0.85] (0.2, 0.15) rectangle (8.3, 1.60);
+    \fill[ochreLight, opacity=0.85] (8.3, 0.15) rectangle (13.8, 1.60);
+
+    % Calibration scores S_(1) ... S_(n)
+    \foreach \x/\lbl in {1.1/{S_{(1)}}, 2.5/{S_{(2)}}, 4.3/{\cdots}, 6.1/{S_{(k-1)}}, 8.3/{S_{(k)} = \hat{q}}, 11.4/{S_{(k+1)}}, 13.0/{S_{(n)}}} {
+      \ifdim \x pt > 9pt
+        \node[dotout] at (\x,0) {};
+      \else
+        \node[dot] at (\x,0) {};
+      \fi
+      \node[below=2.5mm, font=\footnotesize, text=ink] at (\x,0) {$\lbl$};
+    }
+
+    % Threshold dashed vertical line at q_hat
+    \draw[very thick, tealDark, dashed] (8.3,-0.15) -- (8.3,1.90)
+      node[above, font=\footnotesize\sffamily\bfseries, text=tealDark]{阈值 $\hat{q}$：校准集第 $k = \lceil(n+1)(1-\alpha)\rceil$ 小分数};
+
+    % Slots arrows showing where S_{n+1} can land with equal probability 1/(n+1)
+    \foreach \x/\s in {0.65/1, 1.8/2, 3.4/3, 5.2/\cdots, 7.2/k, 9.85/{k+1}, 12.2/{n+1}} {
+      \draw[-{Stealth[length=1.8mm]}, navy!80, thick] (\x, 1.25) -- (\x, 0.30);
+      \node[slot, navy] at (\x, 1.42) {槽 $\s$};
+    }
+
+    % Braces on bottom with clean two-line centered labels
+    \draw[decorate, decoration={brace, mirror, amplitude=5pt}, thick, teal]
+      (0.3, -0.82) -- (8.2, -0.82) node[midway, below=5pt, align=center, font=\footnotesize\sffamily, text=tealDark]{前 $k$ 个等概率槽位：$S_{n+1} \le \hat{q} \implies Y_{n+1}\in\mathcal{C}(X_{n+1})$\\覆盖概率 $= \frac{k}{n+1} \ge 1 - \alpha$};
+    \draw[decorate, decoration={brace, mirror, amplitude=5pt}, thick, ochre]
+      (8.45, -0.82) -- (13.75, -0.82) node[midway, below=5pt, align=center, font=\footnotesize\sffamily, text=ochre]{后 $n+1-k$ 个槽位\\（误覆盖，概率 $\le \alpha$）};
+  \end{tikzpicture}}
+  \caption{分裂共形预测有限样本覆盖定理的几何直觉：$n$ 个有序校准分数将实轴切分为 $n+1$ 个槽位；由可交换性，新样本分数 $S_{n+1}$ 落入任意槽位的概率严格相等（均为 $\frac{1}{n+1}$），落在阈值 $\hat{q}=S_{(k)}$ 左侧前 $k$ 个槽位即为覆盖成功。}
+  \label{fig:conformal-rank}
+\end{figure}
+
+\subsection{实测验证与完整实现代码}
+
+回到 \texttt{exp2\_calibration\_and\_conformal} 的四分类实验：我们取校准集规模 $n = N_{\text{cal}} = 500$、目标误覆盖率 $\alpha = 0.10$（要求覆盖率 $\ge 90\%$）。
+\begin{enumerate}
+  \item \textbf{理论计算}：$k = \lceil (500 + 1)(1 - 0.10) \rceil = \lceil 450.9 \rceil = 451$，即取校准集非共形分数的 $451 / 500 = 0.902$ 分位数。定理 \ref{thm:conformal-coverage} 保证真实边缘覆盖率严格落在 $[90.00\%,\, 90.20\%]$ 之间。
+  \item \textbf{实测结果}（$N_{\text{te}} = 1000$）：温度校准后的模型在校准集上求得阈值 \textbf{$\hat{q} = 0.8692$}（等价于：对每条新测试样本，凡是校准后预测概率 $\hat{p}_y(x) \ge 1 - 0.8692 = 0.1308$ 的类别全部收入预测集合 $\mathcal{C}(x)$）。在 $1000$ 条独立测试样本上，预测集的经验覆盖率达到 \textbf{$90.60\%$（$\ge 90\%$）}，平均预测集大小为 \textbf{$2.40$ 个类别}（在四分类单点 Top-1 准确率仅 $56.50\%$ 的高噪声问题上，仅靠多给 $1.4$ 个备选标签就将命中保障从 $56.5\%$ 拉升至 $90\%$ 以上！）。
+\end{enumerate}
+
+下面给出一段自包含、可直接运行的 Python/NumPy 核心实现，串联 ECE 计算、温度缩放拟合与分裂共形预测：
+
+\begin{lstlisting}[caption={ECE、温度缩放与分裂共形预测的完整 NumPy 实现}]
+import math
+import numpy as np
+
+def softmax(logits: np.ndarray) -> np.ndarray:
+    z = logits - logits.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+def compute_ece(probs: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
+    conf = probs.max(axis=1)
+    acc = (probs.argmax(axis=1) == y).astype(float)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        mask = (conf >= lo) & (conf <= hi) if b == 0 else (conf > lo) & (conf <= hi)
+        if mask.any():
+            ece += mask.mean() * abs(acc[mask].mean() - conf[mask].mean())
+    return float(ece)
+
+def fit_temperature(z_cal: np.ndarray, y_cal: np.ndarray) -> float:
+    best_t, best_nll = 1.0, float("inf")
+    idx = np.arange(len(y_cal))
+    for t in np.linspace(0.5, 5.0, 451):
+        p = softmax(z_cal / t)
+        nll = float(-np.mean(np.log(p[idx, y_cal] + 1e-12)))
+        if nll < best_nll:
+            best_nll, best_t = nll, float(t)
+    return best_t
+
+def split_conformal_predict(p_cal: np.ndarray, y_cal: np.ndarray, p_test: np.ndarray, alpha: float = 0.10):
+    n = len(y_cal)
+    scores_cal = 1.0 - p_cal[np.arange(n), y_cal]
+    q_level = math.ceil((n + 1) * (1.0 - alpha)) / n
+    q_hat = float(np.quantile(scores_cal, min(1.0, q_level), method="higher"))
+    pred_sets = (1.0 - p_test) <= q_hat  # boolean mask of shape (N_test, K)
+    return q_hat, pred_sets
+\end{lstlisting}
+
+\begin{failBox}{模型校准与共形预测的三大致命误用}
+\begin{enumerate}
+  \item \textbf{在测试集上拟合温度 $T^*$ 或共形阈值 $\hat{q}$（直接数据泄漏）}：若把测试集当校准集用，不仅 $\ECE$ 会被乐观低估，共形预测的可交换性也会被彻底破坏（因为测试点参与了阈值 $\hat{q}$ 的选择）。规范做法是把原始验证集一分为二：一份用于超参选择，另一份专供校准与共形分位数估计，测试集始终只读。
+  \item \textbf{在协变量偏移（Covariate Shift）或非平稳时间序列上硬套共形预测}：定理 \ref{thm:conformal-coverage} 唯一但绝对不可逾越的前提是\textbf{可交换性}。当线上部署面临分布漂移（例如白天训练、雨夜测试，或金融行情体制切换）时，标准分裂共形预测的覆盖率会显著跌破 $1-\alpha$！此时必须升级为加权共形预测（Weighted Conformal Prediction，利用密度比 $w(x) = p_{\text{test}}(x)/p_{\text{cal}}(x)$ 重加权）或在线自适应共形推理（Adaptive Conformal Inference, ACI）。
+  \item \textbf{把校准后的 Softmax 置信度误当成认知不确定性}：温度缩放只在\textbf{分布内}压缩了过度自信；对分布外（OOD）样本，ReLU 线性区域在远离训练流形处仍可能输出极高逻辑值（Hein et al., CVPR 2019）。生产系统中应当将“能量分数 OOD 拒答”与“温度缩放 + 共形预测集”级联使用，而不能只看校准后的最大概率。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{深度集成（Deep Ensembles）、MC Dropout 与自适应预测集（APS / RAPS）}
+\begin{itemize}
+  \item \textbf{深度集成与 MC Dropout}：如何直接刻画\textbf{认知不确定性}？Lakshminarayanan 等人（NeurIPS 2017）表明，仅用 $M=5$ 个不同随机初始化独立训练的同构网络组成\textbf{深度集成（Deep Ensembles）}，计算其预测分布的平均 $\bar{p}(x) = \frac{1}{M}\sum_{m=1}^M p^{(m)}(x)$，并利用\textbf{互信息（BALD 分解）}将总预测熵拆成两项：
+  \[
+    \underbrace{H\big(\bar{p}(x)\big)}_{\text{总不确定性}}
+    \;=\; \underbrace{\frac{1}{M}\sum_{m=1}^M H\big(p^{(m)}(x)\big)}_{\text{平均偶然不确定性}}
+    \;+\; \underbrace{\frac{1}{M}\sum_{m=1}^M \DKL\!\big(p^{(m)}(x) \,\|\, \bar{p}(x)\big)}_{\text{模型间分歧（认知不确定性）}}.
+  \]
+  在训练数据密集区，各成员意见一致，认知项趋近于 $0$；在 OOD 区域各成员胡乱外推而分歧剧增，认知项瞬间拉响警报！如果算力受限，\textbf{蒙特卡洛 Dropout（MC Dropout，Gal \& Ghahramani, ICML 2016）}可在推理时保持 Dropout 开启做 $M$ 次随机前向传播，作为轻量级近似贝叶斯集成（尽管实践中校准与 OOD 表现通常仍略逊于真正的 Deep Ensembles）。
+  \item \textbf{自适应预测集（APS / RAPS）}：本章使用的基础非共形分数 $s(x,y) = 1 - \hat{p}_y(x)$ 虽然保证了\textbf{边缘覆盖率} $\Prob(Y\in\mathcal{C}(X)) \ge 1-\alpha$，但往往对简单样本过度保守、对困难样本覆盖不足（条件覆盖不均）。\textbf{自适应预测集（Adaptive Prediction Sets, APS，Romano et al., NeurIPS 2020）}将预测概率从大到小排序 $\hat{p}_{(1)}(x) \ge \hat{p}_{(2)}(x) \ge \dots$，定义非共形分数为排在真实标签 $y$ 之前（含 $y$）的\textbf{累积概率和}，使得简单样本往往只输出 $1$ 个类别、困难样本自适应扩大集合；\textbf{RAPS（Angelopoulos et al., ICLR 2021）}则进一步对排名靠后的尾部类别施加正则惩罚，在保持相同 $1-\alpha$ 严格覆盖保证的同时显著压缩平均预测集尺寸。
+\end{itemize}
+\end{extBox}
+
+\section{本章小结与核心公式速查}
+
+本章构建了从“点预测”迈向“可信不确定性估计”的三级阶梯：第一级用严格恰当评分规则（NLL、Brier）与 ECE 诊断过度自信；第二级用保序、全局凸的温度缩放与能量分数修正概率校准并拦截 OOD 样本；第三级用分裂共形预测突破分布假设限制，以极简秩对称性给出有限样本严格覆盖保证。表 \ref{tab:ch2-summary} 汇总了核心公式。
+
+\begin{table}[htbp]
+  \centering
+  \caption{第 2 章核心不确定性量化、校准与共形预测公式速查}
+  \label{tab:ch2-summary}
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}p{34mm}p{58mm}X@{}}
+    \toprule
+    \textbf{方法 / 定理} & \textbf{核心公式} & \textbf{核心性质与使用要点} \\
+    \midrule
+    NLL 严格恰当分解 & $\E_q[-\ln p_Y] = H(q) + \DKL(q\|p)$ & 唯一在 $p=q$ 极小；对极度自信误判惩罚无界 \\
+    Brier 评分分解 & $\E_q[(p-Y)^2] = q(1-q) + (p-q)^2$ & 有界严格恰当评分；对标注噪声更稳健 \\
+    期望校准误差 & $\ECE = \sum_{b=1}^B \frac{|B_b|}{N}|\mathrm{acc}(B_b)-\mathrm{conf}(B_b)|$ & 衡量可靠性图偏离 $y=x$ 对角线的加权均值 \\
+    温度缩放 & $p(T) = \softmax(z/T)$，$T^* = \argmin \mathrm{NLL}_{\text{cal}}$ & 严格保序（准确率不变）；关于 $\beta=1/T$ 全局凸 \\
+    能量分数 OOD & $E(x;T) = -T\ln\sum_k e^{z_k/T}$ & $-E(x;T) \propto \ln p(x)$；克服 Softmax 平移不变盲区 \\
+    分裂共形预测 & $\hat{q} = S_{(\lceil(n+1)(1-\alpha)\rceil)}$，$\mathcal{C}(x)=\{y:s(x,y)\le\hat{q}\}$ & 仅需可交换性；有限样本保证 $[1-\alpha, 1-\alpha+\frac{1}{n+1}]$ \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{分层习题}
+
+\exTier{A 层}{概念核查与基础演练}
+
+\begin{enumerate}[label=\textbf{7.2.\arabic*}]
+  \item \textbf{（手算 ECE 与识别过度自信）} 某二分类模型在 $N=200$ 条测试样本上按置信度落入 3 个非空分箱：
+  \begin{itemize}
+    \item 分箱 1（$50$ 条样本）：平均置信度 $0.60$，答对 $25$ 条；
+    \item 分箱 2（$70$ 条样本）：平均置信度 $0.80$，答对 $49$ 条；
+    \item 分箱 3（$80$ 条样本）：平均置信度 $0.95$，答对 $60$ 条。
+  \end{itemize}
+  请手算：（a）该模型的总准确率；（b）期望校准误差 $\ECE$；（c）最大校准误差 $\operatorname{MCE}$；并判断该模型属于过度自信还是欠自信。
+  \exHint{先算每个分箱的 $\mathrm{acc}(B_b)$（分别为 $0.50, 0.70, 0.75$），再按箱权重 $|B_b|/200$ 加权求绝对差之和。}
+
+  \item \textbf{（分裂共形预测手算演练）} 设校准集仅有 $n = 9$ 条样本，已算得它们的非共形分数 $S_i = 1 - \hat{p}_{y_i}(x_i)$ 排序后为：
+  \[
+    0.05,\; 0.11,\; 0.18,\; 0.24,\; 0.31,\; 0.42,\; 0.55,\; 0.68,\; 0.89.
+  \]
+  取目标误覆盖率 $\alpha = 0.20$（要求覆盖率 $\ge 80\%$）。
+  \begin{enumerate}
+    \item 计算秩下标 $k = \lceil(n+1)(1-\alpha)\rceil$ 与阈值 $\hat{q}$；
+    \item 根据定理 \ref{thm:conformal-coverage}，给出理论覆盖率的精确上下界区间；
+    \item 现有一条新样本的三分类预测概率为 $(0.52,\, 0.36,\, 0.12)$，写出其共形预测集 $\mathcal{C}(x_{\text{new}})$。
+  \end{enumerate}
+  \exHint{$n+1 = 10$，$k = \lceil 10 \times 0.8 \rceil = 8$，故 $\hat{q}$ 取第 $8$ 小分数 $0.68$；预测集收入所有满足 $1 - \hat{p}_y \le 0.68$（即 $\hat{p}_y \ge 0.32$）的类别。}
+\end{enumerate}
+
+\exTier{B 层}{数学推导与定理证明}
+
+\begin{enumerate}[label=\textbf{7.2.\arabic*}, start=3]
+  \item \textbf{（0-1 损失不是严格恰当评分规则，而球面评分规则是）}
+  \begin{enumerate}
+    \item 证明二分类 0-1 误差损失 $S_{01}(p, y) = \mathbf{1}\{(p \ge 0.5) \neq y\}$ 是\textbf{恰当的}，但\textbf{不是严格恰当的}（给出当 $q=0.7$ 时所有使期望损失达到极小的 $p$ 集合）；
+    \item 考察\textbf{球面评分规则（Spherical Scoring Rule）} $S_{\mathrm{sph}}(p, y) = -\dfrac{p_y}{\norm{p}_2}$（损失型，越小越好）。利用 Cauchy--Schwarz 不等式证明 $S_{\mathrm{sph}}$ 是严格恰当的。
+  \end{enumerate}
+  \exHint{第 (b) 问计算 $\E_{Y\sim q}[S_{\mathrm{sph}}(p, Y)] = -\frac{\inner{q}{p}}{\norm{p}_2} \ge -\norm{q}_2$，并检验 Cauchy--Schwarz 取等条件结合 $\sum p_k = \sum q_k = 1$！}
+
+  \item \textbf{（为何必须用 $n+1$ 而不能用 $n$ 算分位数？）} 在分裂共形预测中，若某工程师不小心把秩下标写成了 $k' = \lceil n(1-\alpha) \rceil$（漏掉了 $+1$ 修正）。
+  \begin{enumerate}
+    \item 在无结值假设下，利用定理 \ref{thm:conformal-coverage} 的证明思路，写出采用 $k'$ 时的精确覆盖概率 $\Prob(Y_{n+1} \in \mathcal{C}'(X_{n+1}))$；
+    \item 当校准集很小（如 $n=10, \alpha=0.10$）时，比较正确公式 $k = \lceil 11 \times 0.9 \rceil$ 与错误公式 $k' = \lceil 10 \times 0.9 \rceil$ 的实际覆盖率差距，说明有限样本修正 $+1$ 在小样本场景下的决定性意义。
+  \end{enumerate}
+  \exHint{当 $n=10,\alpha=0.10$ 时，$k'=9$ 给出的精确覆盖率为 $9/11 \approx 81.82\%$，远低于承诺的 $90\%$！而 $k=10$ 给出 $10/11 \approx 90.91\% \ge 90\%$。}
+\end{enumerate}
+
+\exTier{C 层}{算法分析与编程实验}
+
+\begin{enumerate}[label=\textbf{7.2.\arabic*}, start=5]
+  \item \textbf{（牛顿法求解温度缩放与 Brier 评分对比）} 在 \texttt{code/vol7\_experiments.py} 的 \texttt{exp2} 基础上：
+  \begin{enumerate}
+    \item 利用定理 \ref{thm:temp-scaling} 推导出的闭式一阶导数 $A_i'(\beta) - z_{i,y_i}$ 与二阶导数 $\Var_{p_i(\beta)}(z_i)$，用纯 NumPy 实现 1D 牛顿法求解最优逆温度 $\beta^* = 1/T^*$，记录收敛到 $10^{-10}$ 精度所需的迭代步数（通常仅需 5--7 步！），并与网格搜索解 $T^*=3.35$ 核对；
+    \item 同时计算温度缩放前后的多分类 Brier 评分，验证它与 NLL、ECE 同步大幅下降。
+  \end{enumerate}
+  \exHint{牛顿更新步为 $\beta \leftarrow \beta - \mathcal{L}'(\beta) / \mathcal{L}''(\beta)$，加上简单的回溯线搜索确保 $\beta > 0$。}
+
+  \item \textbf{（共形预测的有限样本覆盖率波动与分布漂移失效实验）} 扩展 \texttt{exp2} 编写两个实验：
+  \begin{enumerate}
+    \item \textbf{有限校准集覆盖分布}：将校准集大小分别设为 $n \in \{50, 200, 1000\}$，重复随机划分 $500$ 次，绘制每次条件于校准集的测试覆盖率直方图，观察均值始终稳定在 $\ge 90\%$ 但方差随 $n$ 增大而按 $O(1/n)$ 收缩（提示：条件覆盖率服从 Beta 分布！）；
+    \item \textbf{破坏可交换性}：人为将测试集逻辑值附加一个均值漂移或噪声（模拟 Covariate Shift），验证此时经验覆盖率如何跌破 $90\%$。
+  \end{enumerate}
+  \exHint{注意区分“边缘覆盖率（对校准集和测试点同时取期望）”与“条件于某份固定校准集的测试覆盖率”（后者服从 $\operatorname{Beta}(k, n+1-k)$）。}
+\end{enumerate}
+
+\exTier{D 层}{开放探究与科研实战}
+
+\begin{enumerate}[label=\textbf{7.2.\arabic*}, start=7]
+  \item \textbf{（从分裂共形预测到回归任务与大模型生成）} 本章重点推导了分类任务的共形预测集。
+  \begin{enumerate}
+    \item 若任务变为连续值回归（例如房价预测 $\hat{y}(x)$），请设计一个简单有效的非共形分数（提示：绝对残差 $|y - \hat{y}(x)|$，或结合异方差尺度估计 $\frac{|y - \hat{y}(x)|}{\hat{\sigma}(x)}$），写出预测区间 $\mathcal{C}(x_{\text{new}})$ 的显式表达式并验证定理 \ref{thm:conformal-coverage} 依然成立；
+    \item 进一步思考：对于开放式大语言模型（LLM）问答（输出空间 $\mathcal{Y}$ 是无限长的文本序列），直接枚举所有 $y \in \mathcal{Y}$ 不可行。如何将共形预测的思想迁移到 LLM 事实核查或多次采样候选过滤（如 Conformal Language Modeling）？
+  \end{enumerate}
+  \exHint{回归中取 $s(x,y) = |y-\hat{y}(x)|/\hat{\sigma}(x)$ 即可得到随输入不确定性自适应伸缩的区间 $[\hat{y}(x) - \hat{q}\hat{\sigma}(x),\, \hat{y}(x) + \hat{q}\hat{\sigma}(x)]$；LLM 中可将预测集定义为“从多个采样回答中保留的子集”或“按句子拆解后的声明过滤集合”。}
+
+  \item \textbf{（高风险医疗分诊系统的不确定性架构设计）} 假设你正在设计一套基于深度学习的皮肤镜恶性黑色素瘤辅助筛查系统（需向临床医生交付）。如果模型漏诊恶性肿瘤代价极高，而把所有病例全推给专家又会压垮医院人力。请综合本章工具（温度缩放、能量分数 OOD 检测、分裂共形预测集与 Deep Ensembles），设计一套三级分诊决策协议（自动通过 / 给出共形候选集辅助复核 / OOD 强制人工接管），明确每个环节的校准数据划分策略与线上持续监控指标。
+  \exHint{重点考虑：如何针对“恶性类假阴性”设计类别条件共形预测（Class-Conditional Conformal Prediction），避免高边缘覆盖率掩盖稀有恶性类的漏诊风险！}
+\end{enumerate}

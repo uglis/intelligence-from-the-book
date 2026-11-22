@@ -1,0 +1,794 @@
+\chapter[信息论：熵、交叉熵与 KL 散度]{信息论核心：熵、交叉熵、\\KL 散度与互信息}
+\label{ch:ch4}
+
+\chapEpigraph{通信的基本问题，是在一点精确或近似地重现另一点所选择的消息。}{克劳德·香农（Claude E. Shannon），《通信的数学理论》（1948）}
+
+\begin{chapIntro}{本章定位：现代人工智能损失函数的通用语法}
+1948 年，Claude Shannon 为了解决电话线上的信号压缩与噪声传输问题，创立了\textbf{信息论（Information Theory）}。谁也没有想到，七十余年后，这套原本属于通信工程的数学语言，竟成了整个人工智能领域的\textbf{通用目标函数语法}：
+\begin{itemize}
+  \item 图像分类与大语言模型训练的\textbf{交叉熵损失（Cross-Entropy）}，衡量真实标签与预测分布的平均编码代价；
+  \item 大模型评测的\textbf{困惑度（Perplexity）}，本质是交叉熵的指数化“等效词表分支数”；
+  \item 第 4 卷\textbf{决策树的信息增益}，正是本章的\textbf{互信息（Mutual Information）}；
+  \item 第 5 卷\textbf{变分自编码器（VAE）}与第 6 卷\textbf{大模型对齐（RLHF/PPO/DPO）}，核心正则项都是\textbf{KL 散度（KL Divergence）}，而正向 KL 与反向 KL 的不对称性，直接决定了模型是“广泛覆盖”还是“精准锁峰”。
+\end{itemize}
+本章将承接第 3 章的 Jensen 不等式，从零构建“自信息 $\to$ 熵 $\to$ 互信息 $\to$ KL 散度 $\to$ 交叉熵与困惑度”的完整严密链条，让你再也不必死记任何一条损失函数公式。
+\end{chapIntro}
+
+% =========================================================================
+\section{自信息、Shannon 熵与最大熵直觉}
+\label{sec:ch4-entropy}
+
+\subsection{自信息（Surprise）：为什么非用 $-\log p(x)$ 不可？}
+
+先问一个直觉问题：如何量化“得知一个随机事件发生后，我们获得了多少信息（或者感到多意外）”？对比三条新闻：
+\begin{enumerate}
+  \item “明天太阳从东边升起”（$p \approx 1$）：毫无意外，几乎不含新信息；
+  \item “均匀硬币掷出正面”（$p = 0.5$）：消除了二选一的不确定性，记作 $1\;\text{bit}$ 信息；
+  \item “你买的单注彩票中了一等奖”（$p = 10^{-6}$）：极其罕见，包含巨大的惊讶度与信息量。
+\end{enumerate}
+
+若希望信息量函数 $I(p)$ 同时满足三条朴素公理：
+\begin{enumerate}
+  \item \textbf{必然事件无信息}：$I(1) = 0$；
+  \item \textbf{越罕见信息越多}：$I(p)$ 关于 $p \in (0, 1]$ 严格单调递减；
+  \item \textbf{独立事件信息可加}：若独立事件 $A, B$ 同时发生（概率 $p_A p_B$），总信息量应等于两者之和，即 $I(p_A p_B) = I(p_A) + I(p_B)$。
+\end{enumerate}
+微积分中满足乘积变加法且连续单调的函数，在差一个正常数倍（对数底数）的意义下\textbf{唯一}就是负对数函数！因此定义事件 $x$ 的\textbf{自信息（Self-Information）}为
+\begin{equation}
+  I(x) := -\log P(x). \label{eq:ch4-self-info}
+\end{equation}
+\textbf{对数底数与单位约定}：
+\begin{itemize}
+  \item 取以 $2$ 为底 $\log_2$ 时，单位为 \textbf{bit（比特）}：每次二分查询最多提供 $1\;\text{bit}$ 信息，适合信息编码、决策树手算与直觉理解；
+  \item 取自然对数 $\ln$ 时，单位为 \textbf{nat（奈特）}：$1\;\text{nat} = \frac{1}{\ln 2} \approx 1.4427\;\text{bits}$。由于 $\frac{d}{dp}\ln p = \frac{1}{p}$ 不带多余的 $\ln 2$ 因子，现代深度学习框架（PyTorch/JAX）与理论推导默认使用 $\ln$。本章中若公式写 $\log$ 而未标底数，代表对 $\log_2$ 与 $\ln$ 同时成立（只要全式底数统一）。
+\end{itemize}
+
+\subsection{Shannon 熵与二元熵函数 $H_2(p)$}
+
+自信息 $I(X) = -\log P(X)$ 度量的是\textbf{单个结果}的惊讶度；对整个分布取期望，就得到了衡量整个随机变量“平均不确定性”的 \textbf{Shannon 熵}。
+
+\begin{defBox}
+\begin{definition}[Shannon 熵, Shannon Entropy]
+\label{def:ch4-entropy}
+设离散随机变量 $X$ 取值于有限集合 $\mathcal{X}$，概率分布为 $P$。定义 $X$（或分布 $P$）的 \textbf{Shannon 熵} 为自信息的期望：
+\begin{equation}
+  H(X) = H(P) := \E_{X \sim P}\bigl[-\log P(X)\bigr] = -\sum_{x \in \mathcal{X}} P(x)\log P(x). \label{eq:ch4-entropy}
+\end{equation}
+当某个取值满足 $P(x) = 0$ 时，依据极限 $\lim_{t \to 0^+} t\log t = 0$，约定 $0\log 0 := 0$（不可能发生的事件不贡献不确定性）。
+\end{definition}
+\end{defBox}
+
+\textbf{最直观的解剖标本：二元熵函数 $H_2(p)$}。对两点分布 $X \sim \mathrm{Bernoulli}(p)$，其以比特为单位的熵称为\textbf{二元熵}：
+\[
+  H_2(p) := -p\log_2 p - (1-p)\log_2(1-p), \qquad p \in [0, 1].
+\]
+代入几个代表点立刻见真章：
+\begin{itemize}
+  \item $p = 0$ 或 $p = 1$（必出反面或必出正面，毫无悬念）：$H_2(0) = H_2(1) = 0\;\text{bit}$；
+  \item $p = 0.1$（高度偏向一侧）：$H_2(0.1) = -0.1\log_2 0.1 - 0.9\log_2 0.9 \approx 0.4690\;\text{bit}$；
+  \item $p = 0.5$（完全对半开、最难猜）：$H_2(0.5) = -0.5(-1) - 0.5(-1) = 1.0000\;\text{bit}$。
+\end{itemize}
+图 \ref{fig:ch4-binary-entropy} 绘制了 $H_2(p)$ 的严格上凸（凹函数）拱形曲线：两端陡峭趋零，中央平缓封顶。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.76\linewidth,
+      height=5.4cm,
+      xlabel={正类概率 $p = \Prob(X = 1)$},
+      ylabel={二元熵 $H_2(p)$（单位：bit）},
+      xmin=-0.03, xmax=1.03,
+      ymin=-0.04, ymax=1.18,
+      xtick={0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0},
+      ytick={0, 0.25, 0.5, 0.75, 1.0},
+      grid=major,
+      major grid style={slate!18},
+      label style={font=\small\sffamily, ink},
+      tick label style={font=\footnotesize, slate}
+    ]
+      % Shaded area under curve
+      \addplot[fill=tealLight, draw=none, domain=0.001:0.999, samples=160]
+        {-x*ln(x)/ln(2) - (1-x)*ln(1-x)/ln(2)} \closedcycle;
+
+      % Main binary entropy curve
+      \addplot[teal, line width=1.6pt, domain=0.001:0.999, samples=160]
+        {-x*ln(x)/ln(2) - (1-x)*ln(1-x)/ln(2)};
+
+      % Vertical dashed line at p=0.5
+      \draw[ochre, dashed, thick] (axis cs:0.5, 0) -- (axis cs:0.5, 1.0);
+      \draw[slate, dotted, thick] (axis cs:0, 1.0) -- (axis cs:0.5, 1.0);
+
+      % Highlighted points
+      \fill[ochre] (axis cs:0.5, 1.0) circle (2.6pt);
+      \fill[tealDark] (axis cs:0, 0) circle (2.3pt);
+      \fill[tealDark] (axis cs:1, 0) circle (2.3pt);
+      \fill[navy] (axis cs:0.1, 0.4690) circle (2.3pt);
+
+      % Annotations (well spaced, zero overlap)
+      \node[ochre, font=\footnotesize\sffamily\bfseries, anchor=south]
+        at (axis cs:0.5, 1.03) {最大不确定性：$(0.5,\; 1.0\;\text{bit})$};
+      \node[navy, font=\scriptsize\sffamily, anchor=west]
+        at (axis cs:0.13, 0.43) {$(0.1,\; 0.469)$};
+      \node[tealDark, font=\scriptsize\sffamily, anchor=south west]
+        at (axis cs:0.01, 0.04) {确定性 $H_2=0$};
+      \node[tealDark, font=\scriptsize\sffamily, anchor=south east]
+        at (axis cs:0.99, 0.04) {确定性 $H_2=0$};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{二元熵函数 $H_2(p) = -p\log_2 p - (1-p)\log_2(1-p)$：在 $p = 0.5$ 处唯一达到最大值 $1\;\text{bit}$，向两端确定性状态 $p \to 0$ 或 $p \to 1$ 对称衰减至 $0$。}
+  \label{fig:ch4-binary-entropy}
+\end{figure}
+
+\subsection{熵的上下界与最大熵直觉（由第 3 章 Jensen 一步证出）}
+
+推广到 $K$ 个离散类别时，“最确定的分布熵为 $0$，最均匀的分布熵最大”依然严格成立，而且用第 3 章的 Jensen 不等式三行就能证毕。
+
+\begin{thmBox}
+\begin{theorem}[离散熵的上下界与最大熵原理]
+\label{thm:ch4-entropy-bounds}
+设随机变量 $X \sim P$ 取值于有限集合 $\mathcal{X}$（共有 $K = |\mathcal{X}|$ 个可能状态），则
+\begin{equation}
+  0 \le H(P) \le \log K. \label{eq:ch4-entropy-bounds}
+\end{equation}
+其中：左端等号成立当且仅当 $P$ 为\textbf{确定性分布}（存在唯一 $x_0$ 使 $P(x_0)=1$，即 one-hot 分布）；右端等号成立当且仅当 $P$ 为\textbf{均匀分布}（对所有 $x \in \mathcal{X}$ 有 $P(x) = 1/K$）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{下界}：对每个 $x \in \mathcal{X}$ 有 $0 \le P(x) \le 1$，故 $-P(x)\log P(x) \ge 0$，求和即得 $H(P) \ge 0$。等号成立当且仅当每项均为 $0$，即对每个 $x$ 要么 $P(x)=0$ 要么 $P(x)=1$；结合 $\sum_x P(x)=1$，必存在唯一 $x_0$ 使 $P(x_0)=1$。
+
+\textbf{上界}：记正概率支集 $\mathcal{S} := \{x \in \mathcal{X} : P(x) > 0\}$，显然 $|\mathcal{S}| \le K$。将熵写成关于正随机变量 $1/P(X)$ 的期望，并对严格凹函数 $\log(\cdot)$ 应用第 3 章定理 \ref{thm:ch3-jensen}（Jensen 不等式）：
+\begin{align*}
+  H(P)
+  &= \sum_{x \in \mathcal{S}} P(x)\log\frac{1}{P(x)}
+   = \E_{P}\!\left[\log\frac{1}{P(X)}\right]
+   \le \log\!\left(\E_P\!\left[\frac{1}{P(X)}\right]\right) \\
+  &= \log\!\left(\sum_{x \in \mathcal{S}} P(x)\cdot \frac{1}{P(x)}\right)
+   = \log |\mathcal{S}|
+   \le \log K.
+\end{align*}
+由于 $\log$ 严格凹，第一个等号成立当且仅当 $1/P(X)$ 在 $\mathcal{S}$ 上几乎必然为常数（即在 $\mathcal{S}$ 上均匀分布）；第二个等号成立当且仅当 $|\mathcal{S}| = K$。两者合起来恰好等价于 $P(x) = 1/K$（$\forall x \in \mathcal{X}$）。
+\end{proof}
+
+这一结论揭示了人工智能中极富哲学意味的\textbf{最大熵原理（Principle of Maximum Entropy）}：在没有任何额外先验知识时，最诚实、不乱做假设的概率分布就是熵最大的均匀分布；而在第 6 章的 Softmax 回归里，如果对模型预测额外加上熵正则（鼓励适度保留不确定性，如标签平滑 Label Smoothing），就能有效防止神经网络变得过度自信而过拟合。
+
+\begin{extBox}{连续随机变量的微分熵（Differential Entropy）与一个重要提醒}
+对连续概率密度 $p(x)$，类比定义\textbf{微分熵} $h(X) := -\int p(x)\ln p(x)\,dx$。例如一维高斯 $\mathcal{N}(\mu, \sigma^2)$ 的微分熵为 $h(\mathcal{N}(\mu,\sigma^2)) = \frac{1}{2}\ln(2\pi e \sigma^2)$（方差越大越不确定，且在给定方差的所有连续分布中，\textbf{高斯分布微分熵最大}！）。但务必注意：与离散熵 $H(X) \ge 0$ 不同，\textbf{微分熵可以为负数}！例如 $X \sim \mathrm{Uniform}(0, 0.5)$ 的密度恒为 $p(x)=2$，其微分熵为 $h(X) = -\int_0^{0.5} 2\ln 2\,dx = -\ln 2 < 0$；而且做尺度缩放 $Y = cX$ 会令 $h(cX) = h(X) + \ln|c|$。幸运的是，下文将要定义的\textbf{连续 KL 散度与连续互信息}是两个密度之比的对数期望，缩放因子恰好完全抵消，因此永远非负且坐标无关！
+\end{extBox}
+
+% =========================================================================
+\section{联合熵、条件熵与互信息（决策树信息增益的真身）}
+\label{sec:ch4-mi}
+
+现实 AI 任务从来不是孤立地看单个变量 $Y$，而是\textbf{利用观测特征 $X$ 去消除目标标签 $Y$ 的不确定性}。下面把熵的概念自然推广到两个变量 $(X, Y)$。
+
+\subsection{联合熵、条件熵与熵的链式法则}
+
+\begin{defBox}
+\begin{definition}[联合熵与条件熵]
+\label{def:ch4-joint-cond-entropy}
+设离散随机变量对 $(X, Y)$ 具有联合分布 $P(x, y)$，边缘分布 $P(x), P(y)$ 与条件分布 $P(y\mid x)$。定义：
+\begin{enumerate}
+  \item \textbf{联合熵（Joint Entropy）}：
+  \[
+    H(X, Y) := -\sum_{x, y} P(x, y)\log P(x, y);
+  \]
+  \item \textbf{条件熵（Conditional Entropy）}：给定具体观测 $X = x$ 后 $Y$ 的剩余熵为 $H(Y \mid X = x) := -\sum_y P(y\mid x)\log P(y\mid x)$；再对 $X$ 取平均，即得条件熵：
+  \begin{equation}
+    H(Y \mid X) := \sum_{x} P(x)\, H(Y \mid X = x) = -\sum_{x, y} P(x, y)\log P(y \mid x). \label{eq:ch4-cond-entropy}
+  \end{equation}
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+把第 1 章概率乘法公式 $P(x, y) = P(x)P(y \mid x)$ 取负对数再求期望，乘法瞬间拆成加法——这就是优美无比的\textbf{熵的链式法则}。
+
+\begin{thmBox}
+\begin{theorem}[熵的链式法则, Chain Rule for Entropy]
+\label{thm:ch4-chain-rule}
+对任意离散随机变量对 $(X, Y)$，恒有
+\begin{equation}
+  H(X, Y) = H(X) + H(Y \mid X) = H(Y) + H(X \mid Y). \label{eq:ch4-chain-rule}
+\end{equation}
+推广到 $n$ 个变量 $(X_1, \dots, X_n)$，有 $H(X_1, \dots, X_n) = \sum_{t=1}^n H(X_t \mid X_1, \dots, X_{t-1})$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由 $P(x, y) = P(x)P(y\mid x)$（对 $P(x,y)>0$ 的项）直接展开：
+\begin{align*}
+  H(X, Y)
+  &= -\sum_{x,y} P(x,y)\bigl[\log P(x) + \log P(y\mid x)\bigr] \\
+  &= -\sum_x \left(\sum_y P(x,y)\right)\log P(x) - \sum_{x,y} P(x,y)\log P(y\mid x) \\
+  &= H(X) + H(Y \mid X).
+\end{align*}
+交换 $X$ 与 $Y$ 的角色即得第二式；对 $n$ 个变量归纳即得一般链式法则。
+\end{proof}
+
+\subsection{互信息（Mutual Information）与信息韦恩图}
+
+知道了 $X$ 之后，$Y$ 的不确定性从 $H(Y)$ 下降到了 $H(Y\mid X)$。这个\textbf{不确定性的平均减少量}，就是特征 $X$ 所携带的关于标签 $Y$ 的信息量——\textbf{互信息}！
+
+\begin{defBox}
+\begin{definition}[互信息, Mutual Information]
+\label{def:ch4-mi}
+随机变量 $X$ 与 $Y$ 之间的\textbf{互信息}定义为
+\begin{align}
+  I(X; Y)
+  &:= H(Y) - H(Y \mid X) \nonumber\\
+  &= H(X) - H(X \mid Y)
+   = H(X) + H(Y) - H(X, Y) \nonumber\\
+  &= \sum_{x, y} P(x, y)\log\frac{P(x, y)}{P(x)P(y)}. \label{eq:ch4-mi}
+\end{align}
+\end{definition}
+\end{defBox}
+
+注意式 \eqref{eq:ch4-mi} 展现出的完美对称性：$I(X; Y) = I(Y; X)$（$X$ 告诉我们多少关于 $Y$ 的信息，恰好等于 $Y$ 告诉我们多少关于 $X$ 的信息）。图 \ref{fig:ch4-venn} 用经典的\textbf{信息韦恩图（I-Diagram）}把这五个量之间的关系一眼定格——只要记住这张图，链式法则与互信息的全部等价式永远不会背混。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[scale=1.0]
+    % Left circle H(X) and Right circle H(Y)
+    \begin{scope}
+      \fill[tealLight, opacity=0.88] (-1.35, 0) ellipse (2.35cm and 1.48cm);
+      \fill[navyLight, opacity=0.82] ( 1.35, 0) ellipse (2.35cm and 1.48cm);
+    \end{scope}
+
+    % Highlight intersection I(X;Y)
+    \begin{scope}
+      \clip (-1.35, 0) ellipse (2.35cm and 1.48cm);
+      \fill[ochreLight, opacity=0.92] ( 1.35, 0) ellipse (2.35cm and 1.48cm);
+    \end{scope}
+
+    % Outlines
+    \draw[teal, line width=1.4pt] (-1.35, 0) ellipse (2.35cm and 1.48cm);
+    \draw[navy, line width=1.4pt] ( 1.35, 0) ellipse (2.35cm and 1.48cm);
+
+    % Region labels
+    \node[tealDark, font=\small\sffamily\bfseries, align=center] at (-2.25, 0.12) {$H(X \mid Y)$};
+    \node[teal, font=\scriptsize\sffamily, align=center] at (-2.25, -0.35) {仅 $X$ 独有的不确定性};
+
+    \node[ochre, font=\small\sffamily\bfseries, align=center] at (0, 0.15) {$I(X; Y)$};
+    \node[ochre, font=\scriptsize\sffamily, align=center] at (0, -0.32) {共享信息\\（信息增益）};
+
+    \node[navy, font=\small\sffamily\bfseries, align=center] at (2.25, 0.12) {$H(Y \mid X)$};
+    \node[navy, font=\scriptsize\sffamily, align=center] at (2.25, -0.35) {已知 $X$ 后 $Y$ 剩余熵};
+
+    % Top braces / labels for H(X) and H(Y)
+    \draw[decorate, decoration={brace, amplitude=5pt}, teal, thick]
+      (-3.68, 1.66) -- (0.95, 1.66)
+      node[midway, above=5pt, font=\small\sffamily\bfseries, tealDark] {$H(X) = H(X\mid Y) + I(X;Y)$};
+
+    \draw[decorate, decoration={brace, amplitude=5pt}, navy, thick]
+      (-0.95, -1.66) -- (3.68, -1.66);
+    \node[navy, font=\small\sffamily\bfseries] at (1.36, -2.18) {$H(Y) = H(Y\mid X) + I(X;Y)$};
+
+    % Bottom total brace for H(X,Y)
+    \draw[decorate, decoration={brace, amplitude=6pt, mirror}, slate, thick]
+      (-3.70, -2.55) -- (3.70, -2.55)
+      node[midway, below=6pt, font=\small\sffamily\bfseries, ink]
+      {联合熵 $H(X, Y) = H(X\mid Y) + I(X; Y) + H(Y\mid X)$};
+  \end{tikzpicture}
+  \caption{信息论韦恩图（I-Diagram）：两个随机变量的熵、条件熵、联合熵与互信息满足直观的“集合加减”几何关系。}
+  \label{fig:ch4-venn}
+\end{figure}
+
+\begin{thmBox}
+\begin{theorem}[互信息非负性与“条件化平均不增熵”]
+\label{thm:ch4-mi-nonneg}
+对任意随机变量 $X, Y$，恒有
+\begin{equation}
+  I(X; Y) \ge 0 \qquad \Longleftrightarrow \qquad H(Y \mid X) \le H(Y), \label{eq:ch4-mi-nonneg}
+\end{equation}
+且等号成立当且仅当 $X$ 与 $Y$ 相互独立（$X \indep Y$）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记正概率支集 $\mathcal{S} = \{(x, y) : P(x, y) > 0\}$。在 $\mathcal{S}$ 上必有 $P(x) > 0$ 且 $P(y) > 0$。以自然对数计算（换底仅差正因子 $\frac{1}{\ln 2}$），对严格凸函数 $-\ln(\cdot)$ 应用第 3 章定理 \ref{thm:ch3-jensen}（Jensen 不等式）：
+\begin{align*}
+  I(X; Y)
+  &= \sum_{(x,y)\in\mathcal{S}} P(x,y)\left(-\ln\frac{P(x)P(y)}{P(x,y)}\right)
+   \ge -\ln\!\left(\sum_{(x,y)\in\mathcal{S}} P(x,y)\cdot\frac{P(x)P(y)}{P(x,y)}\right) \\
+  &= -\ln\!\left(\sum_{(x,y)\in\mathcal{S}} P(x)P(y)\right)
+   \ge -\ln 1 = 0.
+\end{align*}
+等号成立当且仅当两处不等号同时取等：(i) $\frac{P(x)P(y)}{P(x,y)} = c$ 在 $\mathcal{S}$ 上为常数；(ii) $\sum_{\mathcal{S}} P(x)P(y) = 1$（即所有 $P(x)P(y)>0$ 的点都在 $\mathcal{S}$ 内）。将 $P(x)P(y) = c P(x,y)$ 两边求和得 $1 = c \cdot 1 \implies c = 1$，故 $P(x,y) = P(x)P(y)$ 处处成立，即 $X \indep Y$。
+\end{proof}
+
+\begin{example}[垃圾邮件关键词过滤的信息增益手算]
+\label{ex:ch4-spam-mi}
+设 $Y \in \{0, 1\}$ 表示邮件是否为垃圾邮件，$X \in \{0, 1\}$ 表示标题是否包含关键词“限时免费”，两者联合分布为：$P(0,0) = 0.40,\; P(0,1) = 0.10,\; P(1,0) = 0.10,\; P(1,1) = 0.40$。
+\begin{itemize}
+  \item 边缘分布：$P(X=1) = 0.50,\; P(Y=1) = 0.50$，因此 $H(X) = H(Y) = H_2(0.5) = 1.0000\;\text{bit}$；
+  \item 给定 $X=1$ 时，$P(Y=1\mid X=1) = \frac{0.40}{0.50} = 0.80$，故 $H(Y\mid X=1) = H_2(0.8) \approx 0.7219\;\text{bit}$；同理 $H(Y\mid X=0) = H_2(0.2) \approx 0.7219\;\text{bit}$；
+  \item 条件熵 $H(Y\mid X) = 0.5 \times 0.7219 + 0.5 \times 0.7219 = 0.7219\;\text{bit}$；
+  \item 互信息（信息增益）：$I(X; Y) = H(Y) - H(Y\mid X) = 1.0000 - 0.7219 = 0.2781\;\text{bit} > 0$。
+\end{itemize}
+仅观察这一个关键词，就把判断垃圾邮件所需的平均不确定性减少了 $27.8\%$！
+\end{example}
+
+\begin{failBox}{反直觉陷阱：“条件化平均不增熵”绝不意味着“每次观测都不增熵”！}
+定理 \ref{thm:ch4-mi-nonneg} 证明的是对 $X$ \textbf{取期望后}有 $H(Y\mid X) \le H(Y)$，但对某一个\textbf{具体取值} $X = x_0$，完全可能出现 $H(Y \mid X = x_0) > H(Y)$！
+
+\textbf{极简反例}：设 $P(X=0, Y=0) = 0.8,\; P(X=1, Y=0) = 0.1,\; P(X=1, Y=1) = 0.1$（其余为 $0$）。
+\begin{itemize}
+  \item 不看 $X$ 时，$P(Y=1) = 0.1$，不确定性较小：$H(Y) = H_2(0.1) \approx 0.4690\;\text{bit}$；
+  \item 一旦观察到 $X = 1$，$P(Y=1 \mid X=1) = 0.5$，瞬间变成五五开，不确定性\textbf{暴涨}：$H(Y \mid X=1) = H_2(0.5) = 1.0000\;\text{bit} > H(Y)$！
+  \item 但取期望后，$H(Y \mid X) = 0.8 \cdot H(Y\mid X=0) + 0.2 \cdot H(Y\mid X=1) = 0.8\times 0 + 0.2\times 1 = 0.2000\;\text{bit} < 0.4690\;\text{bit}$，定理依然稳如泰山！
+\end{itemize}
+直觉就像医学初筛：没做检查前你知道某罕见病大概率没得（熵很小），一旦初筛亮黄灯（$X=1$），得与不得瞬间变成五五开（熵反而变大）；但平均而言，做初筛总能减少不确定性。
+\end{failBox}
+
+\begin{insightBox}{直连第 4 卷决策树信息增益与现代对比学习}
+在第 4 卷经典机器学习中，ID3/C4.5 决策树在每个节点挑选“最优分裂特征 $A$”所用的\textbf{信息增益（Information Gain）}
+\[
+  \mathrm{IG}(Y, A) := H(Y) - H(Y \mid A) = I(A; Y),
+\]
+分毫不差就是样本分布上的\textbf{互信息}！此外，互信息超越了传统皮尔逊相关系数“只能捕捉线性相关”的局限，能度量任意非线性依赖关系，因此也成为现代自监督表征学习（如 InfoNCE 对比学习最大化互信息下界）的核心理论框架。
+\end{insightBox}
+
+% =========================================================================
+\section{KL 散度（相对熵）与正/反向 KL 的本质差异}
+\label{sec:ch4-kl}
+
+机器学习的核心任务，本质上是用参数化模型分布 $Q_\theta$ 去逼近未知的真实数据分布 $P$。那么，该如何定量衡量“两个概率分布 $P$ 和 $Q$ 到底差了多远”？答案是整个现代 AI 出现频率最高的“分布差距标尺”——\textbf{KL 散度（Kullback--Leibler Divergence）}。
+
+\subsection{定义与 Gibbs 不等式（完整严谨证明）}
+
+\begin{defBox}
+\begin{definition}[KL 散度 / 相对熵, Kullback--Leibler Divergence]
+\label{def:ch4-kl}
+设 $P$ 与 $Q$ 是定义在同一空间上的两个概率分布。离散情形与连续情形下，从 $Q$ 到 $P$ 的 \textbf{KL 散度} 分别定义为：
+\begin{equation}
+  \DKL(P \,\|\, Q) := \sum_{x \in \mathcal{X}} P(x)\log\frac{P(x)}{Q(x)},
+  \qquad
+  \DKL(p \,\|\, q) := \int p(x)\log\frac{p(x)}{q(x)}\,dx. \label{eq:ch4-kl}
+\end{equation}
+按连续性约定 $0\log\frac{0}{q} := 0$；若存在某点使 $P(x) > 0$ 而 $Q(x) = 0$，则约定 $P(x)\log\frac{P(x)}{0} := +\infty$。因此 $\DKL(P\|Q)$ 有限的必要条件是\textbf{支集覆盖}：$\mathrm{supp}(P) \subseteq \mathrm{supp}(Q)$。
+\end{definition}
+\end{defBox}
+
+\textbf{编码意义}：若真实事件服从分布 $P$，最优编码平均长度是 $H(P) = \E_P[-\log P(X)]$；如果你误用了针对分布 $Q$ 设计的编码方案（给结果 $x$ 分配长度 $-\log Q(x)$），平均每个符号多浪费的额外比特/奈特数，恰好就是 $\E_P[-\log Q(X) - (-\log P(X))] = \DKL(P \| Q)$！
+
+既然是“多浪费的代价”，直觉告诉我们它绝不可能为负，且只有当 $Q = P$ 时才能做到零浪费。下面我们用第 3 章的 Jensen 不等式给出严格证明——这就是大名鼎鼎的 \textbf{Gibbs 不等式}。
+
+\begin{thmBox}
+\begin{theorem}[Gibbs 不等式：KL 散度非负性]
+\label{thm:ch4-gibbs}
+对任意两个概率分布 $P$ 与 $Q$，恒有
+\begin{equation}
+  \DKL(P \,\|\, Q) \ge 0, \label{eq:ch4-gibbs}
+\end{equation}
+且等号成立当且仅当 $P = Q$（连续情形下为几乎处处 $p(x) = q(x)$）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+（以下按自然对数 $\ln$ 证明，换用 $\log_2$ 仅差正因子 $\frac{1}{\ln 2}$。）记 $P$ 的正支集 $\mathcal{S} := \{x : P(x) > 0\}$。若存在 $x \in \mathcal{S}$ 满足 $Q(x) = 0$，按定义 $\DKL(P\|Q) = +\infty > 0$，结论平凡成立。现设对一切 $x \in \mathcal{S}$ 均有 $Q(x) > 0$。将 KL 散度改写为关于正随机变量 $Z = \frac{Q(X)}{P(X)}$ 的期望，再对严格凸函数 $g(z) = -\ln z$ 应用第 3 章定理 \ref{thm:ch3-jensen}（Jensen 不等式）：
+\begin{align*}
+  \DKL(P \,\|\, Q)
+  &= \sum_{x \in \mathcal{S}} P(x)\left(-\ln\frac{Q(x)}{P(x)}\right)
+   = \E_{X \sim P}\!\left[-\ln\frac{Q(X)}{P(X)}\right] \\
+  &\ge -\ln\!\left(\E_{X \sim P}\!\left[\frac{Q(X)}{P(X)}\right]\right)
+   = -\ln\!\left(\sum_{x \in \mathcal{S}} P(x)\cdot\frac{Q(x)}{P(x)}\right) \\
+  &= -\ln\!\left(\sum_{x \in \mathcal{S}} Q(x)\right)
+   \ge -\ln 1 = 0.
+\end{align*}
+最后一个不等号利用了 $\sum_{x \in \mathcal{S}} Q(x) \le \sum_{x \in \mathcal{X}} Q(x) = 1$ 与 $-\ln(\cdot)$ 单调递减。
+
+\textbf{等号充要条件}：$\DKL(P\|Q) = 0$ 当且仅当上述两处不等号同时取等：(1) 由 $-\ln$ 严格凸，Jensen 取等当且仅当在 $\mathcal{S}$ 上 $\frac{Q(x)}{P(x)} \equiv c$（某个正常数）；(2) 第二处取等当且仅当 $\sum_{x \in \mathcal{S}} Q(x) = 1$（即 $Q$ 在 $\mathcal{S}$ 之外处处为 $0$）。将 $Q(x) = c P(x)$ 在 $\mathcal{S}$ 上求和得 $1 = \sum_{x\in\mathcal{S}} Q(x) = c\sum_{x\in\mathcal{S}} P(x) = c$，于是 $c = 1$，从而对所有 $x \in \mathcal{X}$ 有 $Q(x) = P(x)$。（连续情形将求和改为积分，证明逐字相同。）
+\end{proof}
+
+有了 KL 散度，前两节的核心结论立刻实现了大一统：
+\begin{itemize}
+  \item \textbf{互信息就是联合分布与独立乘积分布的 KL 散度}：$I(X; Y) = \DKL\bigl(P_{X,Y} \,\|\, P_X P_Y\bigr) \ge 0$；
+  \item \textbf{最大熵原理的 KL 版本}：设 $U_K$ 是 $K$ 点均匀分布，则 $\DKL(P \| U_K) = \log K - H(P) \ge 0 \implies H(P) \le \log K$！
+\end{itemize}
+
+\subsection{一维高斯 KL 散度解析闭式（第 5 卷 VAE 的核心零件）}
+
+在深度生成模型（尤其是第 5 卷变分自编码器 VAE）中，编码器输出高斯后验 $q_\phi(z\mid x) = \mathcal{N}(\mu, \sigma^2)$，正则项需要把每个隐维度拉向标准高斯先验 $\mathcal{N}(0, 1)$，因此下面的解析闭式公式必须信手拈来。
+
+\begin{proposition}[两个一维高斯分布之间的 KL 散度闭式]
+\label{prop:ch4-gaussian-kl}
+设 $P = \mathcal{N}(\mu_1, \sigma_1^2)$ 与 $Q = \mathcal{N}(\mu_2, \sigma_2^2)$（$\sigma_1, \sigma_2 > 0$），则以自然对数计，
+\begin{equation}
+  \DKL\!\bigl(\mathcal{N}(\mu_1, \sigma_1^2) \,\|\, \mathcal{N}(\mu_2, \sigma_2^2)\bigr)
+  = \ln\frac{\sigma_2}{\sigma_1} + \frac{\sigma_1^2 + (\mu_1 - \mu_2)^2}{2\sigma_2^2} - \frac{1}{2}. \label{eq:ch4-gaussian-kl}
+\end{equation}
+特别地，当 $Q = \mathcal{N}(0, 1)$ 时（VAE 损失函数标准形式）：
+\begin{equation}
+  \DKL\!\bigl(\mathcal{N}(\mu, \sigma^2) \,\|\, \mathcal{N}(0, 1)\bigr)
+  = \frac{1}{2}\bigl(\mu^2 + \sigma^2 - 1 - \ln \sigma^2\bigr). \label{eq:ch4-vae-kl}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+直接写出对数密度比：
+\[
+  \ln\frac{p(x)}{q(x)}
+  = \ln\frac{\sigma_2}{\sigma_1} - \frac{(x - \mu_1)^2}{2\sigma_1^2} + \frac{(x - \mu_2)^2}{2\sigma_2^2}.
+\]
+对 $X \sim P = \mathcal{N}(\mu_1, \sigma_1^2)$ 取期望，利用 $\E_P[(X - \mu_1)^2] = \sigma_1^2$ 以及
+\[
+  \E_P\bigl[(X - \mu_2)^2\bigr]
+  = \E_P\bigl[((X - \mu_1) + (\mu_1 - \mu_2))^2\bigr]
+  = \sigma_1^2 + (\mu_1 - \mu_2)^2,
+\]
+代入即得
+\[
+  \DKL(P \| Q)
+  = \ln\frac{\sigma_2}{\sigma_1} - \frac{\sigma_1^2}{2\sigma_1^2} + \frac{\sigma_1^2 + (\mu_1 - \mu_2)^2}{2\sigma_2^2}
+  = \ln\frac{\sigma_2}{\sigma_1} + \frac{\sigma_1^2 + (\mu_1 - \mu_2)^2}{2\sigma_2^2} - \frac{1}{2}.
+\]
+令 $\mu_1 = \mu,\; \sigma_1 = \sigma,\; \mu_2 = 0,\; \sigma_2 = 1$，立刻化简为 \eqref{eq:ch4-vae-kl}。
+\end{proof}
+
+\subsection{非对称性与正/反向 KL 的本质分野：Mode-Covering vs Mode-Seeking}
+
+仔细看一眼 \eqref{eq:ch4-gaussian-kl} 就会发现：交换 $(\mu_1,\sigma_1)$ 与 $(\mu_2,\sigma_2)$ 后结果并不相等！事实上，KL 散度既\textbf{不满足对称性}（一般 $\DKL(P\|Q) \neq \DKL(Q\|P)$），也\textbf{不满足三角不等式}，因此它在数学上不是“距离度量（Metric）”，而称为“散度（Divergence）”。
+
+\textbf{千万别以为不对称是个缺陷——它恰恰是现代 AI 算法设计里最具威力的一道分水岭！}
+
+设想一个极有代表性的建模冲突：真实数据分布 $P(x)$ 是一个\textbf{双峰高斯混合}：
+\[
+  P(x) = 0.5\,\mathcal{N}(-2,\, 0.6^2) + 0.5\,\mathcal{N}(2,\, 0.6^2),
+\]
+而我们的近似模型 $Q_\theta(x) = \mathcal{N}(\mu, \sigma^2)$ 只有\textbf{单个高斯}的表达能力（欠参数化，不可能完美拟合两个峰）。现在分别按两种方向最小化 KL 散度，结果截然相反！
+
+\begin{enumerate}
+  \item \textbf{正向 KL（Forward KL / 覆盖模式，Mode-Covering）}：求解 $\min_Q \DKL(P \| Q) = \E_{x\sim P}\!\bigl[\ln\frac{P(x)}{Q(x)}\bigr]$。
+  观察被积函数：只要某个区域 $P(x) > 0$，一旦你敢把 $Q(x)$ 设成接近 $0$，惩罚项 $P(x)\ln\frac{P(x)}{Q(x)}$ 就会瞬间冲向 $+\infty$！因此正向 KL 强迫 $Q$ 必须“\textbf{雨露均沾}（Zero-Avoiding）”，把身躯拉得足够胖以同时罩住 $P$ 的左右两座山峰。事实上（见习题 4.5），单高斯极小化正向 KL 的精确最优解正是\textbf{矩匹配（Moment Matching）}：
+  \[
+    \mu_{\mathrm{fwd}} = \E_P[X] = 0,
+    \qquad
+    \sigma_{\mathrm{fwd}}^2 = \Var_P(X) = 0.6^2 + 2^2 = 4.36 \implies \sigma_{\mathrm{fwd}} \approx 2.09.
+  \]
+  代价是：$q_{\mathrm{fwd}}$ 把最高密度堆在了真实分布几乎没数据的“低谷” $x = 0$ 处！
+
+  \item \textbf{反向 KL（Reverse KL / 寻峰模式，Mode-Seeking）}：求解 $\min_Q \DKL(Q \| P) = \E_{x\sim Q}\!\bigl[\ln\frac{Q(x)}{P(x)}\bigr]$。
+  此刻外层期望换成了 $Q(x)$！凡是 $P(x) \approx 0$ 的无人区（比如中央低谷 $x = 0$），只要 $Q(x) > 0$ 就会遭遇巨额惩罚（Zero-Forcing）；相反，在 $Q(x) \approx 0$ 的地方，即使 $P(x)$ 很高也完全不扣分！因此反向 KL 宁可彻底放弃另一座山峰，也要死死锁住其中一座高峰：
+  \[
+    q_{\mathrm{rev}} = \mathcal{N}(2.0,\; 0.60^2) \qquad (\text{或对称地 }\mathcal{N}(-2.0,\; 0.60^2)).
+  \]
+  它生成的样本个个逼真（绝不落在低谷），代价则是丢失了另一半数据模态（\textbf{模式坍缩, Mode Collapse}）！
+\end{enumerate}
+
+图 \ref{fig:ch4-kl-bimodal} 直接读取本卷实验脚本生成的真实曲线数据 \texttt{data/kl\_bimodal.csv}，表 \ref{tab:ch4-kl-bimodal} 列出两组解在正/反向 KL 下的精确数值对比——请把这幅图像刻进你的 AI 直觉库里！
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.88\linewidth,
+      height=6.2cm,
+      xlabel={$x$},
+      ylabel={概率密度},
+      xmin=-5.8, xmax=5.8,
+      ymin=0, ymax=0.76,
+      grid=major,
+      major grid style={slate!18},
+      legend pos=north west,
+      legend style={font=\footnotesize\sffamily, fill=white, fill opacity=0.92, draw=codeborder},
+      label style={font=\small\sffamily, ink},
+      tick label style={font=\footnotesize, slate}
+    ]
+      % Shaded target P(x)
+      \addplot[fill=slate!14, draw=none, forget plot]
+        table[x=x, y=p, col sep=comma] {data/kl_bimodal.csv} \closedcycle;
+
+      % Target bimodal P(x)
+      \addplot[ink, very thick]
+        table[x=x, y=p, col sep=comma] {data/kl_bimodal.csv};
+      \addlegendentry{真实双峰 $P = \tfrac{1}{2}\mathcal{N}(-2, 0.6^2) + \tfrac{1}{2}\mathcal{N}(2, 0.6^2)$}
+
+      % Forward KL (mode-covering)
+      \addplot[teal, very thick, dashed]
+        table[x=x, y=qfwd, col sep=comma] {data/kl_bimodal.csv};
+      \addlegendentry{正向 KL 最优 $q_{\mathrm{fwd}} = \mathcal{N}(0, 2.09^2)$（覆盖双峰）}
+
+      % Reverse KL (mode-seeking)
+      \addplot[ochre, very thick]
+        table[x=x, y=qrev, col sep=comma] {data/kl_bimodal.csv};
+      \addlegendentry{反向 KL 最优 $q_{\mathrm{rev}} = \mathcal{N}(2, 0.60^2)$（单峰锁定）}
+
+      % Clean annotations
+      \node[tealDark, font=\scriptsize\sffamily, align=center] at (axis cs:0.0, 0.255) {低谷处误堆密度\\（Mode-Covering）};
+      \node[ochre, font=\scriptsize\sffamily, anchor=west, align=left] at (axis cs:2.55, 0.57) {高纯度锁定右峰\\忽略左峰（Mode-Seeking）};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{本机实测（\texttt{data/kl\_bimodal.csv}）：用单高斯近似双峰分布 $P(x)$ 时，正向 KL（$\min \DKL(P\|Q)$）给出宽平的矩匹配分布 $q_{\mathrm{fwd}}$，而反向 KL（$\min \DKL(Q\|P)$）锐利锁定单个模态 $q_{\mathrm{rev}}$。}
+  \label{fig:ch4-kl-bimodal}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{双峰高斯近似实验中正向 KL 与反向 KL 数值对照（来自 \texttt{vol2\_experiments.py} 实测）}
+  \label{tab:ch4-kl-bimodal}
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{34mm}p{24mm}p{24mm}X@{}}
+    \toprule
+    \textbf{近似单高斯模型 $Q$} & $\DKL(P \,\|\, Q)$ & $\DKL(Q \,\|\, P)$ & \textbf{行为特征与对应 AI 范式} \\
+    \midrule
+    $q_{\mathrm{fwd}} = \mathcal{N}(0,\, 2.09^2)$ & \textbf{0.555}（胜出） & 1.175 & \textbf{Mode-Covering}：覆盖全部模态，对应 MLE 与自回归预训练 \\
+    $q_{\mathrm{rev}} = \mathcal{N}(2,\, 0.60^2)$ & 10.306（巨额罚分） & \textbf{0.692}（胜出） & \textbf{Mode-Seeking}：聚焦高密度峰，对应变分推断与 RLHF/DPO \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{insightBox}{贯穿第 5--6 卷：为什么预训练爱正向 KL，而对齐爱反向 KL？}
+\begin{itemize}
+  \item \textbf{极大似然 / 大模型预训练（正向 KL）}：下节立刻证明，MLE 等价于最小化 $\DKL(P_{\mathrm{data}}\|Q_\theta)$。因此预训练语言模型倾向于\textbf{覆盖一切可能的人类表达}（多样性强，但容易在多模态答案之间“和稀泥”或产生幻觉）；
+  \item \textbf{变分推断（VAE 编码器）与 RLHF/DPO 对齐（反向 KL）}：在强化学习微调中，目标函数加入反向 KL 惩罚 $-\beta\,\DKL(\pi_\theta \,\|\, \pi_{\mathrm{ref}})$。由于反向 KL 具有\textbf{锁峰特性}，微调后的大模型回复会变得高度干净、集中、高胜率，但过度强化也会导致回答千篇一律（多样性下降 / 模式坍缩）——这就是今天这幅双峰图在千亿参数大模型上的真实投影！
+\end{itemize}
+\end{insightBox}
+
+% =========================================================================
+\section{交叉熵、对数似然等价性与语言模型困惑度}
+\label{sec:ch4-ce-ppl}
+
+现在我们把全章收口到日常写代码时最常调用的一行函数——\textbf{交叉熵损失（Cross-Entropy Loss）}，并一次性打通它与 KL 散度、极大似然估计（MLE）以及语言模型困惑度（Perplexity）之间的严格等价关系。
+
+\subsection{交叉熵定义与核心分解恒等式}
+
+\begin{defBox}
+\begin{definition}[交叉熵, Cross-Entropy]
+\label{def:ch4-ce}
+设真实分布为 $P$、模型预测分布为 $Q$，定义从 $P$ 到 $Q$ 的\textbf{交叉熵}为用 $Q$ 的编码长度对 $P$ 取期望：
+\begin{equation}
+  H(P, Q) := \E_{X \sim P}\bigl[-\log Q(X)\bigr] = -\sum_{x \in \mathcal{X}} P(x)\log Q(x). \label{eq:ch4-ce}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+把对数里的 $-\log Q(x)$ 拆成 $-\log P(x) + \log\frac{P(x)}{Q(x)}$，立刻得到信息论中最核心的分解恒等式：
+
+\begin{proposition}[交叉熵 = 真实熵 + KL 散度]
+\label{prop:ch4-ce-kl}
+对任意概率分布 $P, Q$，恒有
+\begin{equation}
+  H(P, Q) = H(P) + \DKL(P \,\|\, Q) \ge H(P), \label{eq:ch4-ce-kl}
+\end{equation}
+且等号成立当且仅当 $Q = P$。
+\end{proposition}
+
+\begin{proof}
+直接展开并结合定理 \ref{thm:ch4-gibbs}（Gibbs 不等式）：
+\[
+  H(P, Q)
+  = -\sum_x P(x)\log P(x) + \sum_x P(x)\log\frac{P(x)}{Q(x)}
+  = H(P) + \DKL(P \,\|\, Q)
+  \ge H(P).
+\]
+等号成立当且仅当 $\DKL(P\|Q) = 0 \iff Q = P$。
+\end{proof}
+
+这条恒等式的物理图像清澈见底：模型能达到的最低交叉熵极限不是 $0$，而是数据本身不可消除的内禀不确定性 $H(P)$；交叉熵高出 $H(P)$ 的那一部分，分毫不差就是模型偏离真实分布的惩罚项 $\DKL(P\|Q)$！
+
+\subsection{统一大定理：最小交叉熵 $\equiv$ 最小正向 KL $\equiv$ 最大对数似然}
+
+在监督学习与语言建模中，真实数据分布 $P_{\mathrm{data}}$ 是固定不变的，我们只优化模型参数 $\theta$。由此立刻得到贯通第 4--6 章的\textbf{统一大定理}：
+
+\begin{thmBox}
+\begin{theorem}[最小交叉熵、最小正向 KL 与最大对数似然的三重等价]
+\label{thm:ch4-ce-kl-mle}
+给定独立同分布观测样本 $x_1, \dots, x_N$，定义其经验分布 $P_{\mathrm{data}}(x) := \frac{1}{N}\sum_{i=1}^N \mathbf{1}\{x_i = x\}$，并设参数化概率模型为 $Q_\theta$。则以下三个优化问题具有\textbf{完全相同的最优参数集合}：
+\begin{equation}
+  \argmin_\theta H(P_{\mathrm{data}}, Q_\theta)
+  \;=\;
+  \argmin_\theta \DKL(P_{\mathrm{data}} \,\|\, Q_\theta)
+  \;=\;
+  \argmax_\theta \frac{1}{N}\sum_{i=1}^N \log Q_\theta(x_i). \label{eq:ch4-unifying}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由命题 \ref{prop:ch4-ce-kl}，有 $\DKL(P_{\mathrm{data}} \| Q_\theta) = H(P_{\mathrm{data}}, Q_\theta) - H(P_{\mathrm{data}})$。由于 $H(P_{\mathrm{data}})$ 与参数 $\theta$ 无关，仅为一个固定常数，因此最小化 $\DKL(P_{\mathrm{data}} \| Q_\theta)$ 与最小化 $H(P_{\mathrm{data}}, Q_\theta)$ 完全等价。另一方面，将经验分布代入交叉熵定义：
+\[
+  H(P_{\mathrm{data}}, Q_\theta)
+  = -\sum_{x} P_{\mathrm{data}}(x)\log Q_\theta(x)
+  = -\frac{1}{N}\sum_{i=1}^N \log Q_\theta(x_i).
+\]
+最小化负的平均对数似然，显然等价于最大化平均对数似然 $\frac{1}{N}\sum_{i=1}^N \log Q_\theta(x_i)$。证毕。
+\end{proof}
+
+\textbf{立即连线第 6 章分类损失}：在多分类任务中，单个样本的真实标签通常表示为一个 one-hot 分布 $P = e_c$（正确类别 $c$ 处概率为 $1$，其余为 $0$）。此时 $H(P) = 0$，交叉熵瞬间化简为极其熟悉的\textbf{负对数似然损失}：
+\[
+  H(e_c, Q_\theta) = -\ln Q_\theta(c).
+\]
+对二分类标签 $y \in \{0, 1\}$ 与预测概率 $\hat{p} = Q_\theta(y=1\mid x)$，就是第 6 章将亲手实现的\textbf{二元交叉熵（BCE）}：
+\[
+  \ell_{\mathrm{BCE}}(y, \hat{p}) = -\bigl[y\ln \hat{p} + (1 - y)\ln(1 - \hat{p})\bigr].
+\]
+
+\subsection{语言模型困惑度（Perplexity, PPL）}
+
+训练大语言模型时，盯着一条下降的交叉熵曲线（比如从 $3.2$ 降到 $2.3\;\text{nats}$）往往不够直观。工程与论文中常把平均每 token 交叉熵取指数，转化为\textbf{困惑度（Perplexity）}。
+
+\begin{defBox}
+\begin{definition}[语言模型困惑度, Perplexity]
+\label{def:ch4-ppl}
+给定测试文本序列 $w_1, w_2, \dots, w_T$，语言模型 $Q_\theta$ 逐词预测条件概率 $Q_\theta(w_t \mid w_{<t})$。记平均每词交叉熵（以 nat 为单位）为
+\[
+  \bar{H}_{\mathrm{nat}} := -\frac{1}{T}\sum_{t=1}^T \ln Q_\theta(w_t \mid w_{<t}),
+\]
+则模型在该文本上的\textbf{困惑度}定义为
+\begin{equation}
+  \mathrm{PPL} := \exp(\bar{H}_{\mathrm{nat}}) = 2^{\bar{H}_{\mathrm{bit}}} = \left(\prod_{t=1}^T Q_\theta(w_t \mid w_{<t})\right)^{-1/T}. \label{eq:ch4-ppl}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+\textbf{绝妙的直觉：等效词表分支数}。注意 $\mathrm{PPL}$ 与对数底数无关（用 $\ln$ 配 $\exp$，或用 $\log_2$ 配 $2^{(\cdot)}$，得到的都是几何平均概率的倒数！）。
+\begin{itemize}
+  \item \textbf{词表大小 $V = 50{,}000$ 的随机盲猜模型}：每步均匀猜 $Q = 1/50000$，平均交叉熵 $\bar{H}_{\mathrm{nat}} = \ln 50000 \approx 10.82\;\text{nats}$，于是 $\mathrm{PPL} = e^{10.82} = 50{,}000$；
+  \item \textbf{强语言模型 $\bar{H}_{\mathrm{nat}} = 2.30\;\text{nats}$}：$\mathrm{PPL} = e^{2.30} \approx 10.0$——意思是每预测下一个词时，模型的不确定性\textbf{等效于在 $10$ 个候选词里均匀盲猜}！
+  \item \textbf{完美预言机}：每个词概率都给到 $1$，则 $\bar{H} = 0$，$\mathrm{PPL} = e^0 = 1$（理论最低下界）。
+\end{itemize}
+
+\begin{failBox}{信息论编程三大数值雷区：$0\log 0$、$\log 0$ 爆炸与底数错配}
+亲手写熵、KL 与困惑度代码时，以下三个坑几乎人人踩过一次：
+\begin{enumerate}
+  \item \textbf{直接写 \texttt{p * np.log(p)} 触发 \texttt{NaN}}：在 IEEE 754 浮点数中，当 \texttt{p == 0.0} 时，\texttt{np.log(0.0)} 返回 \texttt{-inf}，而 \texttt{0.0 * (-inf)} 返回 \texttt{nan}！正确做法是先用布尔掩码 \texttt{mask = p > 0} 过滤掉零概率项。
+  \item \textbf{预测概率触零导致损失爆炸}：一旦某条样本真实类别对应的预测概率 $Q(x)$ 因下溢变成 \texttt{0.0}，\texttt{-np.log(0.0)} 立刻输出 \texttt{inf} 并摧毁梯度。工程中要么对概率做微小截断（如 \texttt{np.clip(q, 1e-15, 1.0)}），要么像第 6 章那样直接在 logit 空间使用 \texttt{logaddexp} / \texttt{log\_softmax} 避免先算指数再取对数。
+  \item \textbf{底数与指数错配}：PyTorch 的 \texttt{CrossEntropyLoss} 默认用自然对数 \texttt{ln}（单位 nat），算困惑度必须用 \texttt{math.exp(loss)}；若误写成 \texttt{2 ** loss}，会严重低估真实困惑度！
+\end{enumerate}
+\end{failBox}
+
+\subsection{纯 NumPy 实战：信息论工具箱与双峰正/反向 KL 实测}
+
+下方代码实现一套零依赖、安全处理零概率的信息论基础工具箱，并当场验证分解恒等式 $H(P,Q) = H(P) + \DKL(P\|Q)$、例 \ref{ex:ch4-spam-mi} 的互信息以及图 \ref{fig:ch4-kl-bimodal} 中的双峰正/反向 KL 数值对比。
+
+\begin{lstlisting}[caption={安全版信息论工具箱与双峰正/反向 KL 实测（纯 NumPy）},label={lst:ch4-info-tools}]
+import numpy as np
+
+def entropy(p, base=np.e):
+    p = np.asarray(p, dtype=float)
+    mask = p > 0
+    return float(-np.sum(p[mask] * np.log(p[mask])) / np.log(base))
+
+def kl_div(p, q, base=np.e):
+    p, q = np.asarray(p, dtype=float), np.asarray(q, dtype=float)
+    mask = p > 0
+    if np.any(q[mask] <= 0):
+        return float("inf")
+    return float(np.sum(p[mask] * np.log(p[mask] / q[mask])) / np.log(base))
+
+def cross_entropy(p, q, base=np.e):
+    p, q = np.asarray(p, dtype=float), np.asarray(q, dtype=float)
+    mask = p > 0
+    if np.any(q[mask] <= 0):
+        return float("inf")
+    return float(-np.sum(p[mask] * np.log(q[mask])) / np.log(base))
+
+def mutual_info(joint_xy, base=np.e):
+    joint = np.asarray(joint_xy, dtype=float)
+    px = joint.sum(axis=1, keepdims=True)
+    py = joint.sum(axis=0, keepdims=True)
+    return kl_div(joint.ravel(), (px @ py).ravel(), base=base)
+
+# 1. Verify H(P, Q) = H(P) + KL(P || Q) with zero-entry safety
+P = np.array([0.5, 0.25, 0.25, 0.0])
+Q = np.array([0.25, 0.25, 0.25, 0.25])
+H_p, D_pq, CE_pq = entropy(P, 2), kl_div(P, Q, 2), cross_entropy(P, Q, 2)
+print(f"H(P)={H_p:.4f}, KL={D_pq:.4f}, CE={CE_pq:.4f}, gap={abs(CE_pq-(H_p+D_pq)):.1e}")
+# Verified output: H(P)=1.5000, KL=0.5000, CE=2.0000, gap=0.0e+00
+
+# 2. Verify Example 4.2 mutual information
+P_xy = np.array([[0.40, 0.10], [0.10, 0.40]])
+print(f"I(X; Y) = {mutual_info(P_xy, base=2):.4f} bits")  # 0.2781 bits
+
+# 3. Bimodal Forward KL vs Reverse KL numerical check
+x = np.linspace(-6.0, 6.0, 601)
+dx = x[1] - x[0]
+norm_pdf = lambda z, m, s: np.exp(-0.5 * ((z - m) / s)**2) / (np.sqrt(2*np.pi) * s)
+p = 0.5 * norm_pdf(x, -2.0, 0.6) + 0.5 * norm_pdf(x, 2.0, 0.6)
+p /= np.sum(p) * dx
+
+for tag, q in [("q_fwd(0, 2.09)", norm_pdf(x, 0.0, np.sqrt(4.36))),
+               ("q_rev(2, 0.60)", norm_pdf(x, 2.0, 0.6))]:
+    kl_pq = float(np.sum(p * np.log((p + 1e-15) / (q + 1e-15))) * dx)
+    kl_qp = float(np.sum(q * np.log((q + 1e-15) / (p + 1e-15))) * dx)
+    print(f"{tag}: KL(P||Q)={kl_pq:.3f}, KL(Q||P)={kl_qp:.3f}")
+# Verified output:
+# q_fwd(0, 2.09): KL(P||Q)=0.555, KL(Q||P)=1.175
+# q_rev(2, 0.60): KL(P||Q)=10.306, KL(Q||P)=0.692
+\end{lstlisting}
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch4-exercises}
+
+\exTier{A. 概念辨析与反例查错}{看清散度非对称、微分熵可负与逐点条件熵的微妙边界}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（信息论核心概念辨析）} 判断以下四个命题正误；对错误命题给出反例，对正确命题简述理由：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 因为 KL 散度满足 $\DKL(P\|Q) \ge 0$ 且 $\DKL(P\|Q)=0 \iff P=Q$，所以 $\DKL$ 是概率分布空间上的合法距离度量（满足对称性与三角不等式）；
+    \item 任何离散随机变量的 Shannon 熵必然非负，但连续随机变量的微分熵 $h(X) = -\int p(x)\ln p(x)\,dx$ 可以为负数；
+    \item 因为条件熵满足 $H(Y \mid X) \le H(Y)$，所以只要观测到任意具体特征值 $X = x_0$，条件熵 $H(Y \mid X = x_0)$ 就必然不超过边缘熵 $H(Y)$；
+    \item 对同一条测试文本和同一个语言模型，用 $\log_2$ 算平均交叉熵再取 $2^{(\cdot)}$ 与用 $\ln$ 算平均交叉熵再取 $\exp(\cdot)$，得到的困惑度 $\mathrm{PPL}$ 数值完全一致。
+  \end{enumerate}
+
+  \item \textbf{（KL 散度非对称与支集爆炸反例）} 在二元状态空间 $\mathcal{X} = \{0, 1\}$ 上完成两项反例构造与验算（均用自然对数 $\ln$）：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 取 $P = (0.9, 0.1)$ 与 $Q = (0.5, 0.5)$，手算 $\DKL(P\|Q)$ 与 $\DKL(Q\|P)$（保留四位小数），直观说明两者为何不等；
+    \item 构造一对分布 $P, Q$，使得 $\DKL(P\|Q)$ 为有限正数，但反向散度 $\DKL(Q\|P) = +\infty$，并用“正向 KL 零回避 / 反向 KL 零强制”解释其物理含义。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手打通二维联合熵、互信息、语言模型困惑度与高斯 KL}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（$2\times 2$ 联合分布全套信息量手算）} 设二元随机变量 $(X, Y)$ 的联合分布为：
+  \[
+    P(X=0, Y=0) = \frac{1}{2}, \quad P(X=0, Y=1) = 0, \quad P(X=1, Y=0) = \frac{1}{4}, \quad P(X=1, Y=1) = \frac{1}{4}.
+  \]
+  请以 $\log_2$（单位：bit）为单位，逐步手算以下六个量（写出精确表达式并保留四位小数）：
+  \[
+    H(X),\quad H(Y),\quad H(X, Y),\quad H(Y \mid X),\quad H(X \mid Y),\quad I(X; Y),
+  \]
+  并直接核验链式法则 $H(X,Y) = H(X) + H(Y\mid X) = H(Y) + H(X\mid Y)$ 与互信息对称性 $I(X;Y) = H(Y) - H(Y\mid X) = H(X) - H(X\mid Y)$。
+
+  \item \textbf{（语言模型困惑度与一维高斯 KL 手算）} 完成以下两项独立手算：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 某语言模型在一条含 $4$ 个词的测试句上，对真实下一个词给出的预测条件概率依次为 $(0.5,\allowbreak\; 0.25,\allowbreak\; 0.125,\allowbreak\; 0.5)$。手算平均每词交叉熵 $\bar{H}_{\mathrm{bit}}$（单位 bit）、$\bar{H}_{\mathrm{nat}}$（单位 nat）以及困惑度 $\mathrm{PPL}$；
+    \item 利用命题 \ref{prop:ch4-gaussian-kl} 的高斯 KL 闭式公式，分别手算 $\DKL(\mathcal{N}(1, 2^2)\,\|\,\mathcal{N}(0, 1))$ 与 $\DKL(\mathcal{N}(0, 1)\,\|\,\mathcal{N}(1, 2^2))$（单位 nat，保留四位小数），体会把宽分布逼近窄分布与把窄分布逼近宽分布的不对称代价。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{证明正向 KL 矩匹配最优性，掌握对称化 Jensen--Shannon 散度}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（单高斯正向 KL 极小化的精确矩匹配定理）} 设任意目标分布 $P$ 具有有限均值 $\mu_P = \E_P[X]$ 与有限正方差 $\sigma_P^2 = \Var_P(X)$。考虑用单高斯分布 $Q_{\mu,\sigma^2} = \mathcal{N}(\mu, \sigma^2)$ 去最小化正向 KL 散度：
+  \[
+    (\mu^*, (\sigma^*)^2) = \argmin_{\mu \in \R,\; \sigma^2 > 0} \DKL\bigl(P \,\|\, \mathcal{N}(\mu, \sigma^2)\bigr).
+  \]
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 将目标函数展开并去掉与 $(\mu, \sigma^2)$ 无关的项，证明其等价于最小化
+    \[
+      J(\mu, \sigma^2) = \frac{1}{2}\ln(2\pi \sigma^2) + \frac{\sigma_P^2 + (\mu_P - \mu)^2}{2\sigma^2};
+    \]
+    \item 对 $\mu$ 与 $\sigma^2$ 分别求偏导并令其为零，严格证明唯一全局最优解就是\textbf{矩匹配解} $\mu^* = \mu_P,\; (\sigma^*)^2 = \sigma_P^2$；
+    \item 利用此结论，三行算出双峰混合 $P = 0.5\mathcal{N}(-2, 0.6^2) + 0.5\mathcal{N}(2, 0.6^2)$ 的正向 KL 最优参数 $\mu_{\mathrm{fwd}} = 0$ 与 $\sigma_{\mathrm{fwd}} = \sqrt{4.36} \approx 2.088$。
+  \end{enumerate}
+  \exHint{第 (1) 问用到恒等式 $\E_P[(X - \mu)^2] = \Var_P(X) + (\mu_P - \mu)^2$；第 (3) 问用全期望与全方差公式：$\E_P[X^2] = 0.5(0.6^2 + (-2)^2) + 0.5(0.6^2 + 2^2) = 4.36$。}
+
+  \item \textbf{（对称且有界的 Jensen--Shannon 散度）} 为克服 KL 散度不对称且可能发散到 $+\infty$ 的缺陷，定义 \textbf{Jensen--Shannon 散度（JSD）}：记混合分布 $M := \frac{1}{2}(P + Q)$，
+  \[
+    \mathrm{JSD}(P \,\|\, Q) := \frac{1}{2}\DKL(P \,\|\, M) + \frac{1}{2}\DKL(Q \,\|\, M).
+  \]
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 证明 $\mathrm{JSD}(P\|Q) = \mathrm{JSD}(Q\|P) \ge 0$，且 $\mathrm{JSD}(P\|Q) = 0 \iff P = Q$；
+    \item 构造辅助二元随机变量 $Z \sim \mathrm{Bernoulli}(0.5)$，规定条件分布 $X \mid (Z=0) \sim P$、$X \mid (Z=1) \sim Q$。证明 $\mathrm{JSD}(P\|Q)$ 恰好等于互信息 $I(X; Z)$；
+    \item 结合 (2) 的结果，两行证明对\textbf{任意}两个分布 $P, Q$（哪怕支集完全不相交！），恒有上界 $\mathrm{JSD}(P\|Q) \le \ln 2$（以 $\log_2$ 计则为 $1\;\text{bit}$）。
+  \end{enumerate}
+  \exHint{第 (2) 问直接计算 $H(X) - H(X\mid Z) = H(M) - \frac{1}{2}H(P) - \frac{1}{2}H(Q)$ 并与 $\mathrm{JSD}$ 展开式核对；第 (3) 问利用 $I(X; Z) = H(Z) - H(Z\mid X) \le H(Z) = \ln 2$。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用 NumPy 实现决策树信息增益排位与双峰 KL 网格寻优}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（安全信息论工具箱与决策树根节点信息增益选特征）} 编写纯 NumPy 脚本完成以下两项任务：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 实现安全处理零概率的 \texttt{entropy}、\texttt{kl\_div}、\texttt{cross\_entropy} 与 \texttt{mutual\_info} 四个函数；随机生成 $100$ 对长度 $K = 8$ 的离散分布（含零元素，确保支集覆盖）验证 $|H(P, Q) - (H(P) + \DKL(P\|Q))| < 10^{-12}$ 且 $\DKL(P\|Q) \ge -10^{-15}$；
+    \item 给定一个含 $8$ 条样本的二分类小数据集（标签与三个候选二值特征如下）：
+    \begin{align*}
+      y &= [1, 1, 1, 1, 0, 0, 0, 0], & F_1 &= [1, 1, 1, 0, 0, 0, 0, 1], \\
+      F_2 &= [1, 1, 0, 0, 1, 1, 0, 0], & F_3 &= [1, 1, 1, 1, 0, 0, 1, 0].
+    \end{align*}
+    计算每个特征与标签 $y$ 的信息增益 $\mathrm{IG}(y, F_j) = I(F_j; y)$（单位 bit），选出最优决策树根节点分裂特征。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,第 (1) 问所有 $100$ 对分布的恒等式最大绝对误差须 $< 10^{-12}$ 且不能出现任何 \texttt{NaN}；第 (2) 问的经验信息增益须精确命中：$\mathrm{IG}(y, F_1) = 0.1887\;\text{bit}$、$\mathrm{IG}(y, F_2) = 0.0000\;\text{bit}$（与标签完全独立）、$\mathrm{IG}(y, F_3) = 0.5488\;\text{bit}$，最优分裂特征为 $F_3$。}
+
+  \item \textbf{（双峰分布正向 vs 反向 KL 数值寻优复现）} 在一维网格 $x \in [-6, 6]$（$601$ 个等距节点）上构造真实双峰分布 $P(x) = 0.5\,\mathcal{N}(-2, 0.6^2) + 0.5\,\mathcal{N}(2, 0.6^2)$（并在网格上归一化使 $\sum p(x)\Delta x = 1$）。编写纯 NumPy 网格搜索脚本，在 $\mu \in [-2.5, 2.5]$（步长 $0.05$）与 $\sigma \in [0.3, 2.8]$（步长 $0.025$）组成的 $101 \times 101$ 参数网格上：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 寻找使正向散度 $\DKL(P \| \mathcal{N}(\mu, \sigma^2))$ 最小的最优参数 $(\mu_{\mathrm{fwd}}, \sigma_{\mathrm{fwd}})$；
+    \item 寻找使反向散度 $\DKL(\mathcal{N}(\mu, \sigma^2) \| P)$ 最小的最优参数 $(\mu_{\mathrm{rev}}, \sigma_{\mathrm{rev}})$；
+    \item 分别报告两组最优解下的 $\DKL(P\|Q)$ 与 $\DKL(Q\|P)$ 数值，核验其与表 \ref{tab:ch4-kl-bimodal} 的吻合程度。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,正向 KL 搜索结果须满足 $\mu_{\mathrm{fwd}} \in [-0.05, 0.05]$、$\sigma_{\mathrm{fwd}} \in [2.05, 2.13]$，且对应 $\DKL(P\|Q) \approx 0.555 \pm 0.005$、$\DKL(Q\|P) \approx 1.175 \pm 0.015$；反向 KL 搜索结果须满足 $|\mu_{\mathrm{rev}}| \in [1.95, 2.05]$、$\sigma_{\mathrm{rev}} \in [0.57, 0.63]$，且对应 $\DKL(Q\|P) \approx 0.692 \pm 0.005$、$\DKL(P\|Q) > 9.5$（精确峰处约 $10.306$）。}
+\end{enumerate}

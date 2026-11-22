@@ -1,0 +1,804 @@
+\chapter[分布式训练、LoRA、量化与高效推理]{分布式训练、低比特量化与高效推理系统}
+\label{ch:dist-quant-serving}
+
+\chapEpigraph{人工智能七十年研究史给我们的最大教训是：能够借力通用算力的方法，最终总能以压倒性优势胜出。}{Richard S. Sutton（理查德·萨顿，《苦涩的教训》，2019）}
+
+\begin{chapIntro}{本章导读：从单卡极致走向万卡协同与毫秒级生产推理}
+在第~\ref{ch:hardware-roofline-flash} 章中，我们借助 Roofline 模型与 FlashAttention 压榨出了单张 GPU 的每一分算力与片上 SRAM 带宽。然而，静态显存的 $16\Phi$ 法则立刻抛出了一个无法在单卡上解决的硬边界：一座 70B 参数的大模型仅静态训练状态就需要 $1120\,\mathrm{GB}$ 显存，405B 模型更是高达 $6.5\,\mathrm{TB}$——相当于数十甚至上百张旗舰 GPU 的显存总和！另一方面，当模型训练完毕、面向千万并发用户上线服务时，如何在单请求严重受限于 HBM 带宽的 Decode 阶段同时做到\textbf{低成本微调、高吞吐并发、低延迟首字与零精度损失加速}，成为当代 AI 系统工程皇冠上的明珠。
+
+本章将沿着“\textbf{万卡训练 $\to$ 轻量微调 $\to$ 低比特压缩 $\to$ 高吞吐推理引擎}”的全生命周期，完成四场系统与数学的深度会师：
+\begin{enumerate}
+  \item \textbf{集合通信与 3D 并行精确账本}：严格证明 Ring AllReduce 每卡 $2\frac{P-1}{P}M$ 的集群规模无关通信量；逐字节推导 DDP 与 ZeRO Stage 1/2/3（FSDP）的显存与通信公式，并严谨剖析 Megatron-LM 张量并行与 GPipe / 1F1B 流水线并行的精确气泡率 $\frac{p-1}{m+p-1}$。
+  \item \textbf{参数高效微调（LoRA）与零延迟合并}：刻画低秩增量 $\Delta W = \frac{\alpha}{r}BA$ 的参数压缩率与 $B=0$ 初始化铁律，并基于 \texttt{data/lora\_rank.csv} 实测展示秩从 $r=1$ 跃升至 $r=4$ 时测试误差骤降 $100\times$ 的内在维度相变。
+  \item \textbf{低比特后训练量化（INT8 / INT4）}：数学证明重尾离群通道如何彻底摧毁逐张量量化，而逐通道/分组量化如何隔离离群步长（衔接 SmoothQuant、AWQ 与 GPTQ），并以实测验证 INT8 相对误差骤降 $7\times$、INT4 从崩溃（$63.8\%$）挽救至 $12.1\%$。
+  \item \textbf{现代大模型推理系统三驾马车}：剖析连续批处理（Continuous Batching）、直接移植 408 操作系统虚拟分页思想的 PagedAttention（将 KV 显存碎片从 $>60\%$ 压至 $<4\%$），以及投机解码（Speculative Decoding）的\textbf{精确无损分布保持定理}。
+\end{enumerate}
+\end{chapIntro}
+
+\section{集合通信原语与 3D 并行训练账本}
+\label{sec:3d-parallelism}
+
+一旦模型突破单张 GPU 的显存上限，计算图就必须被切分到多卡、多机乃至数万张加速卡上协同执行。在分布式训练中，跨卡通信不再是无伤大雅的配角，而是决定集群扩展效率（MFU）的生死瓶颈。
+
+\subsection{四大集合通信原语与 Ring AllReduce 最优性证明}
+
+分布式深度学习框架（如 NCCL）用四种核心集合通信原语（Collective Primitives）编排 $P$ 张 GPU 之间的数据交换：
+\begin{itemize}
+  \item \textbf{Broadcast（广播）}：将单张源卡上的张量复制到其余全部 $P-1$ 张卡；
+  \item \textbf{ReduceScatter（归约散射）}：对 $P$ 张卡上各自持有的等长张量按元素求和（或其他结合律归约），并将结果均匀切分为 $P$ 份，每张卡仅保留其中对应的 $1/P$ 份；
+  \item \textbf{AllGather（全收集）}：每张卡各自持有一份长度为 $M/P$ 的分片，通信结束后每张卡都拼接出完整的长度为 $M$ 的全量张量；
+  \item \textbf{AllReduce（全归约）}：对 $P$ 张卡上的张量按元素求和，且通信结束后\textbf{每张卡都拿到完整的全局求和结果}。
+\end{itemize}
+请注意分布式系统中最重要的一条结构恒等式：
+\begin{equation}
+  \mathrm{AllReduce} \;\equiv\; \mathrm{ReduceScatter} \;+\; \mathrm{AllGather}.
+  \label{eq:allreduce-decomp}
+\end{equation}
+如果天真地采用“参数服务器（Parameter Server）”中心节点汇聚全部 $P$ 张卡的梯度再广播回去，中心节点的网卡带宽会随 $P$ 线性拥堵。而 \textbf{Ring AllReduce（环形全归约）}凭借式~\eqref{eq:allreduce-decomp} 的分解，彻底消除了集群规模对带宽吞吐的制约！
+
+\begin{thmBox}
+\begin{theorem}[Ring AllReduce 的精确通信量与集群规模无关性]
+\label{thm:ring-allreduce}
+设有 $P \ge 2$ 张 GPU 构成逻辑单向环 $0 \to 1 \to \cdots \to P-1 \to 0$，每张 GPU 持有长度为 $M$ 字节的局部梯度张量 $g^{(k)}$，相邻链路单向带宽为 $B$、单次传输固定延迟为 $\alpha$。通过将每个张量均分为 $P$ 个分片（每片大小 $M/P$ 字节），依次执行 $P-1$ 步环形 ReduceScatter 与 $P-1$ 步环形 AllGather，则：
+\begin{enumerate}
+  \item 通信结束时，每张 GPU 精确获得全局和 $\sum_{k=0}^{P-1} g^{(k)}$；
+  \item 每张 GPU 累计发送（及接收）的精确总字节数为
+  \begin{equation}
+    V_{\mathrm{Ring}} \;=\; 2 \cdot \frac{P - 1}{P}\, M \;<\; 2 M;
+    \label{eq:ring-vol}
+  \end{equation}
+  \item 忽略本地加法耗时，总通信墙钟时间为
+  \begin{equation}
+    T_{\mathrm{Ring}} \;=\; 2(P - 1)\alpha \;+\; 2 \cdot \frac{P - 1}{P} \cdot \frac{M}{B}.
+    \label{eq:ring-time}
+  \end{equation}
+\end{enumerate}
+当梯度张量足够大（$M \gg P \alpha B$）时，带宽耗时 $\frac{2(P-1)}{P}\frac{M}{B} \to \frac{2M}{B}$ \textbf{完全独立于 GPU 总数 $P$}！
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+将每张 GPU $k \in \{0, \dots, P-1\}$ 的张量切分为 $P$ 块分片 $g^{(k)}[0], g^{(k)}[1], \dots, g^{(k)}[P-1]$，每块大小均为 $M/P$ 字节。
+
+\textbf{阶段一：环形 ReduceScatter（共 $P-1$ 轮）}。在第 $r$ 轮（$r = 0, 1, \dots, P-2$）中，所有 GPU 并发工作：每张卡 $k$ 将其当前负责的块索引 $c(k, r) = (k - r) \bmod P$ 发送给顺时针下一张卡 $(k+1)\bmod P$，同时从上一张卡 $(k-1)\bmod P$ 接收对应块并\textbf{累加到自己的本地对应分片上}。经过 $P-1$ 轮传递后，每个分片恰好顺时针游历了全部 $P$ 张卡各一次并累加了所有卡的贡献；因此每张卡 $k$ 上恰好有一个分片（索引为 $(k+1)\bmod P$）已经持有完整的全局归约和！本阶段每张卡发送了 $P-1$ 次、每次 $M/P$ 字节，发送量精确为 $\frac{P-1}{P}M$。
+
+\textbf{阶段二：环形 AllGather（共 $P-1$ 轮）}。此时每张卡都手握一块“已经求和完毕的成品分片”。继续沿同一逻辑环并发传递 $P-1$ 轮：每张卡把自己刚收到的（或初始持有的）成品分片发给下一张卡，接收后直接\textbf{覆盖写入}对应槽位（无需再做加法）。经过 $P-1$ 轮后，全部 $P$ 块成品分片均传播到每一张 GPU 上，每张卡集齐完整的全局梯度和！本阶段每张卡同样发送了 $\frac{P-1}{P}M$ 字节。
+
+两阶段合计，每张 GPU 累计发送与接收字节数均为 $V_{\mathrm{Ring}} = 2\frac{P-1}{P}M$；每一轮所有 $P$ 条有向链路同时满载并发，单轮耗时 $\alpha + \frac{M}{PB}$，共 $2(P-1)$ 轮即得式~\eqref{eq:ring-time}。此外，在任意规约算法中，每张卡的其余 $(P-1)/P$ 份结果至少需要从外部接收一次（下界 $\frac{P-1}{P}M$），且自己最终分片至少需经归约传播（再加下界 $\frac{P-1}{P}M$），故 Ring AllReduce 在带宽项上是\textbf{严格信息论最优的}。证毕。
+\end{proof}
+
+\subsection{数据并行（DDP）与 ZeRO Stage 1 / 2 / 3（FSDP）精确显存通信账本}
+
+回顾第~\ref{ch:hardware-roofline-flash} 章式~\eqref{eq:16phi-rule} 建立的静态显存 $16\Phi$ 法则：BF16 权重占 $2\Phi$ 字节，BF16 梯度占 $2\Phi$ 字节，FP32 主权重与 AdamW 状态合计占 $12\Phi$ 字节。为了清晰区分“参数个数”与“BF16 权重字节数”，下文统一记模型 BF16 参数体积为 $\Psi \triangleq 2\Phi$（字节）。
+
+最基础的\textbf{分布式数据并行（DDP）}在 $N_d$ 张 GPU 上各自复制一份完整的模型状态（每卡消耗全额 $16\Phi$ 字节），每卡处理不同的微批数据，反向传播结束后通过一次 Ring AllReduce 同步全部 BF16 梯度（每卡通信量 $\approx 2\Psi = 4\Phi$ 字节，且可在反向传播计算深层梯度时按桶异步重叠隐藏通信延迟）。
+
+DDP 的痛点一目了然：当 $N_d = 64$ 时，相同的优化器状态、梯度和权重在 64 张卡上足足冗余拷贝了 64 份！微软 DeepSpeed 提出的 \textbf{ZeRO（Zero Redundancy Optimizer）}——以及 PyTorch 官方原生实现的 \textbf{FSDP（Fully Sharded Data Parallel）}——凭借式~\eqref{eq:allreduce-decomp} 的洞察，分三级彻底切碎了这份冗余：
+\begin{enumerate}
+  \item \textbf{ZeRO-1（切分优化器状态，$P_{\mathrm{os}}$）}：将 $12\Phi$ 字节的 FP32 主权重与 AdamW 状态均匀切分到 $N_d$ 张卡上，每卡仅负责更新自己分管的那 $1/N_d$ 参数！反向传播结束后，不再做全量 AllReduce，而是先做一次 \textbf{ReduceScatter}（通信量 $\Psi$）让每卡只拿到自己分管参数的全局梯度，各自在本地执行 AdamW 更新，最后再做一次 \textbf{AllGather}（通信量 $\Psi$）把更新后的 BF16 权重广播回全集群。总通信量仍为 $\Psi + \Psi = 2\Psi$（\textbf{与 DDP 完全相同，零额外通信代价！}），而单卡静态显存骤降至：
+  \[
+    M_{\mathrm{ZeRO\text{-}1}} \;=\; 2\Phi + 2\Phi + \frac{12\Phi}{N_d} \;=\; 4\Phi + \frac{12\Phi}{N_d}.
+  \]
+  \item \textbf{ZeRO-2（切分优化器状态 + 梯度，$P_{\mathrm{os+g}}$）}：反向传播逐层计算完梯度后，立刻就地触发该层的 ReduceScatter 并释放非己分管的梯度显存！通信量\textbf{依然保持 $2\Psi$ 不变}，单卡静态显存进一步压至：
+  \[
+    M_{\mathrm{ZeRO\text{-}2}} \;=\; 2\Phi + \frac{2\Phi + 12\Phi}{N_d} \;=\; 2\Phi + \frac{14\Phi}{N_d}.
+  \]
+  \item \textbf{ZeRO-3 / FSDP（全切分：优化器状态 + 梯度 + 模型参数，$P_{\mathrm{os+g+p}}$）}：连 $2\Phi$ 的 BF16 权重也按 $1/N_d$ 彻底切分到各卡！代价仅在于：前向传播算到第 $\ell$ 层时，临时对第 $\ell$ 层权重执行一次 AllGather（凑齐整层权重算完后立刻释放，累计前向通信 $+\Psi$）；反向传播退回第 $\ell$ 层时，再 AllGather 一次权重以算梯度（$+\Psi$），算完后 ReduceScatter 梯度并释放权重（$+\Psi$）。总通信量变为 $3\Psi$——\textbf{仅比 DDP 多了 $1.5\times$ 通信量}（且完全可以通过双缓冲预取与计算高度重叠），却换来了静态显存严格的\textbf{线性无限扩展}：
+  \[
+    M_{\mathrm{ZeRO\text{-}3}} \;=\; \frac{16\Phi}{N_d}.
+  \]
+\end{enumerate}
+
+表~\ref{tab:zero-ledger} 完整汇总了 DDP 与三级 ZeRO 的精确显存与通信账本。原本在单卡上需要 $1.12\,\mathrm{TB}$ 的 70B 大模型，在 64 卡 ZeRO-3 下每卡静态显存仅剩区区 $17.5\,\mathrm{GB}$！
+
+\begin{table}[htbp]
+\centering
+\caption{DDP 与 ZeRO-1/2/3（FSDP）在 $N_d$ 卡上的单卡静态显存与通信量精确对比（$\Psi = 2\Phi$ 为 BF16 权重字节数）。}
+\label{tab:zero-ledger}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{并行策略} & \textbf{单卡静态显存（Bytes）} & \textbf{7B ($N_d=8$)} & \textbf{70B ($N_d=64$)} & \textbf{每步单卡通信量} \\
+\midrule
+DDP（无切分） & $16\Phi$ & $112.0\,\mathrm{GB}$ & $1120.0\,\mathrm{GB}$ & $2\Psi$（AllReduce） \\
+ZeRO-1（切优化器） & $4\Phi + 12\Phi / N_d$ & $38.5\,\mathrm{GB}$ & $293.1\,\mathrm{GB}$ & $2\Psi$（RS + AG） \\
+ZeRO-2（+ 切梯度） & $2\Phi + 14\Phi / N_d$ & $26.3\,\mathrm{GB}$ & $155.3\,\mathrm{GB}$ & $2\Psi$（RS + AG） \\
+ZeRO-3 / FSDP（全切） & $16\Phi / N_d$ & $\mathbf{14.0\,\mathrm{GB}}$ & $\mathbf{17.5\,\mathrm{GB}}$ & $3\Psi$（$1.5\times$ 通信） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{张量并行（Megatron-LM）：单层内仅需一次 AllReduce 的矩阵巧切}
+\label{subsec:tensor-parallel}
+
+当单层矩阵本身大到无法装入单卡，或批大小不够大而亟需降低单卡激活显存与单步延迟时，仅仅沿数据维度切分（DDP/ZeRO）已力不从心，我们需要沿权重矩阵的内部维度把\textbf{单个算子拆到 $N_t$ 张卡上联合计算}——这就是 NVIDIA 提出的\textbf{张量模型并行（Tensor Parallelism, TP）}。
+
+以 Transformer 中最耗算力的两层 MLP 块 $Z = \mathrm{GeLU}(X W_1) W_2$ 为例（$W_1 \in \R^{d \times 4d}, W_2 \in \R^{4d \times d}$）。若天真地对 $W_1$ 按行切分，算完局部乘积后必须先通信求和才能喂给非线性函数 $\mathrm{GeLU}$！Megatron-LM 的神来之笔在于采用\textbf{“先列切分、后行切分”的配对设计}（以 $N_t = 2$ 为例，一般 $N_t$ 路同理）：
+\begin{enumerate}
+  \item \textbf{第一层列并行（Column Parallel）}：将 $W_1$ 按列切分为 $W_1 = \begin{bmatrix} W_{1a} & W_{1b} \end{bmatrix}$（卡 0 持 $W_{1a}$，卡 1 持 $W_{1b}$），输入 $X$ 同步广播给两卡。由于逐元素非线性 $\mathrm{GeLU}$ 与列拼接严格可交换：
+  \begin{equation}
+    Y \;=\; \mathrm{GeLU}\!\big(X \begin{bmatrix} W_{1a} & W_{1b} \end{bmatrix}\big)
+    \;=\; \Big[\,\underbrace{\mathrm{GeLU}(X W_{1a})}_{Y_a \text{（卡 0 本地）}},\;\; \underbrace{\mathrm{GeLU}(X W_{1b})}_{Y_b \text{（卡 1 本地）}}\,\Big],
+    \label{eq:tp-col}
+  \end{equation}
+  第一层前向\textbf{零跨卡通信}！
+  \item \textbf{第二层行并行（Row Parallel）}：将 $W_2$ 顺势按行切分为 $W_2 = \begin{bmatrix} W_{2a} \\ W_{2b} \end{bmatrix}$（卡 0 持 $W_{2a}$，卡 1 持 $W_{2b}$）。两卡直接用各自手头的 $Y_a, Y_b$ 做本地矩阵乘，由分块矩阵乘法恒等式：
+  \begin{equation}
+    Z \;=\; \begin{bmatrix} Y_a & Y_b \end{bmatrix} \begin{bmatrix} W_{2a} \\ W_{2b} \end{bmatrix}
+    \;=\; Y_a W_{2a} \;+\; Y_b W_{2b},
+    \label{eq:tp-row}
+  \end{equation}
+  最后仅需执行\textbf{一次 AllReduce} 求和，即可在每张卡上还原完整输出 $Z$！
+\end{enumerate}
+
+对于多头自注意力（MHA/GQA），逻辑完全同构：把 $h$ 个独立的注意力头均匀分给 $N_t$ 张卡（等价于对 $W_Q, W_K, W_V$ 做列并行），各卡完全独立地完成本地注意力计算（零通信），再对输出投影矩阵 $W_O$ 做行并行，并在块尾做\textbf{一次 AllReduce}！反向传播中，张量并行在前向入口定义恒等算子 $f$（反向为 AllReduce）、出口定义 AllReduce 算子 $g$（反向为恒等），因此\textbf{每个 Transformer 层（Attention + MLP）在前向共需 2 次 AllReduce、反向共需 2 次 AllReduce}。
+
+\begin{remark}[为什么张量并行必须严格限制在单机 NVLink 内部？]
+与 ZeRO 可将通信重叠在整层计算背后不同，TP 的 AllReduce 位于\textbf{每一层的临界路径内部}，下一层必须死等 AllReduce 完成才能开算！一台 8 卡 H100 服务器内部卡间拥有 $900\,\mathrm{GB/s}$ 的双向 NVLink 高速互联，而跨机节点间的 InfiniBand 网络带宽通常仅为 $50\text{--}100\,\mathrm{GB/s}$（相差近一个数量级）。因此工业界铁律是：\textbf{张量并行度严格控制在单机内（$N_t \le 8$），跨机扩展必须交给流水线并行与数据并行！}
+\end{remark}
+
+\subsection{流水线并行（GPipe 与 1F1B）：气泡率与峰值显存定理}
+\label{subsec:pipeline-parallel}
+
+当需要跨越多台服务器切分一座超深模型（如 $L = 80\text{--}126$ 层）时，\textbf{流水线并行（Pipeline Parallelism, PP）}按层深将模型切分为 $p$ 个连续阶段（Stage $0, 1, \dots, p-1$），每个阶段仅需通过极轻量的点对点通信（Send/Recv）把层边界激活传给下一台服务器（通信量远小于 TP 的层内 AllReduce）。
+
+如果把一整个全局批次（Global Batch）整块送进流水线，同一时刻只有 1 台机器在干活，其余 $p-1$ 台全部干等，空闲率高达 $(p-1)/p$！为了填满流水线，GPipe 将一个全局批次切分为 $m$ 个微批次（Micro-Batch）依次注入流水线；而 Megatron-LM 提出的 \textbf{1F1B（One Forward, One Backward）调度}更进一步，在预热填满流水线后立刻让每个阶段进入“算一个微批次前向、紧接着算一个微批次反向并释放其激活”的稳态交替节奏。
+
+\begin{thmBox}
+\begin{theorem}[流水线气泡率与 1F1B 峰值激活显存上界]
+\label{thm:pipeline-bubble}
+设流水线并行包含 $p$ 个均匀划分的阶段，将单个训练步拆分为 $m$ 个相同大小的微批次（$m \ge p$）。假设每个阶段处理单个微批次的前向耗时为 $t_F$、反向耗时为 $t_B$，忽略极小的点对点边界通信延迟，则：
+\begin{enumerate}
+  \item 无论是 \textbf{GPipe}（全部 $m$ 个微批次前向完毕后再统一反向）还是 \textbf{1F1B} 稳态调度，单步总墙钟耗时与流水线空闲气泡比例（Bubble Fraction）均精确为
+  \begin{equation}
+    T_{\mathrm{step}} \;=\; (m + p - 1)(t_F + t_B), \qquad
+    f_{\mathrm{bubble}} \;=\; \frac{(p - 1)(t_F + t_B)}{(m + p - 1)(t_F + t_B)} \;=\; \frac{p - 1}{m + p - 1}.
+    \label{eq:pp-bubble}
+  \end{equation}
+  \item 在峰值激活显存占用上（以单个微批次在一个阶段上的激活显存 $M_{\mathrm{mb}}$ 为单位）：
+  \begin{itemize}
+    \item \textbf{GPipe} 必须在每个阶段保留全部 $m$ 个微批次的激活，峰值激活显存为 $\mathbf{m \cdot M_{\mathrm{mb}} = O(m)}$；
+    \item \textbf{1F1B} 在最重负载的阶段 0 上，在飞（In-Flight）微批次个数永不超过 $p$ 个（第 $s$ 阶段最多保留 $p - s$ 个），峰值激活显存严格降至 $\mathbf{p \cdot M_{\mathrm{mb}} = O(p)}$，\textbf{彻底与微批数 $m$ 解耦}！
+  \end{itemize}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+（1）对任意阶段（例如首阶段 Stage 0），其有效计算总时长恒为 $T_{\mathrm{useful}} = m(t_F + t_B)$。
+在 GPipe 中，第 1 个微批次须依次经过全部 $p$ 个阶段前向到达末阶段（耗时 $p t_F$），随后其余 $m-1$ 个微批次紧密衔接，故全前向结束时刻为 $(m + p - 1) t_F$；对称地，反向传播从末阶段逆流回首阶段同样消耗 $(m + p - 1) t_B$，总耗时 $T_{\mathrm{step}} = (m + p - 1)(t_F + t_B)$。
+
+在 1F1B 调度中，观察末阶段 Stage $p-1$：它需等待第 1 个微批次穿过前 $p-1$ 个阶段前向（空闲 $(p-1)t_F$），随后立刻无任何空隙地连续交替执行全部 $m$ 组“1F + 1B”（耗时 $m(t_F + t_B)$），当最后一个微批次反向离开 Stage $p-1$ 后，还需沿前 $p-1$ 个阶段反向收尾（耗末段外空闲 $(p-1)t_B$）。因此 1F1B 的端到端总耗时依然精确为 $T_{\mathrm{step}} = (m + p - 1)(t_F + t_B)$！两者的空闲气泡时间均为 $T_{\mathrm{step}} - T_{\mathrm{useful}} = (p-1)(t_F + t_B)$，作比即得 $f_{\mathrm{bubble}} = \frac{p-1}{m+p-1}$。
+
+（2）在 GPipe 中，阶段 0 算完所有 $m$ 个微批次的前向时，连第 1 个微批次的反向都尚未传回，因此全部 $m$ 份激活必须同时驻留显存。反观 1F1B：在预热阶段，阶段 $s$（$0 \le s \le p-1$）恰好先执行 $p - s$ 次前向传播；就在阶段 0 完成第 $p$ 个微批次的前向（此刻恰有 $p$ 份激活在飞）之际，第 1 个微批次的反向梯度也正好穿越流水线传回阶段 0！随后阶段 0 每完成 1 次反向（立即释放 1 份激活），才注入 1 个新前向（新增 1 份激活），稳态在飞激活份数恒定锁死在 $p$ 份！证毕。
+\end{proof}
+
+这条定理精准点破了 1F1B 的威力：要将气泡率压到 $10\%$ 以下，由式~\eqref{eq:pp-bubble} 需令 $m \ge 9(p-1)$（例如 $p = 8$ 时取 $m = 64$）。若用 GPipe，你必须硬扛 $64$ 份微批激活显存直接 OOM；而改用 1F1B 后，哪怕把 $m$ 增至 $64$ 甚至 $128$，峰值激活显存也纹丝不动地锁死在 $p = 8$ 份（直接省下 $8\times$ 以上显存）！
+
+将上述三种正交并行维度嵌套组合——\textbf{单机内 NVLink 做张量并行（$N_t$） $\times$ 跨机做流水线并行（$N_p$） $\times$ 顶层集群副本做 ZeRO 数据并行（$N_d$）}（总卡数 $N_{\mathrm{GPU}} = N_t \cdot N_p \cdot N_d$）——便构成了万卡级大模型预训练的黄金架构 \textbf{3D 并行（3D Parallelism）}，如图~\ref{fig:3d-parallel-and-1f1b} 所示。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  fblk/.style={rectangle, draw=tealDark, fill=teal!28, minimum width=6.2mm, minimum height=4.8mm, inner sep=0pt, font=\tiny\bfseries, text=ink},
+  bblk/.style={rectangle, draw=ochre, fill=ochre!30, minimum width=9.4mm, minimum height=4.8mm, inner sep=0pt, font=\tiny\bfseries, text=ink}
+]
+  % Left: 3D Parallelism Topology
+  \node[font=\sffamily\small\bfseries, color=tealDark] at (-4.1, 3.45) {(a) 万卡集群 3D 并行拓扑映射};
+
+  % Replica 0 box (Front)
+  \draw[navy, thick, rounded corners=1.6mm, fill=navyLight!65] (-7.4, -1.88) rectangle (-0.7, 3.05);
+  \node[anchor=west, font=\sffamily\scriptsize\bfseries, color=navy] at (-7.22, 2.75) {数据并行副本 0（ZeRO / FSDP 跨副本同步）};
+
+  % 3 Pipeline stages inside Replica 0
+  \foreach \s/\lbl/\x in {0/Stage 0 (节点 0)/-7.15, 1/Stage 1 (节点 1)/-4.90, 2/Stage 2 (节点 2)/-2.65} {
+    \draw[teal, thick, rounded corners=1.2mm, fill=white] (\x, -1.35) rectangle (\x+1.90, 2.35);
+    \node[font=\tiny\bfseries, color=tealDark] at (\x+0.95, 2.12) {\lbl};
+    \foreach \g in {0,1,2,3} {
+      \fill[tealLight, draw=tealLine, rounded corners=0.5mm] (\x+0.28, 1.44-\g*0.64) rectangle (\x+1.82, 1.86-\g*0.64);
+      \node[font=\tiny, color=ink] at (\x+1.05, 1.65-\g*0.64) {GPU \g\ (TP)};
+    }
+    % Intra-node NVLink double arrow (cleanly separated from GPU pills)
+    \draw[{Stealth[length=1.4mm]}-{Stealth[length=1.4mm]}, thick, gold] (\x+0.13, -0.50) -- (\x+0.13, 1.78);
+  }
+  % Inter-node PP arrows
+  \draw[-{Stealth[length=2mm]}, very thick, ochre] (-5.25, 0.55) -- node[above, font=\tiny\bfseries, color=ochre] {PP} (-4.90, 0.55);
+  \draw[-{Stealth[length=2mm]}, very thick, ochre] (-3.00, 0.55) -- node[above, font=\tiny\bfseries, color=ochre] {PP} (-2.65, 0.55);
+
+  % Legend bars under left
+  \node[font=\tiny, color=gold!85!black] at (-5.65, -1.64) {\textbf{金线}：单机内 NVLink (TP)};
+  \node[font=\tiny, color=ochre] at (-2.35, -1.64) {\textbf{橙箭}：跨节点点对点 (PP)};
+
+  % Replica 1 hint arrow
+  \draw[<->, very thick, dashed, navy] (-4.05, -1.92) -- (-4.05, -2.35)
+    node[below, font=\scriptsize\bfseries, color=navy] {跨副本 Ring AllReduce / ReduceScatter（DP / ZeRO）};
+
+  % Right: GPipe vs 1F1B Timeline (p=3 stages, m=4 micro-batches)
+  \node[font=\sffamily\small\bfseries, color=navy] at (4.05, 3.35) {(b) GPipe vs 1F1B 流水线调度（$p=3, m=4$）};
+
+  % GPipe sub-panel
+  \node[anchor=west, font=\scriptsize\bfseries, color=ochre] at (0.3, 2.75) {GPipe：峰值激活 $O(m)=4$ 份};
+  \foreach \st/\y in {0/2.25, 1/1.68, 2/1.11} {
+    \node[anchor=east, font=\tiny\bfseries, color=slate] at (0.75, \y) {S\st};
+  }
+  % GPipe Stage 0: F1..F4 then bubble then B1..B4
+  \foreach \k in {1,2,3,4} {
+    \node[fblk] at (0.8+\k*0.64, 2.25) {F\k};
+    \node[fblk] at (1.44+\k*0.64, 1.68) {F\k};
+    \node[fblk] at (2.08+\k*0.64, 1.11) {F\k};
+  }
+  % GPipe Backward (tB = 1.5 tF -> width 9.4mm vs 6.2mm, step 0.96)
+  \foreach \k in {1,2,3,4} {
+    \node[bblk] at (4.52+\k*0.96, 1.11) {B\k};
+    \node[bblk] at (5.48+\k*0.96, 1.68) {B\k};
+    \node[bblk] at (6.44+\k*0.96, 2.25) {B\k};
+  }
+  \node[font=\tiny\bfseries, color=slate] at (4.7, 2.25) {气泡};
+
+  % 1F1B sub-panel
+  \node[anchor=west, font=\scriptsize\bfseries, color=tealDark] at (0.3, 0.35) {1F1B：气泡率相同，峰值激活骤降至 $O(p)=3$ 份！};
+  \foreach \st/\y in {0/-0.18, 1/-0.75, 2/-1.32} {
+    \node[anchor=east, font=\tiny\bfseries, color=slate] at (0.75, \y) {S\st};
+  }
+  % Stage 2 (bottom): F1 B1 F2 B2 F3 B3 F4 B4
+  \node[fblk] at (2.72, -1.32) {F1};
+  \node[bblk] at (3.52, -1.32) {B1};
+  \node[fblk] at (4.32, -1.32) {F2};
+  \node[bblk] at (5.12, -1.32) {B2};
+  \node[fblk] at (5.92, -1.32) {F3};
+  \node[bblk] at (6.72, -1.32) {B3};
+  \node[fblk] at (7.52, -1.32) {F4};
+  \node[bblk] at (8.32, -1.32) {B4};
+
+  % Stage 1 (middle): F1 F2 B1 F3 B2 F4 B3 B4
+  \node[fblk] at (2.08, -0.75) {F1};
+  \node[fblk] at (2.72, -0.75) {F2};
+  \node[bblk] at (4.48, -0.75) {B1};
+  \node[fblk] at (5.28, -0.75) {F3};
+  \node[bblk] at (6.08, -0.75) {B2};
+  \node[fblk] at (6.88, -0.75) {F4};
+  \node[bblk] at (7.68, -0.75) {B3};
+  \node[bblk] at (9.28, -0.75) {B4};
+
+  % Stage 0 (top): F1 F2 F3 B1 F4 B2 B3 B4
+  \node[fblk] at (1.44, -0.18) {F1};
+  \node[fblk] at (2.08, -0.18) {F2};
+  \node[fblk] at (2.72, -0.18) {F3};
+  \node[bblk] at (5.44, -0.18) {B1};
+  \node[fblk] at (6.24, -0.18) {F4};
+  \node[bblk] at (7.04, -0.18) {B2};
+  \node[bblk] at (8.64, -0.18) {B3};
+  \node[bblk] at (10.24, -0.18) {B4};
+
+  % Annotation note for 1F1B early release
+  \node[font=\tiny\bfseries, color=tealDark, align=center] at (5.44, -2.02) {稳态 1F1B：S0 在 B1 完成后立刻释放 F1 激活，再注入 F4，在飞份数恒定 $\le p=3$};
+\end{tikzpicture}%
+}
+\caption{3D 并行拓扑映射与流水线调度对比。(a) 将通信密集的 TP 锁在单机 NVLink 内，较轻量的 PP 跨越节点，顶层以 ZeRO/DP 水平复制；(b) 1F1B 在保持与 GPipe 相同气泡率 $\frac{p-1}{m+p-1}$ 的前提下，提前完成早期微批次的反向传播并立刻释放激活显存。}
+\label{fig:3d-parallel-and-1f1b}
+\end{figure}
+
+\section{参数高效微调（LoRA）：低秩适配与零延迟合并}
+\label{sec:lora}
+
+3D 并行解决了从零预训练的算力与显存难题，但绝大多数研究者与企业面对的是另一个日常场景：手头已经有一座开源的 7B 或 70B 预训练/对齐大模型，只想在特定领域数据上做 SFT 或 DPO 后训练。如果做\textbf{全参数微调（Full Fine-Tuning）}，就必须承受全额 $16\Phi$ 字节的静态显存（7B 要 112\,GB！）且每个下游任务都得存一份完整的数十 GB 模型权重副本。
+
+\subsection{内在维度假说、低秩分解与 $B = 0$ 初始化铁律}
+
+Aghajanyan 等人的实证研究表明，预训练大模型在适应特定下游任务时，其有效参数更新位于一个维度极低的\textbf{内在子空间（Intrinsic Subspace）}之中。受此启发，Edward Hu 等人（2021）提出了 \textbf{LoRA（Low-Rank Adaptation，低秩适配）}：完全冻结庞大的预训练权重矩阵 $W_0 \in \R^{d \times k}$，仅在其旁路注入一对可训练的低秩分解矩阵 $B \in \R^{d \times r}$ 与 $A \in \R^{r \times k}$（其中秩 $r \ll \min(d, k)$），将前向变换写为：
+\begin{equation}
+  h \;=\; W_0 x \;+\; \Delta W\, x \;=\; W_0 x \;+\; \frac{\alpha}{r}\, B A x,
+  \label{eq:lora-forward}
+\end{equation}
+其中常数 $\alpha$ 为固定缩放超参数（使 $\alpha / r$ 稳定不同秩 $r$ 下的梯度量级，调整 $r$ 时无需剧烈重调学习率）。
+
+LoRA 之所以成为大模型后训练的绝对标配，归功于三条环环相扣的数学与工程优势：
+\begin{enumerate}
+  \item \textbf{零扰动初始化铁律（$A \sim \mathcal{N}(0, \sigma^2),\; B = \mathbf{0}$）}：训练第 0 步时，$\Delta W = \frac{\alpha}{r} B A = \mathbf{0}$，模型输出与原始预训练模型\textbf{逐比特完全一致}，丝毫不破坏底座已学得的知识！同时，记损失对输出 $h$ 的梯度为 $G = \nabla_h \mathcal{L}$，由链式法则：
+  \begin{equation}
+    \nabla_B \mathcal{L} \;=\; \frac{\alpha}{r}\, G (A x)^\top \;\neq\; \mathbf{0}, \qquad
+    \nabla_A \mathcal{L} \;=\; \frac{\alpha}{r}\, B^\top G x^\top \Big|_{t=0} \;=\; \mathbf{0}.
+    \label{eq:lora-grad}
+  \end{equation}
+  第 1 步更新立即使 $B$ 获得非零梯度而脱离零点，第 2 步起 $A$ 也获得非零梯度，完美打破对称性！（若错把 $A$ 与 $B$ 同时置零，则 $\nabla_A \mathcal{L} \equiv \mathbf{0}$ 且 $\nabla_B \mathcal{L} \equiv \mathbf{0}$，权重将永远锁死在零点，见习题~\textbf{6.6.5}！）
+  \item \textbf{惊人的参数与显存压缩比}：单层全参数微调需训练 $dk$ 个参数，而 LoRA 仅需训练 $r(d + k)$ 个参数，精确参数压缩比为
+  \begin{equation}
+    \rho_{\mathrm{LoRA}} \;=\; \frac{r(d + k)}{d k}.
+    \label{eq:lora-ratio}
+  \end{equation}
+  对于方阵 $d = k = 4096$、典型秩 $r = 16$，可训练参数占比仅为 $\rho = \frac{2 \times 16}{4096} = \mathbf{0.78\%}$！更重要的是，冻结的底座权重 $W_0$ 无需任何梯度、无需 FP32 主权重、也无需 AdamW 的 $m, v$ 状态，整网静态显存从 $16\Phi$ 断崖式暴跌至：
+  \[
+    M_{\mathrm{LoRA}} \;=\; 2\Phi + 14\,\Phi_{\mathrm{LoRA}} \;\approx\; 2.1\Phi\;\text{Bytes}
+  \]
+  （7B 模型从 $112\,\mathrm{GB}$ 直降至约 $15\,\mathrm{GB}$！若进一步将底座 $W_0$ 量化为 4-bit NormalFloat，即 \textbf{QLoRA}，7B 静态显存更是压至仅 $\sim 4\,\mathrm{GB}$，普通单张消费级显卡即可微调 65B 模型！）。
+  \item \textbf{零推理延迟开销（Weight Merging）}：训练完毕部署上线时，只需离线做一次矩阵加和合并权重：
+  \begin{equation}
+    W_{\mathrm{merged}} \;=\; W_0 \;+\; \frac{\alpha}{r}\, B A.
+    \label{eq:lora-merge}
+  \end{equation}
+  线上推理图与原始底座结构完全相同，\textbf{增加的推理延迟严格为零}！若需服务多租户任务，甚至只需在显存中常驻一份共享底座 $W_0$，毫秒级热切换几兆字节的 $(B_k, A_k)$ 适配器即可。
+\end{enumerate}
+
+\subsection{实测验证：LoRA 秩扫描与内在维度的 $100\times$ 误差悬崖}
+
+在配套脚本 \texttt{code/vol6\_experiments.py} 的 \texttt{exp6\_quant\_and\_lora()} 实验中，我们在一个冻结的 $64\times 64$ 预训练线性层 $W_0$ 上构造了“真秩为 4 + 微弱全秩噪声（$\sigma = 0.03$）”的下游任务偏移 $W_{\mathrm{target}} = W_0 + U_t V_t + 0.03\varepsilon$，并依次扫描 LoRA 秩 $r \in \{1, 2, 4, 8, 16\}$ 与全参数微调（等价于 $r = 64$），实测数据保存于 \texttt{data/lora\_rank.csv}。
+
+\begin{table}[htbp]
+\centering
+\caption{冻结 $64\times 64$ 线性层适配秩-4 任务偏移的 LoRA 实测结果（来源：\texttt{data/lora\_rank.csv}）。}
+\label{tab:lora-rank}
+\small
+\begin{tabular}{@{}rrrrl@{}}
+\toprule
+\textbf{适配器秩 $r$} & \textbf{可训练参数量} & \textbf{参数占比} & \textbf{测试集 MSE} & \textbf{物理机制解读} \\
+\midrule
+$1$ & $128$ & $3.12\%$ & $4.96746$ & 欠拟合：表达秩严重低于任务内在秩 4 \\
+$2$ & $256$ & $6.25\%$ & $2.89887$ & 欠拟合：仍缺失一半主奇异方向 \\
+$\mathbf{4}$ & $\mathbf{512}$ & $\mathbf{12.50\%}$ & $\mathbf{0.04956}$ & \textbf{相变拐点：误差暴跌 $100\times$！精准捕获主子空间} \\
+$8$ & $1024$ & $25.00\%$ & $0.04013$ & 收益递减：开始缓慢拟合微弱全秩背景噪声 \\
+$16$ & $2048$ & $50.00\%$ & $0.02630$ & 收益递减：参数翻倍而误差仅微降 \\
+$64$（全微调） & $4096$ & $100.00\%$ & $0.00000$ & 完整拟合全部 4096 个自由度（含背景噪声） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+图~\ref{fig:lora-rank-exp} 直观绘出了 \texttt{data/lora\_rank.csv} 中的 MSE 悬崖：仅需 $12.50\%$ 参数量的 $r = 4$ 就将测试误差从 $4.96746$ 瞬间劈落至 $0.04956$（下降整整两个数量级！），再往上加倍秩数至 $r = 8$（$25.00\%$ 参数，MSE $0.04013$）边际收益迅速饱和。这正是实践中对 7B/70B 模型选取 $r \in \{8, 16, 32\}$ 即可逼近全微调效果的数学本质。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.78\linewidth,
+    height=5.6cm,
+    xmode=log,
+    log basis x=2,
+    xmin=0.8, xmax=85,
+    ymin=-0.35, ymax=5.6,
+    xlabel={LoRA 适配秩 $r$（$r=64$ 表示全参数微调）},
+    ylabel={测试集均方误差（Test MSE）},
+    title={\sffamily\bfseries\small LoRA 秩扫描实验：匹配任务内在维度（$r=4$）时的 $100\times$ 误差悬崖},
+    grid=both,
+    grid style={line width=0.25pt, draw=slate!20},
+    major grid style={line width=0.4pt, draw=slate!35},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily},
+    xtick={1,2,4,8,16,64},
+    xticklabels={1 (3.1\%), 2 (6.3\%), 4 (12.5\%), 8 (25.0\%), 16 (50.0\%), 64 (100\%)},
+    legend style={at={(0.97,0.95)}, anchor=north east, font=\scriptsize\sffamily, fill=white, fill opacity=0.9, draw=tealLine}
+  ]
+    \addplot[teal, very thick, mark=*, mark size=2.5pt, mark options={fill=tealLight, draw=tealDark, thick}]
+      table[col sep=comma, x=rank, y=test_mse] {data/lora_rank.csv};
+    \addlegendentry{实测 Test MSE (\texttt{lora\_rank.csv})}
+
+    % Highlight intrinsic rank r=4
+    \addplot[ochre, dashed, thick] coordinates {(4, -0.35) (4, 5.4)};
+    \node[font=\scriptsize\sffamily\bfseries, color=ochre, anchor=west] at (axis cs:4.4, 3.6) {内在秩拐点 $r = 4$：};
+    \node[font=\scriptsize\sffamily, color=ochre, anchor=west] at (axis cs:4.4, 2.9) {仅 $12.5\%$ 参数，MSE 从 $4.97 \to 0.050$（降 $100\times$）};
+    \node[font=\tiny\sffamily, color=navy, anchor=south west] at (axis cs:1.05, 5.02) {$4.967$};
+    \node[font=\tiny\sffamily, color=tealDark, anchor=south west] at (axis cs:4.1, 0.35) {$0.050$};
+    \node[font=\tiny\sffamily, color=tealDark, anchor=south east] at (axis cs:62, 0.25) {$0.000$};
+  \end{axis}
+\end{tikzpicture}
+\caption{基于 \texttt{data/lora\_rank.csv} 绘制的 LoRA 秩扫描测试误差曲线。横轴括号内标出了各秩对应的可训练参数占比；一旦适配器秩触及任务偏移的内在秩 $r = 4$，泛化误差立刻坠落两个数量级。}
+\label{fig:lora-rank-exp}
+\end{figure}
+
+代码~\ref{lst:lora-code} 给出了极简且可直接运行的 PyTorch LoRA 线性层与离线权重合并实现。
+
+\begin{lstlisting}[caption={支持 $B=0$ 初始化与离线零延迟合并的 PyTorch LoRA 线性层核心实现。},label={lst:lora-code}]
+import math, torch, torch.nn as nn, torch.nn.functional as F
+
+class LoRALinear(nn.Module):
+    def __init__(self, base_linear: nn.Linear, r: int = 8, alpha: float = 16.0):
+        super().__init__()
+        self.base = base_linear
+        self.base.weight.requires_grad_(False)            # 冻结预训练底座
+        if self.base.bias is not None:
+            self.base.bias.requires_grad_(False)
+        d_out, d_in = base_linear.weight.shape
+        self.scale = alpha / r
+        self.A = nn.Parameter(torch.empty(r, d_in))
+        self.B = nn.Parameter(torch.zeros(d_out, r))      # B 严格零初始化!
+        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))  # A 随机初始化
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base(x) + (x @ self.A.T @ self.B.T) * self.scale
+
+    @torch.no_grad()
+    def merge_to_base(self) -> nn.Linear:
+        """推理部署前离线合并，线上零额外延迟。"""
+        self.base.weight.add_((self.B @ self.A) * self.scale)
+        return self.base
+\end{lstlisting}
+
+\section{低比特后训练量化（PTQ）：INT8/INT4 数学分析与离群值难题}
+\label{sec:quantization}
+
+回到第~\ref{ch:hardware-roofline-flash} 章的 Roofline 定理~\ref{thm:prefill-vs-decode}：大模型在 Decode 阶段之所以只能跑出不到 $1\%$ 的 GPU 算力，罪魁祸首是每生成一个词元都必须把整个模型的 BF16 权重（$2\Phi$ 字节）从 HBM 搬进片上一次。如果我们能把权重从 16 比特压缩到 \textbf{8 比特（INT8）甚至 4 比特（INT4）}，便一箭双雕：
+\begin{itemize}
+  \item 显存占用直接腰斩 $2\times$ 或骤降 $4\times$（70B 模型从 $140\,\mathrm{GB}$ 压至 $35\,\mathrm{GB}$，单卡即可装下！）；
+  \item Decode 阶段每步搬运的 HBM 字节数同步减少 $2\text{--}4\times$，吞吐率几乎直接线性翻倍！
+\end{itemize}
+这正是\textbf{后训练量化（Post-Training Quantization, PTQ）}的核心价值：无需昂贵的从头重训，直接将训练好的浮点权重映射为低比特整数网格。
+
+\subsection{对称均匀量化与重尾离群通道灾难定理}
+
+\begin{defBox}
+\begin{definition}[$b$ 比特对称均匀量化（Symmetric Uniform Quantization）]
+\label{def:sym-quant}
+给定实数张量（或子块）$W$ 与目标有符号整数位宽 $b \in \{4, 8\}$，令最大正整数刻度为 $q_{\max} = 2^{b-1} - 1$（例如 INT8 对应 $q_{\max} = 127$，INT4 对应 $q_{\max} = 7$）。对称均匀量化的缩放因子 $s$、定点整数编码 $Q$ 与反量化重构值 $\hat{W}$ 定义为：
+\begin{equation}
+  s \;=\; \frac{\max |W|}{q_{\max}}, \qquad
+  Q \;=\; \clip\!\left(\operatorname{round}\!\left(\frac{W}{s}\right),\, -q_{\max},\, q_{\max}\right), \qquad
+  \hat{W} \;=\; s \cdot Q.
+  \label{eq:sym-quant}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+如果权重的所有元素都像标准高斯分布那样乖巧地集中在同一个尺度上，全矩阵共享一个全局缩放因子 $s$（称为\textbf{逐张量量化，Per-Tensor}）效果还算体面。但真实大语言模型的权重和激活却存在一个惊人的结构特征——\textbf{系统性通道离群值（Systematic Channel Outliers）}：在全部几千个隐藏通道中，极少数特定通道的数值幅度会比其余 $99\%$ 正常通道大出 $8\times$ 乃至 $100\times$！下面这条定理从数学上精准刻画了离群值对逐张量量化的毁灭性打击，以及逐通道/分组量化如何力挽狂澜。
+
+\begin{thmBox}
+\begin{theorem}[重尾离群通道对逐张量量化的破坏效应与逐通道误差隔离]
+\label{thm:quant-outlier-error}
+设权重矩阵 $W \in \R^{m \times n}$ 包含 $m - k$ 个正常输出通道与 $k \ll m$ 个离群输出通道：正常通道元素幅值上界为 $M_0$，离群通道元素幅值上界高达 $M_1 = \kappa M_0$（离群倍数 $\kappa \gg 1$）。假设在步长 $s$ 下，未截断元素的量化舍入误差 $e = w - \hat{w}$ 近似服从 $[-s/2,\, s/2]$ 上的均匀分布（期望均方误差 $\E[e^2] = s^2 / 12$），则：
+\begin{enumerate}
+  \item \textbf{逐张量量化（Per-Tensor）}被迫采用全局最大步长 $s_{\mathrm{pt}} = \frac{\kappa M_0}{q_{\max}}$，导致全部 $m \times n$ 个元素的单元素期望均方误差被离群通道放大 $\kappa^2$ 倍：
+  \begin{equation}
+    \mathrm{MSE}_{\mathrm{pt}} \;=\; \frac{\kappa^2 M_0^2}{12\, q_{\max}^2}.
+    \label{eq:mse-pt}
+  \end{equation}
+  特别地，若 $\kappa > 2 q_{\max}$（对 INT4 即 $\kappa > 14$），正常通道中全部元素满足 $|w| < s_{\mathrm{pt}}/2$，经 $\operatorname{round}(w / s_{\mathrm{pt}})$ 后将\textbf{全体坍缩为零}（分辨率彻底归零）！
+  \item \textbf{逐通道量化（Per-Channel）}为每一行 $i \in \{1, \dots, m\}$ 分配独立缩放因子 $s_i = \frac{\max_j |w_{ij}|}{q_{\max}}$，将离群步长严格隔离在 $k$ 个离群通道内部，使全矩阵平均均方量化误差骤降至
+  \begin{equation}
+    \mathrm{MSE}_{\mathrm{pc}} \;=\; \left(\frac{m - k}{m} + \frac{k}{m}\,\kappa^2\right) \frac{M_0^2}{12\, q_{\max}^2},
+    \label{eq:mse-pc}
+  \end{equation}
+  当 $k / m \ll 1$ 且 $\kappa \gg 1$ 时，相对误差比值满足 $\sqrt{\mathrm{MSE}_{\mathrm{pc}} / \mathrm{MSE}_{\mathrm{pt}}} \approx \sqrt{\frac{k}{m} + \frac{1}{\kappa^2}} \ll 1$！同时，存储 $m$ 个 FP16 缩放因子带来的额外空间开销占比仅为 $\frac{16}{b \cdot n} = O(1/n)$。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+（1）对任意位于 $[-s/2, s/2]$ 上均匀分布的随机变量 $E$，其二阶矩为 $\E[E^2] = \frac{1}{s}\int_{-s/2}^{s/2} e^2\,de = \frac{s^2}{12}$。在逐张量量化中，全矩阵共用同一缩放因子 $s_{\mathrm{pt}} = \frac{\max_{i,j}|w_{ij}|}{q_{\max}} = \frac{\kappa M_0}{q_{\max}}$，代入即得式~\eqref{eq:mse-pt}。当 $\kappa > 2 q_{\max}$ 时，对所有正常通道元素均有 $\frac{|w|}{s_{\mathrm{pt}}} \le \frac{M_0}{\kappa M_0 / q_{\max}} = \frac{q_{\max}}{\kappa} < \frac{1}{2}$，故四舍五入后 $Q_{ij} = \operatorname{round}(w_{ij}/s_{\mathrm{pt}}) \equiv 0$，正常通道信息全毁。
+
+（2）在逐通道量化中，占比 $\frac{m-k}{m}$ 的正常通道使用精细步长 $s_0 = \frac{M_0}{q_{\max}}$（方差 $\frac{M_0^2}{12 q_{\max}^2}$），仅有占比 $\frac{k}{m}$ 的离群通道使用粗步长 $s_1 = \frac{\kappa M_0}{q_{\max}}$（方差 $\frac{\kappa^2 M_0^2}{12 q_{\max}^2}$），按通道占比加权平均立得式~\eqref{eq:mse-pc}。对于存储开销，原始 $b$-bit 权重每行占 $b n$ 比特，新增 1 个 FP16 缩放因子仅占 16 比特，额外比例为 $\frac{16}{bn}$（例如 $n = 4096, b = 4$ 时仅增加 $0.098\%$ 显存！）。若进一步按每组 $g = 128$ 个元素分配独立缩放因子（\textbf{分组量化，Group-Wise Quantization}），则能连同一通道内部的局部尖峰也进一步隔离，额外开销也仅约 $16/(4\times 128) = 3.1\%$。证毕。
+\end{proof}
+
+\begin{insightBox}{直通现代前沿量化算法：SmoothQuant、AWQ 与 GPTQ 的核心直觉}
+定理~\ref{thm:quant-outlier-error} 完美解释了\textbf{仅量化权重（Weight-Only，如 W4A16）}为何只需分组量化即可大获全胜；但如果要把\textbf{激活值 $X$ 也量化为 INT8（W8A8）}以启用 INT8 Tensor Core 算力翻倍，问题立刻变得棘手——激活离群值出现在固定列维度上，按行（逐 Token）量化激活无法隔离列离群值！现代三大经典算法分别从不同维度破局：
+\begin{itemize}
+  \item \textbf{SmoothQuant（尺度平滑迁移）}：利用矩阵乘法对角等价恒等式
+  \[
+    Y \;=\; X W \;=\; \big(X \diag(s)^{-1}\big)\,\big(\diag(s) W\big),
+  \]
+  将激活 $X$ 在离群通道上的巨大尺度通过 $\diag(s)^{-1}$ 压平，并把对应的放大系数 $\diag(s)$ 优雅地“转嫁”给容易逐通道量化的权重矩阵 $W$！
+  \item \textbf{AWQ（激活感知权重量化）}：发现仅仅保护对\textbf{大激活通道}起决定作用的顶层 $1\%$ 显著权重（通过等价尺度放大这 $1\%$ 权重再做 W4A16 量化），就能避免极低的 INT4 精度塌方，且无需反向传播微调。
+  \item \textbf{GPTQ（二阶海森误差补偿）}：逐列量化权重 $W$ 时，利用校准集输入协方差近似海森矩阵 $H = 2 X^\top X$，每把一列权重舍入产生量化误差 $\delta w_q$，就立刻用 $H^{-1}$ 闭式调整尚未量化的剩余列权重来精确抵消输出误差 $\|X W - X \hat{W}\|_F^2$！
+\end{itemize}
+\end{insightBox}
+
+\subsection{实测验证：离群矩阵上的 INT8 与 INT4 逐张量 vs 逐通道对比}
+
+在 \texttt{code/vol6\_experiments.py} 的 \texttt{exp6\_quant\_and\_lora()} 实验中，我们构造了一个 $256 \times 256$ 的真实重尾权重矩阵 $W \sim \mathcal{N}(0, 0.25^2)$，并将其前 4 个输出通道（仅占 $1.56\%$ 的通道！）放大 $8\times$ 模拟离群通道，在随机输入 $X \in \R^{256\times 64}$ 上实测矩阵乘法输出 $Y = W X$ 的相对弗罗贝尼乌斯误差 $\|W_{\mathrm{q}} X - Y_{\mathrm{fp}}\|_F / \|Y_{\mathrm{fp}}\|_F$。代码~\ref{lst:quant-code} 与表~\ref{tab:quant-exp} 展示了触目惊心的实测对比。
+
+\begin{lstlisting}[caption={对称均匀量化（逐张量 vs 逐通道）在重尾离群权重矩阵上的实测核验脚本。},label={lst:quant-code}]
+import numpy as np
+
+rng = np.random.default_rng(2026)
+W = rng.normal(0, 0.25, size=(256, 256))
+W[0:4, :] *= 8.0                             # 注入 4 个 8x 离群通道
+X = rng.normal(0, 1.0, size=(256, 64))
+Y_fp = W @ X
+
+def quant_dequant(M: np.ndarray, bits: int, per_channel: bool = False):
+    qmax = (1 << (bits - 1)) - 1             # INT8: 127, INT4: 7
+    axis = 1 if per_channel else None        # 逐通道沿输出行独立求尺度
+    scale = np.maximum(np.max(np.abs(M), axis=axis, keepdims=True) / qmax, 1e-8)
+    Q = np.clip(np.round(M / scale), -qmax, qmax)
+    return Q * scale
+
+for bits in [8, 4]:
+    rel_pt = np.linalg.norm(quant_dequant(W, bits, False) @ X - Y_fp) / np.linalg.norm(Y_fp)
+    rel_pc = np.linalg.norm(quant_dequant(W, bits, True)  @ X - Y_fp) / np.linalg.norm(Y_fp)
+    print(f"INT{bits}: per-tensor={rel_pt*100:.3f}%, per-channel={rel_pc*100:.3f}%")
+\end{lstlisting}
+
+\begin{table}[htbp]
+\centering
+\caption{含 4 个 $8\times$ 离群通道的 $256\times 256$ 权重矩阵实测输出相对误差（来源：\texttt{exp6\_quant\_and\_lora()}）。}
+\label{tab:quant-exp}
+\small
+\begin{tabular}{@{}lcrrcl@{}}
+\toprule
+\textbf{量化位宽} & \textbf{整数刻度 $q_{\max}$} & \textbf{逐张量误差} & \textbf{逐通道误差} & \textbf{误差缩减倍数} & \textbf{结果诊断} \\
+\midrule
+\textbf{INT8} & $127$ & $4.603\%$ & $\mathbf{0.658\%}$ & $\mathbf{7.0\times}$ & 逐通道几乎无损复原浮点输出 \\
+\textbf{INT4} & $7$ & $63.826\%$ & $\mathbf{12.138\%}$ & $\mathbf{5.3\times}$ & 逐张量彻底崩溃；逐通道成功挽救 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+实测结果与定理~\ref{thm:quant-outlier-error} 严丝合缝：仅仅 4 个离群通道（占总通道不足 $1.6\%$），就让 INT4 逐张量量化的输出误差飙升到灾难性的 $\mathbf{63.826\%}$（绝大多数正常权重被压扁归零，模型输出彻底胡言乱语）；仅仅改为逐通道分配缩放因子（每行多存 1 个标量），INT8 误差便暴降 $7.0\times$ 至 $\mathbf{0.658\%}$，INT4 误差也从彻底崩溃的 $63.826\%$ 骤降至 $\mathbf{12.138\%}$（若再进一步配合分组量化或 AWQ，INT4 误差还能继续压至 $1\text{--}2\%$ 以内，见习题~\textbf{6.6.7}！）。
+
+\section{高吞吐大模型推理系统：连续批处理、PagedAttention 与投机解码}
+\label{sec:llm-serving}
+
+现在，我们已经把权重切好、微调好、量化好，终于来到了生产环境的最后一公里——\textbf{大模型在线推理服务引擎（如 vLLM、SGLang、TensorRT-LLM）}。在生产环境中，系统每天面对成千上万个提示长度各异、生成长度不可预测的并发请求，如何把 H100 的吞吐率压榨到极致？现代推理引擎建立在三大核心技术支柱之上。
+
+\subsection{KV 缓存显存核算与连续批处理（Continuous Batching）}
+
+自回归解码为了避免每吐一个新词都重算前面所有词元的键向量 $K$ 与值向量 $V$，必须把每个请求所有层的历史 $(K, V)$ 缓存在 GPU 显存中，称为 \textbf{KV Cache}。单条请求每增加 1 个上下文词元所消耗的精确 KV 缓存字节数为：
+\begin{equation}
+  M_{\mathrm{KV/tok}} \;=\; \underbrace{2}_{K\text{ 与 }V} \cdot L \cdot n_{\mathrm{kv}} \cdot d_{\mathrm{head}} \cdot b_{\mathrm{dtype}}\;\text{Bytes},
+  \label{eq:kv-cache-formula}
+\end{equation}
+其中 $L$ 为层数，$n_{\mathrm{kv}}$ 为 KV 头数（标准 MHA 时 $n_{\mathrm{kv}} = h$；采用分组查询注意力 GQA 时大幅缩小，如 Llama-3 70B 取 $L = 80, n_{\mathrm{kv}} = 8, d_{\mathrm{head}} = 128$），$b_{\mathrm{dtype}}$ 为精度字节数（BF16 为 2）。代入一个 70B 标准 MHA 模型（$L=80, n_{\mathrm{kv}}=64, d_{\mathrm{head}}=128$, BF16），单词元 KV 缓存高达 $2.62\,\mathrm{MB}$——如果同时服务 $B = 32$ 个长度 $S = 4096$ 的对话，仅 KV 缓存就要吞掉惊人的 $\mathbf{343\,\mathrm{GB}}$ 显存（甚至超过模型权重本身两倍以上）！即使启用 8-组 GQA（$n_{\mathrm{kv}} = 8$），仍需 $43\,\mathrm{GB}$。
+
+而在请求调度层面，传统深度学习框架采用\textbf{静态批处理（Static Batching）}：把 $B$ 条请求打包成一个批次送入 GPU，必须死等批次中\textbf{生成最长那条请求}吐出结束符 \texttt{<EOS>}，整批才能释放并接入下一批请求！短回复提前算完后，它占据的显存与计算槽位全部白白空转。
+
+Yu 等人（Orca, 2022）提出的\textbf{连续批处理（Continuous Batching，亦称迭代级调度 Iteration-Level Scheduling）}彻底打破了请求级屏障：调度器不再以“整条对话结束”为周期，而是以\textbf{“每生成一个词元的单个 Decode 迭代步”}为粒度——一旦某条请求吐出 \texttt{<EOS>}，立刻在下一毫秒的迭代步中将其踢出批次、回收 KV 缓存，并无缝把等待队列中的新请求插入该空槽！仅仅这一项调度革新，就能把真实线上推理吞吐率提升 $5\text{--}10\times$！
+
+\subsection{PagedAttention（vLLM）：408 操作系统虚拟内存分页的完美重现}
+
+连续批处理把计算槽位填满了，但 KV 缓存的\textbf{显存管理灾难}却骤然爆发。因为系统根本无法预知用户请求最终会生成 20 个词还是 2048 个词，传统推理引擎（如早期 FasterTransformer）只能按最大上下文长度 $S_{\max}$ 为每条请求预先分配一块\textbf{物理连续的巨型显存槽}。实测表明，这种静态连续预分配导致了高达 $\mathbf{60\%\text{--}80\%}$ 的显存浪费——来源包括三类经典碎片：
+\begin{enumerate}
+  \item \textbf{预留浪费（Reserved）}：给将来的词元提前圈地，但请求往往早早结束根本用不到；
+  \item \textbf{内部碎片（Internal Fragmentation）}：实际生成长度远小于 $S_{\max}$ 留下的尾部空洞；
+  \item \textbf{外部碎片（External Fragmentation）}：不同长度请求的连续块释放后留下的零散空隙，拼不出新的大连续块。
+\end{enumerate}
+
+\begin{recallBox}{408 操作系统速忆：虚拟内存分页存储管理与写时复制（Copy-on-Write）}
+四十年前，操作系统设计师面对多进程动态内存膨胀与外部碎片问题，发明了计算机科学史上最优雅的抽象之一——\textbf{分页虚拟内存（Virtual Memory Paging）}：进程的逻辑地址空间被切分为固定大小的页（Page），通过\textbf{页表（Page Table）}映射到物理内存中任意离散不连续的页框（Frame），外部碎片瞬间归零，内部碎片被严格封顶在每进程最后一页的不到 1 页之内！当父进程 \texttt{fork()} 子进程时，二者先共享同一批只读物理页框，仅在某一方尝试写入修改时才触发\textbf{写时复制（Copy-on-Write, CoW）}。
+\end{recallBox}
+
+2023 年，加州大学伯克利分校的 Kwon 等人把这套经典的 408 操作系统分页机制原封不动地搬进了 GPU HBM，诞生了震撼工业界的 \textbf{PagedAttention（vLLM）}（如图~\ref{fig:paged-attention} 所示）：
+\begin{itemize}
+  \item \textbf{逻辑 KV 块与离散物理块}：将每条请求的 KV 缓存切分为固定词元数的\textbf{逻辑 KV 块}（例如每块存 $B_{\mathrm{blk}} = 16$ 个词元的 K/V 向量）；在 GPU HBM 中预先划分出一个全局\textbf{物理 KV 块池}，按需动态分配，彻底允许同一请求的相邻逻辑块存放在\textbf{物理上完全不连续}的 HBM 地址中！
+  \item \textbf{每请求块表（Block Table）}：维护一张极轻量的映射表，记录“逻辑块号 $\to$ 物理块号 + 当前已填词元数”。计算注意力时，定制的 PagedAttention CUDA 核函数通过块表间接寻址，分块聚合离散物理块中的 $K, V$ 向量完成点积与在线 Softmax。
+  \item \textbf{碎片率从 $>60\%$ 骤降至 $<4\%$}：物理外部碎片彻底消失；唯一的内部碎片仅发生在每条请求的\textbf{最后一个未填满的块}里，平均每条请求仅浪费半个块（$B_{\mathrm{blk}}/2 = 8$ 个词元），在常规对话长度下总显存浪费被死死压在 $\mathbf{4\%}$ 以下——腾出来的显存允许并发批大小直接暴增 $2\text{--}4\times$，顺势借 Roofline 定理大幅推高 GPU 利用率！
+  \item \textbf{写时复制（Copy-on-Write）实现零拷贝前缀共享与并行采样}：多条请求共享同一段长系统提示（Prefix Caching），或第 4 章中 Best-of-$N$、Beam Search、GRPO 针对同一提示并行采样 $G$ 条回复时，所有分支只需将各自的块表指向\textbf{同一组物理前缀块}（引用计数 $\text{ref\_cnt} = G$），显存零冗余！直到各分支分化生成不同新词元触及末尾块写入时，才对那唯一一块执行 Copy-on-Write 分配新物理块。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  lblk/.style={rectangle, rounded corners=0.9mm, draw=navy, thick, fill=navyLight, minimum width=18mm, minimum height=7.2mm, align=center, font=\scriptsize, text=ink},
+  sblk/.style={rectangle, rounded corners=0.9mm, draw=gold, very thick, fill=ochreLight, minimum width=18mm, minimum height=7.2mm, align=center, font=\scriptsize\bfseries, text=ink},
+  pblk/.style={rectangle, rounded corners=0.9mm, draw=teal, thick, fill=tealLight, minimum width=22mm, minimum height=7.4mm, align=center, font=\scriptsize, text=ink},
+  fblk/.style={rectangle, rounded corners=0.9mm, draw=slate!60, dashed, fill=codebg, minimum width=22mm, minimum height=7.4mm, align=center, font=\scriptsize, text=slate}
+]
+  % Column titles
+  \node[font=\sffamily\small\bfseries, color=navy] at (-4.9, 3.2) {逻辑 KV 块视图（连续序列）};
+  \node[font=\sffamily\small\bfseries, color=slate] at (0.05, 3.2) {块表（Block Table）};
+  \node[font=\sffamily\small\bfseries, color=tealDark] at (4.7, 3.2) {GPU HBM 物理 KV 块池（离散非连续）};
+
+  % Request A Logical Blocks
+  \node[anchor=west, font=\scriptsize\bfseries, color=tealDark] at (-7.55, 2.48) {请求 A（共享系统提示 + 续写 A）};
+  \node[sblk] (a0) at (-6.60, 1.80) {逻辑块 0\\{\tiny 系统提示}};
+  \node[lblk] (a1) at (-4.60, 1.80) {逻辑块 1\\{\tiny 回答 A1}};
+  \node[rectangle, rounded corners=0.9mm, draw=navy, thick, fill=white, minimum width=17mm, minimum height=7.2mm, font=\scriptsize, align=center] (a2real) at (-2.60, 1.80) {逻辑块 2\\{\tiny 尾部 5/16}};
+
+  % Request B Logical Blocks
+  \node[anchor=west, font=\scriptsize\bfseries, color=plum] at (-7.55, 0.35) {请求 B（同前缀并发采样 / CoW）};
+  \node[sblk] (b0) at (-6.60, -0.35) {逻辑块 0\\{\tiny 系统提示}};
+  \node[lblk, draw=plum, fill=plumLight] (b1) at (-4.60, -0.35) {逻辑块 1\\{\tiny 回答 B1}};
+
+  % Block Tables
+  \node[rectangle, rounded corners=1mm, draw=tealDark, thick, fill=white, inner sep=3.5pt, align=left, font=\tiny\ttfamily] (tblA) at (0.05, 1.80) {
+    \textbf{Req A 块表}\\
+    L0 $\to$ P1 (shared)\\
+    L1 $\to$ P4 (16/16)\\
+    L2 $\to$ P0 (\;5/16)
+  };
+  \node[rectangle, rounded corners=1mm, draw=plum, thick, fill=white, inner sep=3.5pt, align=left, font=\tiny\ttfamily] (tblB) at (0.05, -0.35) {
+    \textbf{Req B 块表}\\
+    L0 $\to$ P1 (shared)\\
+    L1 $\to$ P3 (11/16)
+  };
+
+  % Physical Pool in HBM
+  \draw[tealLine, thick, rounded corners=1.8mm, fill=codebg!50] (2.65, -1.68) rectangle (6.75, 2.75);
+  \node[pblk] (p0) at (4.70, 2.15) {\textbf{物理块 P0}（A-L2）};
+  \node[sblk, minimum width=26mm] (p1) at (4.70, 1.25) {\textbf{物理块 P1}（ref=2 共享）};
+  \node[fblk] (p2) at (4.70, 0.35) {物理块 P2（空闲）};
+  \node[pblk, draw=plum, fill=plumLight] (p3) at (4.70, -0.55) {\textbf{物理块 P3}（B-L1, CoW）};
+  \node[pblk] (p4) at (4.70, -1.30) {\textbf{物理块 P4}（A-L1）};
+
+  % Mapping Arrows
+  \draw[-{Stealth[length=1.8mm]}, thick, gold] (tblA.east) ++(0, 0.08) to[out=0, in=180] (p1.west);
+  \draw[-{Stealth[length=1.8mm]}, thick, tealDark] (tblA.east) ++(0, -0.14) to[out=-10, in=180] (p4.west);
+  \draw[-{Stealth[length=1.8mm]}, thick, navy] (tblA.east) ++(0, -0.34) to[out=12, in=180] (p0.west);
+
+  \draw[-{Stealth[length=1.8mm]}, thick, gold] (tblB.east) ++(0, 0.06) to[out=15, in=180] (p1.west);
+  \draw[-{Stealth[length=1.8mm]}, thick, plum] (tblB.east) ++(0, -0.18) to[out=0, in=180] (p3.west);
+
+  % Bottom note
+  \node[font=\scriptsize, color=tealDark, align=center] at (-0.2, -2.18) {外部碎片严格归零，内部碎片仅限各请求末块（浪费 $<4\%$）；共享前缀块 \textbf{P1} 通过写时复制零冗余复用！};
+\end{tikzpicture}%
+}
+\caption{PagedAttention（vLLM）将 408 操作系统分页虚拟内存引入 GPU KV 缓存管理：连续逻辑块通过每请求块表映射到离散物理块，不仅消除外部碎片，更通过引用计数与写时复制（CoW）实现前缀与并行采样分支的零拷贝共享。}
+\label{fig:paged-attention}
+\end{figure}
+
+\subsection{投机解码（Speculative Decoding）：用并行验证打破自回归访存墙}
+
+PagedAttention 与连续批处理极大地抬升了多用户并发吞吐率，但如果某位 VIP 用户发起的是\textbf{单请求低延迟（Low-Latency）长文本生成}呢？由定理~\ref{thm:prefill-vs-decode} 可知，单请求自回归逐词生成受限于串行因果依赖，每步 $T = 1$ 的算术强度仅 $1.00\,\mathrm{FLOP/B}$，H100 有 $99.66\%$ 的算力都在睡大觉！
+
+Leviathan 等人与 Chen 等人（2023）提出了一个堪称“空手套白狼”的绝妙思路——\textbf{投机解码（Speculative Decoding）}：
+\begin{quote}
+\emph{既然把 $70\mathrm{B}$ 大模型权重搬进片上一次，算 $T = 1$ 个词元和并行算 $T = \gamma + 1$（例如 $\gamma = 5$）个词元的墙钟耗时几乎一模一样（都在深度访存受限区，见表~\ref{tab:roofline-data}！），那为什么不先让一个极小、极快的“草稿模型 $q$”（如 0.5B 或 1B 参数）飞快地自回归草拟出 $\gamma$ 个候选词元 $x_1, \dots, x_\gamma$，再让目标大模型 $p$ 在\textbf{单次并行前向传播}里一口气把这 $\gamma + 1$ 个位置的条件概率分布全部验算出来呢？}
+\end{quote}
+
+最震撼人心的问题来了：草稿模型 $q$ 毕竟比大模型 $p$ 弱得多，用 $q$ 提议、$p$ 审核，难道不会破坏大模型原本的输出质量吗？下面这条短小精悍的定理将证明：\textbf{通过极其巧妙的拒绝采样（Rejection Sampling）机制，投机解码输出序列的概率分布与纯目标大模型 $p$ 逐词自回归采样的分布数学上完全一致、零质量损失！}
+
+\begin{thmBox}
+\begin{theorem}[投机解码的精确无损分布保持定理]
+\label{thm:speculative-lossless}
+在任意解码步，设目标大模型的真实下一词概率分布为 $p(x)$，小草稿模型的提议分布为 $q(x)$（定义于同一词表 $\mathcal{V}$ 上）。执行如下单步投机验证算法：
+\begin{enumerate}
+  \item 从草稿模型采样候选词元 $x \sim q(\cdot)$，并独立采样 $u \sim \mathrm{Uniform}(0, 1)$；
+  \item 若 $u \le \min\!\left(1,\, \frac{p(x)}{q(x)}\right)$，则\textbf{接受}并输出 $X = x$；
+  \item 否则\textbf{拒绝} $x$，并从如下归一化残差分布中重新采样输出 $X \sim p'(\cdot)$：
+  \begin{equation}
+    p'(x) \;\triangleq\; \frac{\max\!\big(0,\; p(x) - q(x)\big)}{\sum_{y \in \mathcal{V}} \max\!\big(0,\; p(y) - q(y)\big)}.
+    \label{eq:spec-residual}
+  \end{equation}
+\end{enumerate}
+则最终输出词元 $X$ 的边缘概率分布\textbf{严格恒等于目标分布 $p$}：对任意词元 $x \in \mathcal{V}$，均有
+\begin{equation}
+  \Prob(X = x) \;=\; p(x).
+  \label{eq:spec-exact}
+\end{equation}
+此外，若在连续 $\gamma$ 个草稿位置上的平均接受率均为 $\alpha \in [0, 1)$（注意全部接受时大模型还会免费多吐出第 $\gamma + 1$ 个词元），则目标大模型单次并行验证前向所产出的期望词元数为
+\begin{equation}
+  \E[L] \;=\; \frac{1 - \alpha^{\gamma + 1}}{1 - \alpha}.
+  \label{eq:spec-expected-len}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+首先计算一步采样中“接受并输出特定词元 $x$”的概率：
+\[
+  \Prob(\text{accept} \wedge X = x)
+  \;=\; q(x) \cdot \min\!\left(1,\, \frac{p(x)}{q(x)}\right)
+  \;=\; \min\!\big(q(x),\, p(x)\big).
+\]
+对全体词表 $y \in \mathcal{V}$ 求和，立得总接受概率与总拒绝概率：
+\[
+  \Prob(\text{accept}) = \sum_{y \in \mathcal{V}} \min\!\big(q(y),\, p(y)\big), \qquad
+  \Prob(\text{reject}) = 1 - \sum_{y \in \mathcal{V}} \min\!\big(q(y),\, p(y)\big).
+\]
+现在利用实数初等恒等式 $a - \min(a, b) = \max(0, a - b)$，注意到 $\sum_{y} p(y) = 1$，因此总拒绝概率恰好等于残差分布的分母：
+\[
+  \Prob(\text{reject})
+  \;=\; \sum_{y \in \mathcal{V}} p(y) - \sum_{y \in \mathcal{V}} \min\!\big(q(y),\, p(y)\big)
+  \;=\; \sum_{y \in \mathcal{V}} \max\!\big(0,\; p(y) - q(y)\big)!
+\]
+将其代入全概率公式，分母与 $\Prob(\text{reject})$ \textbf{一刀抵消}：
+\begin{align*}
+  \Prob(X = x)
+  &= \Prob(\text{accept} \wedge X = x) + \Prob(\text{reject}) \cdot p'(x) \\
+  &= \min\!\big(q(x),\, p(x)\big) + \Prob(\text{reject}) \cdot \frac{\max\!\big(0,\; p(x) - q(x)\big)}{\Prob(\text{reject})} \\
+  &= \min\!\big(q(x),\, p(x)\big) + \max\!\big(0,\; p(x) - q(x)\big)
+  \;=\; p(x)!
+\end{align*}
+（最后一步只需分情形核对：若 $p(x) \le q(x)$，左边为 $p(x) + 0 = p(x)$；若 $p(x) > q(x)$，左边为 $q(x) + (p(x) - q(x)) = p(x)$！）
+
+至于期望生成词元数，记产出长度为 $L \in \{1, 2, \dots, \gamma + 1\}$：只要前 $k$ 个草稿词元全部接受（事件概率为 $\alpha^k$），本次验证就至少产出 $k + 1$ 个词元（因为第 $k+1$ 个位置即便被拒也会从残差分布重采 1 个正确词元，若全接受则大模型免费附赠第 $\gamma + 1$ 个词元）。故由非负整数随机变量的尾概率求和公式：
+\[
+  \E[L] \;=\; \sum_{k=0}^{\gamma} \Prob(L \ge k + 1) \;=\; \sum_{k=0}^{\gamma} \alpha^k \;=\; \frac{1 - \alpha^{\gamma + 1}}{1 - \alpha}.
+\]
+证毕。
+\end{proof}
+
+直觉上，式~\eqref{eq:spec-expected-len} 的威力极其惊人：在代码补全、摘要改写或格式化输出等常见任务中，小草稿模型与大模型的平均一致率往往高达 $\alpha \approx 0.8$；取草稿步数 $\gamma = 5$ 时，大模型仅做 1 次并行验证就能一口气无损产出 $\E[L] = \frac{1 - 0.8^6}{1 - 0.8} \approx \mathbf{3.69}$ 个词元！扣除极轻量的草稿模型耗时，单请求生成延迟直接提速 $2\text{--}3\times$，而输出质量与原版大模型在概率论意义下\textbf{零差异}！
+
+\section{分布式与推理系统排错指南及前沿架构拓展}
+\label{sec:sys-pitfalls-ext}
+
+\begin{failBox}{分布式训练、LoRA 与线上推理的三大致命系统陷阱}
+\begin{enumerate}
+  \item \textbf{把张量并行（TP）错误地跨节点部署到慢速以太网/InfiniBand 上}：初学者在双机 16 卡上运行 70B 模型时，常图省事直接设置 \texttt{tp\_size=16}。结果每层 Transformer 的 4 次层内阻塞式 AllReduce 全部被迫跨过慢一个数量级的机间网卡，GPU 算力利用率（MFU）瞬间从 $48\%$ 惨跌至不足 $8\%$！正确架构永远是：单机 8 卡内部跑 \texttt{tp\_size=8}（走 $900\,\mathrm{GB/s}$ NVLink），跨机方向只走 \texttt{pp\_size=2} 或 \texttt{ZeRO/FSDP}。
+  \item \textbf{LoRA 忘记 $B = 0$ 初始化（或误将 $A, B$ 同时置零）}：如果按 PyTorch 默认随机初始化对 $A$ 和 $B$ 都用高斯/均匀分布初始化，第 0 步就会往冻结的预训练底座里注入巨大的随机矩阵噪声 $\frac{\alpha}{r}BA$，导致初始困惑度（Perplexity）暴涨、把预训练分布瞬间打碎；反之，若错把 $A$ 和 $B$ 同时初始化为全零，则由式~\eqref{eq:lora-grad} 可见 $\nabla_A \mathcal{L} \equiv \mathbf{0}$ 且 $\nabla_B \mathcal{L} \equiv \mathbf{0}$，整个适配器在优化中彻底“假死”纹丝不动！必须严格执行“$A$ 随机初始化、$B$ 全零初始化”的非对称规范。
+  \item \textbf{长上下文服务忽视 KV 缓存爆发导致线上 OOM}：许多团队上线前只按权重大小（如 7B BF16 占 14\,GB）估算显存，觉得一张 24\,GB 或 40\,GB 显卡绰绰有余。结果一放开 $32\mathrm{K}$ 上下文与多并发请求，由式~\eqref{eq:kv-cache-formula} 决定的 KV 缓存瞬间吞噬几十 GB 显存直接触发 CUDA OOM 崩溃！工程上线前必须依据 $M_{\mathrm{KV/tok}} \times B \times S_{\max}$ 精确封顶最大在飞词元预算（\texttt{max\_num\_batched\_tokens}），并搭配 PagedAttention 与 FP8/INT8 KV-Cache 量化。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{混合专家模型（MoE）专家并行与 Prefill/Decode 分离架构}
+站在 2025--2026 年的超大规模 AI 系统最前沿，两项范式级演进正重新定义集群架构：
+\begin{itemize}
+  \item \textbf{稀疏混合专家（MoE）与专家并行（Expert Parallelism, EP）}：以 DeepSeek-V3（总参 671B、单词元仅激活 37B）与 Mixtral 为代表的 MoE 架构，把稠密 MLP 替换为数十至数百个小型专家网络，每个词元仅由门控路由器（Router）动态挑选 Top-$K$（如 $K = 2\text{--}8$）个专家计算，一举打破了“参数量与单步 FLOPs 严格成正比”的魔咒！在分布式训练上，这催生了第四维并行——\textbf{专家并行（EP）}：不同 GPU 存放不同专家子集，路由后通过 \textbf{All-to-All} 集合通信将词元分发给对应专家所在的 GPU、算完后再 All-to-All 传回。其核心系统挑战在于\textbf{负载均衡（Load Balancing）}：一旦热门专家被大量词元挤爆，就会引发严重的木桶短板效应（Straggler）甚至词元丢弃（Token Dropping），必须配合辅助负载均衡损失或无辅助损失动态偏置调节（Auxiliary-Loss-Free Balancing）。
+  \item \textbf{Prefill / Decode 分离部署架构（Disaggregated Serving，如 Splitwise / DistServe）}：回到第~\ref{ch:hardware-roofline-flash} 章定理~\ref{thm:prefill-vs-decode} 的深刻洞察——Prefill 是彻底的\textbf{计算受限}任务（优化指标是首字延迟 TTFT），而 Decode 是彻底的\textbf{访存带宽受限}任务（优化指标是词间延迟 TPOT）。把它们混在同一张 GPU 上跑连续批处理时，一个突发长提示的 Prefill 请求会立刻卡死同一张卡上所有正在 Decode 的老用户，造成严重的尾延迟毛刺！分离部署架构将集群物理划分为专职 Prefill 节点池与专职 Decode 节点池：Prefill 节点吃满算力算完提示词后，通过高速 RDMA/NVLink 网络将生成好的 KV 缓存单向传输给 Decode 节点接力续写，彻底消除双阶段干扰，成为超大规模推理集群的标准蓝图。
+\end{itemize}
+\end{extBox}
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与公式手算}{熟练核算 3D 并行/ZeRO 显存通信、LoRA 参数比与 KV 缓存账本}
+
+\begin{enumerate}
+  \item[\textbf{6.6.1}] \textbf{70B 模型在 64 卡集群上的 ZeRO 显存与 3D 并行综合核算}：现使用 8 台 8 卡 H100 服务器（共 $N_{\mathrm{GPU}} = 64$ 张 80\,GB 显卡）训练一个 $\Phi = 7\times 10^{10}$（70B）大模型，采用 BF16 + FP32 AdamW 混合精度。
+  \begin{enumerate}
+    \item 若纯用 64 路数据并行（$N_d = 64$），分别按表~\ref{tab:zero-ledger} 计算 DDP、ZeRO-1、ZeRO-2 与 ZeRO-3 下的单卡静态显存（GB）与每步单卡梯度/权重总通信量（GB）；判断哪几种方案连静态显存都装不进单张 80\,GB 显卡；
+    \item 若改为经典 3D 并行：单机内张量并行 $N_t = 8$、跨机流水线并行 $N_p = 4$、顶层 ZeRO-1 数据并行 $N_d = 2$（满足 $8 \times 4 \times 2 = 64$），此时每张卡负责的局部模型参数量为 $\Phi_{\mathrm{local}} = \Phi / (N_t N_p)$。计算该配置下的单卡静态显存，并求出当微批数 $m = 32$ 时的流水线气泡率 $f_{\mathrm{bubble}}$。
+  \end{enumerate}
+  \exHint{(a) $\Psi = 2\Phi = 140\,\mathrm{GB}$；DDP $1120\,\mathrm{GB}$、ZeRO-1 $293.1\,\mathrm{GB}$、ZeRO-2 $155.3\,\mathrm{GB}$ 均超 80\,GB，唯有 ZeRO-3 的 $17.5\,\mathrm{GB}$ 能装下（通信 $3\Psi = 420\,\mathrm{GB}$）；(b) $\Phi_{\mathrm{local}} = 70 / 32 = 2.1875\mathrm{B}$，叠加 $N_d=2$ 的 ZeRO-1（每参数 $4 + 12/2 = 10\,\mathrm{B}$），单卡静态显存仅 $21.88\,\mathrm{GB}$！气泡率 $f_{\mathrm{bubble}} = \frac{4-1}{32+4-1} = \frac{3}{35} \approx 8.57\%$。}
+
+  \item[\textbf{6.6.2}] \textbf{LoRA 显存预算与 GQA KV-Cache 精确核算}：考虑一座类似 Llama-3 8B 的模型：$L = 32$ 层、隐藏维度 $d = 4096$、查询头数 $h_q = 32$、KV 头数 $n_{\mathrm{kv}} = 8$（GQA-4）、头维度 $d_{\mathrm{head}} = 128$。
+  \begin{enumerate}
+    \item 若仅对每层的 $W_Q, W_V \in \R^{4096 \times 4096}$（实际 $W_V$ 为 $1024 \times 4096$，此处先按双 $4096 \times 4096$ 标准 MHA 近似估算）施加秩 $r = 16$ 的 LoRA 适配器，计算全网 32 层总可训练参数量、占 8B 模型的百分比，以及 BF16 底座 + LoRA 训练状态的总静态显存；
+    \item 用式~\eqref{eq:kv-cache-formula} 计算该模型在 BF16 下的单词元 KV 缓存大小 $M_{\mathrm{KV/tok}}$；若在单张 80\,GB H100 上部署（BF16 权重占 16\,GB，预留 4\,GB 框架开销，余下 60\,GB 全部给 KV 缓存），在平均序列长度 $S = 4096$ 下，借助 PagedAttention 理论最多可并发服务多少条请求？
+  \end{enumerate}
+  \exHint{(a) 每层两个方阵共增 $2 \times 2 \times 4096 \times 16 = 262144$ 参数，32 层合计约 $8.39\mathrm{M}$ 参数（仅占 $0.105\%$！），静态显存仅比 $16\,\mathrm{GB}$ 底座多约 $0.13\,\mathrm{GB}$；(b) $M_{\mathrm{KV/tok}} = 2 \times 32 \times 8 \times 128 \times 2 = 131072\,\mathrm{B} = 128\,\mathrm{KiB/tok}$，单条 4096 序列占 $512\,\mathrm{MiB} \approx 536.9\,\mathrm{MB}$，故 $60\,\mathrm{GiB}$ 二进制口径可并发 $120$ 条（十进制 $60\,\mathrm{GB}$ 约 $111$ 条）！}
+\end{enumerate}
+
+\exTier{B 层：严谨数学证明}{严格推导环形归约延迟边界与投机解码期望加速比}
+
+\begin{enumerate}
+  \item[\textbf{6.6.3}] \textbf{Ring AllReduce 对比 Halving-Doubling 树形归约的延迟—带宽权衡}：由定理~\ref{thm:ring-allreduce} 知，Ring AllReduce 在 $P$ 张卡上传输 $M$ 字节张量的总耗时为 $T_{\mathrm{Ring}} = 2(P-1)\alpha + 2\frac{P-1}{P}\frac{M}{B}$。另一种经典的 Rabenseifner（递归减半—加倍，Recursive Halving-Doubling）算法在 $P = 2^k$ 时，用 $\log_2 P$ 轮完成 ReduceScatter、再用 $\log_2 P$ 轮完成 AllGather，第 $j$ 轮传输数据量为 $M / 2^j$。
+  \begin{enumerate}
+    \item 证明 Rabenseifner 算法每张 GPU 累计发送的总字节数同样精确等于 $2\frac{P-1}{P}M$，而固定延迟项从 $2(P-1)\alpha$ 锐减至 $2(\log_2 P)\alpha$；
+    \item 当 $P = 1024$ 卡、延迟 $\alpha = 5\,\mu\mathrm{s}$、带宽 $B = 50\,\mathrm{GB/s}$ 时，计算不考虑拥塞差异时两种算法的固定延迟差 $T_{\mathrm{Ring}} - T_{\mathrm{Rab}}$，并求出 Ring AllReduce 自身延迟项与带宽项恰好相等的临界消息体积 $M_{\mathrm{crit}}$，解释为何超大集群同步小张量（如 LayerNorm 梯度）时 Ring 会因 $O(P)\alpha$ 延迟项急剧退化！
+  \end{enumerate}
+  \exHint{(a) 等比级数求和 $\sum_{j=1}^{\log_2 P} \frac{M}{2^j} = M\big(1 - \frac{1}{P}\big) = \frac{P-1}{P}M$，两阶段合计精确为 $2\frac{P-1}{P}M$；(b) Ring 延迟项高达 $2 \times 1023 \times 5\,\mu\mathrm{s} = 10.23\,\mathrm{ms}$（而 Rabenseifner 仅 $0.10\,\mathrm{ms}$，相差 $10.13\,\mathrm{ms}$），在 $50\,\mathrm{GB/s}$ 链路上等价于多传了约 $511.5\,\mathrm{MB}$ 通信量，对应临界张量大小 $M_{\mathrm{crit}} = P\alpha B = 256\,\mathrm{MB}$！}
+
+  \item[\textbf{6.6.4}] \textbf{投机解码的多步联合分布精确性与真实墙钟加速比公式}：
+  \begin{enumerate}
+    \item 定理~\ref{thm:speculative-lossless} 证明了单个位置的边缘无损性。请利用概率链式法则 $\Prob(X_1, \dots, X_T) = \prod_{t=1}^T \Prob(X_t \mid X_{<t})$ 严格说明：在每轮迭代依次接受前 $k$ 个草稿词元、在第 $k+1$ 处拒绝并重采（随后立刻截断丢弃第 $k+2, \dots, \gamma$ 个草稿）的完整多步投机循环中，整条输出序列的联合分布依然与目标大模型 $p$ 严格等价；
+    \item 设小草稿模型单步前向耗时与目标大模型单次并行验证耗时之比为 $c = t_{\mathrm{draft}} / t_{\mathrm{target}} \ll 1$（忽略验证 $\gamma+1$ 个词元相对 $1$ 个词元的微小增量）。结合式~\eqref{eq:spec-expected-len}，证明投机解码相对原始自回归解码的期望墙钟加速比为
+    \[
+      \mathrm{Speedup}(\gamma, \alpha, c) \;=\; \frac{1 - \alpha^{\gamma + 1}}{(1 - \alpha)(\gamma c + 1)},
+    \]
+    并在 $\alpha = 0.8, c = 0.05$ 下求出最大化加速比的最优草稿长度 $\gamma^*$。
+  \end{enumerate}
+  \exHint{(a) 因为一旦在第 $k+1$ 步拒绝，后续草稿被全部作废，新一轮草稿重新以已验证的精确前缀 $X_{\le k+1}$ 为条件启动，故每个已接受与重采位置都严格服从 $p(\cdot \mid X_{<t})$；(b) 每轮总耗时为 $\gamma t_{\mathrm{draft}} + t_{\mathrm{target}} = (\gamma c + 1) t_{\mathrm{target}}$，产出期望词元数 $\E[L] = \frac{1-\alpha^{\gamma+1}}{1-\alpha}$，作比即得！代入 $\alpha=0.8, c=0.05$ 逐个枚举 $\gamma = 6, 7, 8, 9$ 可见 $\gamma^* = 8$ 时加速比达到峰值约 $3.092\times$。}
+\end{enumerate}
+
+\exTier{C 层：机制剖析与反例设计}{诊断 LoRA 对称锁死陷阱与离群值 SmoothQuant 尺度迁移}
+
+\begin{enumerate}
+  \item[\textbf{6.6.5}] \textbf{反例剖析：为什么 LoRA 把 $A, B$ 同时零初始化会导致训练永久锁死？}：考虑极简标量线性模型 $y = (w_0 + b a) x$（秩 $r = 1$，$w_0$ 冻结），损失函数为平方误差 $\mathcal{L}(a, b) = \frac{1}{2}(y - y^*)^2$。
+  \begin{enumerate}
+    \item 写出 $\frac{\partial \mathcal{L}}{\partial a}$ 与 $\frac{\partial \mathcal{L}}{\partial b}$ 的解析式，证明若初始化 $a_0 = 0, b_0 = 0$，则原点 $(0, 0)$ 是损失函数的驻点（鞍点），梯度下降与 Adam 均会永远停在 $(0, 0)$ 无法动弹；
+    \item 证明当取 $a_0 \neq 0, b_0 = 0$ 时，不仅第 0 步模型输出精确等于 $w_0 x$，而且第 1 步梯度更新后立即有 $b_1 \neq 0$，从而在第 2 步顺势激活 $\frac{\partial \mathcal{L}}{\partial a} \neq 0$；最后思考：如果反过来取 $a_0 = 0, b_0 \neq 0$ 在数学上是否同样可行？为何工程惯例偏好 $B = 0$？
+  \end{enumerate}
+  \exHint{(a) $\frac{\partial \mathcal{L}}{\partial a} = (y - y^*) b x$，$\frac{\partial \mathcal{L}}{\partial b} = (y - y^*) a x$，当 $a=b=0$ 时二者同时严格为零；(b) $A=0, B\neq 0$ 在数学上同样对称可行，只是输入维 $x$ 乘随机 $A$ 后再乘全零 $B$ 在多适配器拼接时前向输出恒为零、反向传播更直观。}
+
+  \item[\textbf{6.6.6}] \textbf{重尾通道 INT4 量化手算与 SmoothQuant 迁移演练}：设某 $2\times 2$ 权重矩阵与单行激活向量为
+  \[
+    W = \begin{bmatrix} 0.4 & -0.3 \\ 7.0 & -5.0 \end{bmatrix}, \qquad
+    x = \begin{bmatrix} 10.0 & 0.5 \end{bmatrix}.
+  \]
+  \begin{enumerate}
+    \item 分别对 $W$ 执行 \textbf{INT4（$q_{\max} = 7$）逐张量量化}与\textbf{逐行（逐通道）量化}，手算量化后的重构矩阵 $\hat{W}_{\mathrm{pt}}$ 与 $\hat{W}_{\mathrm{pc}}$，观察正常第 1 行 $[0.4, -0.3]$ 在逐张量量化下变成了什么！
+    \item 若还要同时对激活 $x$（第 1 维存在 $20\times$ 离群值！）做 INT4 逐张量量化，请设计一个对角平滑矩阵 $\diag(s_1, s_2)$（例如取 SmoothQuant 经典迁移指数 $\alpha = 0.5$，即 $s_j = \max|x_j|^{0.5} / \max|W_{j,:}|^{0.5}$），计算变换后的 $\tilde{x} = x \diag(s)^{-1}$ 与 $\tilde{W} = \diag(s) W$，验证乘积 $\tilde{x} \tilde{W} = x W$ 严格不变且两者动态范围同时大幅收窄！
+  \end{enumerate}
+  \exHint{(a) 逐张量 $s_{\mathrm{pt}} = 7.0 / 7 = 1.0$，于是第一行 $\operatorname{round}([0.4, -0.3]/1.0) = [0, 0]$ —— 整个通道彻底被清零！而逐行量化第一行取 $s_1 = 0.4 / 7 \approx 0.0571$，重构为 $[0.400, -0.286]$，误差极小！}
+\end{enumerate}
+
+\exTier{D 层：编程实验与系统延伸}{动手实现分组量化折中扫描与无损投机解码蒙特卡洛验算}
+
+\begin{enumerate}
+  \item[\textbf{6.6.7}] \textbf{编程实验：分组量化（Group-Wise Quantization）的 INT4 误差—显存帕累托前沿}：在代码~\ref{lst:quant-code}（\texttt{exp6\_quant\_and\_lora()}）基础上，将离群噪声进一步改为“随机分布在全矩阵不同通道内的 $2\%$ 孤立尖峰离群元素（$8\times$ 放大）”：
+  \begin{enumerate}
+    \item 实现通用函数 \texttt{quant\_groupwise(W, bits=4, group\_size=g)}，沿列维将每行切分为若干长度为 $g$ 的连续小组，每组独立计算对称缩放因子；
+    \item 扫描组大小 $g \in \{256\text{（逐通道）}, 128, 64, 32, 16\}$，记录对应的输出相对误差与“有效平均每权重比特数” $b_{\mathrm{eff}} = 4 + 16 / g$，绘制误差与有效比特数的折中曲线，验证为何主流 4-bit 量化（GPTQ/AWQ）普遍选用 $g = 128$（有效 $4.125\,\mathrm{bit}$）作为甜点！
+  \end{enumerate}
+  \exHint{对行内孤立离群元素，逐通道（$g=256$）会被同一行里的单个尖峰拖累整行，而 $g=64$ 或 $128$ 把破坏范围严格锁死在一小组之内，且每权重仅多花 $0.125\text{--}0.25$ 比特！}
+
+\par\pagebreak[4]
+  \item[\textbf{6.6.8}] \textbf{编程实验：蒙特卡洛验证投机解码无损分布定理与加速比曲线}：编写纯 Python/NumPy 实验验证定理~\ref{thm:speculative-lossless}：
+  \begin{enumerate}
+    \item 在词表大小 $|\mathcal{V}| = 16$ 上随机生成一对有差异的概率分布 $(p, q)$（例如 $p = \softmax(z)$，$q = \softmax(0.6 z + \epsilon)$）；
+    \item 实现定理~\ref{thm:speculative-lossless} 的拒绝采样与残差分布重采样过程，独立重复 $N = 2\times 10^5$ 次，统计经验频率分布 $\hat{p}$，验证总变差距离 $\frac{1}{2}\sum_x |\hat{p}(x) - p(x)| < 5\times 10^{-3}$（远小于 $q$ 与 $p$ 之间的原始距离！）；
+    \item 计算理论一步接受率 $\alpha = \sum_x \min(p(x), q(x))$，并模拟连续 $\gamma = 5$ 步投机循环 $2\times 10^4$ 次，验证实测平均单轮产出词元数与理论公式~\eqref{eq:spec-expected-len} $\frac{1 - \alpha^6}{1 - \alpha}$ 吻合至小数点后两位！
+  \end{enumerate}
+  \exHint{注意构造残差分布时，若恰巧 $p \equiv q$（分母为 0），则每步必然 $100\%$ 接受，绝不会进入拒绝分支；实测经验总变差距离随 $O(1/\sqrt{N})$ 收敛到零，直观印证投机解码严格零损。}
+\end{enumerate}

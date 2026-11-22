@@ -1,0 +1,5 @@
+variant,mean_acc,std_acc
+Full (Res+LN),80.95,3.31
+w/o LayerNorm,80.48,2.62
+w/o Residual,80.00,5.03
+Plain (No Res/LN),78.21,5.42

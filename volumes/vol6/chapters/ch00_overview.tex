@@ -1,0 +1,66 @@
+\chapter*{序章：从表征学习走向交互决策与系统工程}
+\addcontentsline{toc}{chapter}{序章：从表征学习走向交互决策与系统工程}
+\markboth{序章\quad 本卷坐标与八校考点对照}{}
+
+\chapEpigraph{你不必相信上帝，但你应当相信“天书”的存在。}{Paul Erdős（保罗·埃尔德什，谈论记录最美证明的 \emph{THE BOOK}）}
+
+\begin{chapIntro}{本章定位与系统闭环}
+完成第 5 卷后，你已经能用自动微分与 Transformer 训练出强大的生成与表征模型。但在真实世界与前沿人工智能实验室中，还横亘着两座同样决定成败的大山：
+\begin{enumerate}
+  \item \textbf{怎么让模型在动态反馈中学会做决策、与人类价值观及客观正确性对齐？}——这属于\textbf{强化学习（RL）与大模型后训练}（第 1--4 章）。
+  \item \textbf{当模型参数突破十亿、千亿，显存和访存带宽成了唯一瓶颈时，如何让算法与硬件同频共振？}——这属于\textbf{AI 计算系统与推理工程}（第 5--6 章）。
+\end{enumerate}
+本卷将这两条常被传统教材割裂的主线融为一炉：前四章把第 3 卷已知模型的 MDP 推进到无模型 TD/DQN、策略梯度、PPO、GRPO 与 DPO；后两章则直接打通计算机组成、操作系统分页与 GPU 硬件瓶颈，让你亲手算清每一字节显存与每一次 HBM 访存。
+\end{chapIntro}
+
+\section*{0.1\quad 第 6 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.1\quad 第 6 卷八校核心考点覆盖对照表}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{35mm}p{35mm}p{15mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+MC、TD(0)、SARSA、Q-Learning 与 Double Q & Berkeley CS285 / Stanford CS234 & 第 1 章 & 无模型时序差分控制与安全/最优策略权衡 \\
+致命三元组、DQN、策略梯度定理与 GAE($\lambda$) & CS285 / CMU 10-703 & 第 2 章 & 深度强化学习与方差缩减理论基石 \\
+重要性采样、TRPO、PPO-Clip 与 GRPO & CS285 / Stanford CS336 & 第 3 章 & 连续控制与现代推理模型强化学习的核心算法 \\
+SFT、Bradley--Terry、RLHF、DPO 与 RLVR & Stanford CS336 / CS224n & 第 4 章 & 大模型指令微调、偏好对齐与推理时计算缩放 \\
+GPU 内存墙、Roofline 模型与 FlashAttention & CMU 10-414 / Stanford CS336 & 第 5 章 & 识别算力/带宽瓶颈、显存核算与 IO 感知算子设计 \\
+DDP/ZeRO/TP/PP、LoRA、INT4 量化与 PagedAttention & Stanford CS336 / MIT 6.5940 & 第 6 章 & 千亿参数分布式训练与高吞吐低延迟线上推理 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.2\quad 第 6 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.2\quad 第 6 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\无模型 RL：MC/TD\\SARSA 与 Q-Learning};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\DQN、策略梯度定理\\与 Actor-Critic/GAE};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\信任域 TRPO、\\PPO-Clip 与 GRPO};
+
+  \node[ch, below=9mm of c1] (c4) {\textbf{第 4 章}\\大模型后训练：\\RLHF、DPO 与 RLVR};
+  \node[ch, below=9mm of c2] (c5) {\textbf{第 5 章}\\GPU 内存墙、Roofline\\与 FlashAttention};
+  \node[goal, below=9mm of c3] (c6) {\textbf{\color{ochre}第 6 章（系统闭环）}\\分布式并行、LoRA、\\量化与 PagedAttention};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] ([xshift=-9mm]c3.south) -- ([xshift=9mm]c4.north);
+  \draw[arr] (c4) -- (c5);
+  \draw[arr] (c5) -- (c6);
+\end{tikzpicture}}
+\end{center}

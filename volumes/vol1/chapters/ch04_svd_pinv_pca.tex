@@ -1,0 +1,620 @@
+\chapter[奇异值分解、伪逆与 PCA 降维]{奇异值分解（SVD）、最优低秩近似、伪逆与 PCA 降维}
+\label{ch:ch4}
+
+\chapEpigraph{完美不是无以复加，而是无可删减。}{安托万·德·圣-埃克苏佩里（Antoine de Saint-Exup\'ery），《风沙星辰》}
+
+\begin{chapIntro}{本章定位：AI 线性代数的王冠}
+第 3 章的实对称阵谱定理美轮美奂，但它有一个严格门槛：矩阵必须\textbf{既是方阵又对称}（$S^T = S$）。然而，人工智能中绝大多数真实矩阵——样本特征表 $X \in \R^{n\times d}$、灰度图像 $I \in \R^{H\times W}$、神经网络线性层权重 $W \in \R^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$——几乎都是\textbf{长方形且非对称}的。
+
+\textbf{奇异值分解（Singular Value Decomposition, SVD）}把谱定理的威力解放到了\textbf{任意实矩阵 $A \in \R^{m\times n}$}上。本章将以零跳步的方式完成四件大事：
+\begin{enumerate}
+  \item 直接用第 3 章的谱定理构造出 SVD，看清它对四大基本子空间与三步旋转拉伸几何的精确刻画；
+  \item 用 10 行极简证明拿下\textbf{Eckart--Young 最优低秩近似定理}，直连第 6 卷大模型 \textbf{LoRA} 低秩微调；
+  \item 定义 \textbf{Moore--Penrose 伪逆}，回答第 2 章留下的核心悬念：欠定（过参数化）系统如何选出唯一最小范数解；
+  \item 证明\textbf{主成分分析（PCA）}两大视角的严格等价，并用 $64\times 64$ 图像压缩实测完成理论与代码的闭环。
+\end{enumerate}
+\end{chapIntro}
+
+% =========================================================================
+\section{从谱定理到奇异值分解（SVD）的完整构造与三步几何}
+\label{sec:ch4-svd-construction}
+
+\subsection{为什么从 $A^T A$ 出发？四步构造完整证明}
+
+给定任意长方形矩阵 $A \in \R^{m\times n}$，我们无法直接对 $A$ 谈特征值。但只需构造它的格拉姆矩阵 $A^T A \in \R^{n\times n}$，奇迹便立刻发生：
+\begin{itemize}
+  \item $A^T A$ 是 $n\times n$ \textbf{实对称方阵}：$(A^T A)^T = A^T A$；
+  \item $A^T A$ 是\textbf{半正定矩阵}（第 3 章）：对任意 $v \in \R^n$，$v^T (A^T A) v = \|Av\|_2^2 \ge 0$；
+  \item $\rank(A^T A) = \rank(A) =: r$（第 2 章核心结论：$\nul(A^T A) = \nul(A)$）。
+\end{itemize}
+因此，第 3 章的谱定理立刻对 $A^T A$ 生效——这就是构造 SVD 的全部钥匙。
+
+\begin{thmBox}
+\begin{theorem}[奇异值分解存在性定理, Singular Value Decomposition]
+\label{thm:ch4-svd}
+对任意实矩阵 $A \in \R^{m\times n}$（设 $\rank(A) = r$），必存在正交矩阵 $U = [u_1,\dots,u_m] \in \R^{m\times m}$、正交矩阵 $V = [v_1,\dots,v_n] \in \R^{n\times n}$，以及长方形对角矩阵 $\Sigma \in \R^{m\times n}$（其前 $r$ 个主对角元为正实数 $\sigma_1 \ge \sigma_2 \ge \dots \ge \sigma_r > 0$，其余元素全为 $0$），使得
+\begin{equation}
+  A = U \Sigma V^T = U_r \Sigma_r V_r^T = \sum_{i=1}^r \sigma_i u_i v_i^T, \label{eq:ch4-svd}
+\end{equation}
+其中 $U_r = [u_1,\dots,u_r] \in \R^{m\times r}$，$V_r = [v_1,\dots,v_r] \in \R^{n\times r}$，$\Sigma_r = \diag(\sigma_1,\dots,\sigma_r)$。标量 $\sigma_i$ 称为 $A$ 的\textbf{奇异值}，$u_i$ 与 $v_i$ 分别称为\textbf{左奇异向量}与\textbf{右奇异向量}。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+分四步直接构造：
+\begin{enumerate}
+  \item \textbf{对 $A^T A$ 施实对称谱定理}：因 $A^T A \in \R^{n\times n}$ 对称半正定且秩为 $r$，由定理 \ref{thm:ch3-spectral} 与定理 \ref{thm:ch3-psd-eig}，存在正交矩阵 $V = [v_1,\dots,v_n] \in \R^{n\times n}$ 及按降序排列的非负特征值
+  \[
+    \lambda_1 \ge \lambda_2 \ge \dots \ge \lambda_r > 0 = \lambda_{r+1} = \dots = \lambda_n,
+  \]
+  满足 $A^T A v_i = \lambda_i v_i$（$i=1,\dots,n$）。定义正奇异值 $\sigma_i := \sqrt{\lambda_i} > 0$（$1 \le i \le r$）。
+  \item \textbf{构造前 $r$ 个左奇异向量并验证标准正交性}：对每个 $1 \le i \le r$，定义
+  \[
+    u_i := \frac{1}{\sigma_i} A v_i \in \R^m.
+  \]
+  直接计算任意两个 $u_i, u_j$（$1 \le i, j \le r$）的内积：
+  \[
+    u_i^T u_j
+    = \frac{1}{\sigma_i \sigma_j} (A v_i)^T (A v_j)
+    = \frac{1}{\sigma_i \sigma_j} v_i^T (A^T A v_j)
+    = \frac{\sigma_j^2}{\sigma_i \sigma_j} v_i^T v_j
+    = \frac{\sigma_j}{\sigma_i} \delta_{ij}
+    = \delta_{ij}.
+  \]
+  故 $\{u_1,\dots,u_r\}$ 在 $\R^m$ 中天然标准正交！此外，对任意 $j > r$，因 $\|A v_j\|_2^2 = v_j^T (A^T A) v_j = 0$，必有 $A v_j = 0$。
+  \item \textbf{补全 $\R^m$ 的标准正交基}：利用第 2 章的 Gram--Schmidt 正交化，将 $\{u_1,\dots,u_r\}$ 扩充为 $\R^m$ 的一组标准正交基 $\{u_1,\dots,u_r, u_{r+1},\dots,u_m\}$，拼成正交矩阵 $U \in \R^{m\times m}$。
+  \item \textbf{验证 $AV = U\Sigma$}：逐列对照两个 $m\times n$ 矩阵。前 $r$ 列中，$(AV)_{:,i} = A v_i = \sigma_i u_i = (U\Sigma)_{:,i}$；后 $n-r$ 列中，$(AV)_{:,j} = A v_j = 0 = (U\Sigma)_{:,j}$。因此 $AV = U\Sigma$。两边右乘 $V^T$（利用 $V V^T = I_n$）并按第 1 章外积视角展开，即得
+  \[
+    A = U \Sigma V^T = U_r \Sigma_r V_r^T = \sum_{i=1}^r \sigma_i u_i v_i^T.
+  \]
+\end{enumerate}
+\end{proof}
+
+\textbf{三种尺寸写法速辨}：实际编码中（记 $p = \min(m, n)$），除上述\textbf{完整 SVD}（$U_{m\times m},\;\Sigma_{m\times n},\;V^T_{n\times n}$）外，更常用节省内存的\textbf{精简 SVD}（Thin SVD，对应 \texttt{full\_matrices=False}：$U_{m\times p},\;\Sigma_{p\times p},\;V^T_{p\times n}$）以及仅保留非零奇异值的\textbf{紧凑 SVD}（$U_r \Sigma_r V_r^T$）。三者相乘还原的都是同一个矩阵 $A$。
+
+\subsection{四大基本子空间、矩阵范数与一般条件数}
+
+SVD 一次性给出了第 2 章\textbf{全部四大基本子空间的标准正交基}，毫无冗余（表 \ref{tab:ch4-subspaces}）：
+
+\begin{table}[htbp]
+  \centering
+  \caption{SVD 对一般矩阵 $A \in \R^{m\times n}$（秩为 $r$）四大基本子空间的精确正交基刻画}
+  \label{tab:ch4-subspaces}
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{26mm}p{38mm}p{16mm}X@{}}
+    \toprule
+    \textbf{基本子空间} & \textbf{标准正交基} & \textbf{维数} & \textbf{SVD 几何角色} \\
+    \midrule
+    列空间 $\col(A)$ & $\{u_1, \dots, u_r\}$ & $r$ & $A$ 的输出值域；每列 $Ax = \sum_{i=1}^r \sigma_i(v_i^T x)u_i$ \\
+    左零空间 $\nul(A^T)$ & $\{u_{r+1}, \dots, u_m\}$ & $m - r$ & $\col(A)^\perp$；回归残差 $b - \hat{b}$ 所在空间 \\
+    行空间 $\row(A)$ & $\{v_1, \dots, v_r\}$ & $r$ & 真正被 $A$ 映射到非零输出的“有效输入方向” \\
+    零空间 $\nul(A)$ & $\{v_{r+1}, \dots, v_n\}$ & $n - r$ & $\row(A)^\perp$；被 $A$ 完全压扁为零的输入方向 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+此外，SVD 让两个最常用的矩阵范数以及一般矩阵的条件数变得一目了然。
+
+\begin{proposition}[SVD 刻画算子 2-范数、Frobenius 范数与一般条件数]
+\label{prop:ch4-norms}
+设非零矩阵 $A \in \R^{m\times n}$ 的非零奇异值为 $\sigma_1 \ge \dots \ge \sigma_r > 0$，则：
+\begin{enumerate}
+  \item \textbf{算子 2-范数（谱范数）}：$\|A\|_2 := \max_{\|x\|_2 = 1} \|Ax\|_2 = \sigma_1$（在 $x = v_1$ 处取到）；
+  \item \textbf{Frobenius 范数}：$\|A\|_F := \sqrt{\sum_{i,j} A_{ij}^2} = \sqrt{\tr(A^T A)} = \sqrt{\sum_{i=1}^r \sigma_i^2}$；
+  \item \textbf{一般 2-范数条件数}：对列满秩（或方阵可逆）矩阵，$\cond_2(A) := \dfrac{\sigma_1}{\sigma_r}$（一般非零矩阵亦称有效条件数）；特别地，当 $A \succ 0$ 时 $\sigma_i = \lambda_i$，与第 3 章的 $\cond(A) = \lambda_{\max}/\lambda_{\min}$ 完全一致！
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+对任意单位向量 $x \in \R^n$，令 $y = V^T x$（因 $V$ 正交，$\|y\|_2 = \|x\|_2 = 1$）。再由 $U$ 正交保长：
+\[
+  \|Ax\|_2^2 = \|U\Sigma V^T x\|_2^2 = \|\Sigma y\|_2^2 = \sum_{i=1}^r \sigma_i^2 y_i^2 \;\le\; \sigma_1^2 \sum_{i=1}^r y_i^2 \;\le\; \sigma_1^2,
+\]
+当 $x = v_1$（即 $y = e_1$）时取等号，故 $\|A\|_2 = \sigma_1$。对 Frobenius 范数，利用迹的循环不变性与正交性，
+\[
+  \|A\|_F^2 = \tr(A^T A) = \tr(V \Sigma^T \Sigma V^T) = \tr(\Sigma^T \Sigma V^T V) = \tr(\Sigma^T \Sigma) = \sum_{i=1}^r \sigma_i^2.
+\]
+\end{proof}
+
+\subsection{手算两例与三步几何可视化}
+
+\begin{example}[$2\times 2$ 非对称阵的 SVD 与三步几何]
+\label{ex:ch4-svd-2x2}
+考察非对称矩阵（它的特征值甚至是复数 $\frac{3 \pm i\sqrt{7}}{2}$，在实数域上根本无法特征对角化！）：
+\[
+  M = \begin{pmatrix} 2 & 2 \\ -1 & 1 \end{pmatrix}.
+\]
+\begin{enumerate}
+  \item \textbf{构造对称阵 $M^T M$}：
+  \[
+    M^T M = \begin{pmatrix} 2 & -1 \\ 2 & 1 \end{pmatrix}\begin{pmatrix} 2 & 2 \\ -1 & 1 \end{pmatrix} = \begin{pmatrix} 5 & 3 \\ 3 & 5 \end{pmatrix}.
+  \]
+  它正好是第 3 章例 \ref{ex:ch3-sym2x2} 中手算过的对称矩阵！直接复用结果：特征值 $\lambda_1 = 8,\; \lambda_2 = 2$，因此奇异值为 $\sigma_1 = 2\sqrt{2},\; \sigma_2 = \sqrt{2}$，右奇异向量为
+  \[
+    v_1 = \frac{1}{\sqrt{2}}\begin{pmatrix} 1 \\ 1 \end{pmatrix}, \qquad
+    v_2 = \frac{1}{\sqrt{2}}\begin{pmatrix} -1 \\ 1 \end{pmatrix}.
+  \]
+  \item \textbf{计算左奇异向量}：
+  \[
+    u_1 = \frac{1}{\sigma_1} M v_1 = \frac{1}{2\sqrt{2}}\cdot \frac{1}{\sqrt{2}}\begin{pmatrix} 4 \\ 0 \end{pmatrix} = \begin{pmatrix} 1 \\ 0 \end{pmatrix}, \qquad
+    u_2 = \frac{1}{\sigma_2} M v_2 = \frac{1}{\sqrt{2}}\cdot \frac{1}{\sqrt{2}}\begin{pmatrix} 0 \\ 2 \end{pmatrix} = \begin{pmatrix} 0 \\ 1 \end{pmatrix}.
+  \]
+  \item \textbf{拼装与验算}：$U = I_2$，$\Sigma = \diag(2\sqrt{2}, \sqrt{2})$，$V^T = \frac{1}{\sqrt{2}}\begin{psmallmatrix}1 & 1 \\ -1 & 1\end{psmallmatrix}$，立刻验证 $U\Sigma V^T = M$，且 $\|M\|_2 = 2\sqrt{2},\; \|M\|_F = \sqrt{8+2} = \sqrt{10},\; \cond_2(M) = 2$。
+\end{enumerate}
+\end{example}
+
+例 \ref{ex:ch4-svd-2x2} 揭示了任意线性变换的\textbf{普适几何本质}（图 \ref{fig:ch4-svd-geo}）：无论矩阵 $A$ 看起来多么歪斜甚至不可对角化，它对单位球面的作用永远可以拆解为三步——先用 $V^T$ \textbf{正交旋转/反射}对齐标准轴，再用 $\Sigma$ 沿各坐标轴做纯\textbf{轴向拉伸/压扁}，最后用 $U$ 做一次\textbf{正交旋转/反射}摆放到输出空间！
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{0.97\linewidth}{!}{%
+  \begin{tikzpicture}[>=Stealth]
+    % Panel 1: Input unit circle with v1, v2
+    \begin{scope}[shift={(0,0)}]
+      \draw[->, slate, thin] (-1.65,0) -- (1.65,0) node[right, font=\scriptsize] {$x_1$};
+      \draw[->, slate, thin] (0,-1.65) -- (0,1.65) node[above, font=\scriptsize] {$x_2$};
+      \draw[teal, thick, fill=tealLight, fill opacity=0.45] (0,0) circle (1.15);
+      \draw[->, ochre, very thick] (0,0) -- (0.813, 0.813) node[above right, font=\footnotesize\bfseries] {$v_1$};
+      \draw[->, navy, very thick]  (0,0) -- (-0.813, 0.813) node[above left, font=\footnotesize\bfseries] {$v_2$};
+      \draw[slate, thin] (0.14, 0.14) -- (0, 0.28) -- (-0.14, 0.14); % right angle mark
+      \node[below, font=\small\sffamily\bfseries, color=tealDark] at (0,-1.85) {(1) 输入单位圆};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.3) {正交基 $v_1, v_2$（$45^\circ$）};
+    \end{scope}
+
+    % Arrow 1 -> 2
+    \draw[->, very thick, teal] (2.05, 0) -- (3.35, 0)
+      node[midway, above, font=\footnotesize\sffamily\bfseries, color=tealDark] {$V^T$}
+      node[midway, below, font=\scriptsize\sffamily, color=slate] {旋转对齐};
+
+    % Panel 2: Rotated unit circle aligned with e1, e2
+    \begin{scope}[shift={(5.4,0)}]
+      \draw[->, slate, thin] (-1.65,0) -- (1.65,0) node[right, font=\scriptsize] {$y_1$};
+      \draw[->, slate, thin] (0,-1.65) -- (0,1.65) node[above, font=\scriptsize] {$y_2$};
+      \draw[teal, thick, fill=tealLight, fill opacity=0.45] (0,0) circle (1.15);
+      \draw[->, ochre, very thick] (0,0) -- (1.15, 0) node[below right, font=\footnotesize\bfseries] {$e_1$};
+      \draw[->, navy, very thick]  (0,0) -- (0, 1.15) node[above right, font=\footnotesize\bfseries] {$e_2$};
+      \node[below, font=\small\sffamily\bfseries, color=tealDark] at (0,-1.85) {(2) 主轴对齐};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.3) {$V^T v_1=e_1,\;V^T v_2=e_2$};
+    \end{scope}
+
+    % Arrow 2 -> 3
+    \draw[->, very thick, teal] (7.45, 0) -- (8.85, 0)
+      node[midway, above, font=\footnotesize\sffamily\bfseries, color=tealDark] {$U\Sigma$}
+      node[midway, below, font=\scriptsize\sffamily, color=slate] {拉伸与摆放};
+
+    % Panel 3: Output ellipse with semi-axes sigma1*u1 and sigma2*u2
+    \begin{scope}[shift={(11.85,0)}]
+      \draw[->, slate, thin] (-2.65,0) -- (2.65,0) node[right, font=\scriptsize] {$z_1$};
+      \draw[->, slate, thin] (0,-1.65) -- (0,1.65) node[above, font=\scriptsize] {$z_2$};
+      \draw[teal, thick, fill=tealLight, fill opacity=0.45] (0,0) ellipse (2.25 and 1.125);
+      \draw[->, ochre, very thick] (0,0) -- (2.25, 0) node[above left, font=\footnotesize\bfseries, yshift=1pt] {$\sigma_1 u_1$};
+      \draw[->, navy, very thick]  (0,0) -- (0, 1.125) node[above right, font=\footnotesize\bfseries] {$\sigma_2 u_2$};
+      \node[below, font=\small\sffamily\bfseries, color=tealDark] at (0,-1.85) {(3) 输出超椭球};
+      \node[below, font=\scriptsize, color=slate] at (0,-2.3) {半轴长 $\sigma_1=2\sqrt{2},\;\sigma_2=\sqrt{2}$};
+    \end{scope}
+  \end{tikzpicture}}
+  \caption{非对称矩阵 $M = \begin{psmallmatrix}2&2\\-1&1\end{psmallmatrix}$ 的 SVD 三步几何动作：先正交旋转 $V^T$ 将右奇异向量对齐坐标轴，再按奇异值 $\sigma_1,\sigma_2$ 轴向拉伸并由 $U$ 旋转摆放到输出空间（此处 $U=I_2$）。}
+  \label{fig:ch4-svd-geo}
+\end{figure}
+
+\begin{example}[$3\times 2$ 长方形矩阵的完整与紧凑 SVD]
+\label{ex:ch4-svd-3x2}
+考察 $A = \begin{pmatrix} 1 & 0 \\ 0 & 1 \\ 1 & 0 \end{pmatrix} \in \R^{3\times 2}$。计算 $A^T A = \begin{pmatrix} 2 & 0 \\ 0 & 1 \end{pmatrix}$，得奇异值 $\sigma_1 = \sqrt{2},\; \sigma_2 = 1$ 及右奇异向量 $v_1 = (1,0)^T,\; v_2 = (0,1)^T$。于是
+\[
+  u_1 = \frac{1}{\sqrt{2}} A v_1 = \frac{1}{\sqrt{2}}\begin{pmatrix} 1 \\ 0 \\ 1 \end{pmatrix}, \qquad
+  u_2 = \frac{1}{1} A v_2 = \begin{pmatrix} 0 \\ 1 \\ 0 \end{pmatrix}.
+\]
+这就已经给出了紧凑 SVD：$A = \sqrt{2}\,u_1 v_1^T + 1\,u_2 v_2^T$。若要补成完整 SVD，只需在 $\col(A)^\perp = \nul(A^T)$ 中找一个单位向量与 $u_1, u_2$ 正交，立刻看出 $u_3 = \frac{1}{\sqrt{2}}(1,0,-1)^T$，于是
+\[
+  A = \begin{pmatrix}
+    1/\sqrt{2} & 0 & 1/\sqrt{2} \\
+    0 & 1 & 0 \\
+    1/\sqrt{2} & 0 & -1/\sqrt{2}
+  \end{pmatrix}
+  \begin{pmatrix}
+    \sqrt{2} & 0 \\
+    0 & 1 \\
+    0 & 0
+  \end{pmatrix}
+  \begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}.
+\]
+\end{example}
+
+% =========================================================================
+\section{最优低秩近似（Eckart--Young 短证）与大模型 LoRA 直觉}
+\label{sec:ch4-eckart-young}
+
+观察 SVD 的外积展开式 $A = \sum_{i=1}^r \sigma_i u_i v_i^T$。因为奇异值按降序排列 $\sigma_1 \ge \sigma_2 \ge \dots \ge \sigma_r > 0$，且每个秩 1 矩阵 $u_i v_i^T$ 的 2-范数和 Frobenius 范数都恰好等于 $1$，所以这个求和天然是\textbf{按“能量/重要性”从大到小排列的}！
+
+如果为了压缩存储或去噪，我们只保留前 $k$ 项（$1 \le k < r$），得到\textbf{秩-$k$ 截断 SVD}（truncated SVD）：
+\[
+  A_k := \sum_{i=1}^k \sigma_i u_i v_i^T = U_k \Sigma_k V_k^T.
+\]
+显然 $\rank(A_k) = k$，而且截断误差矩阵 $A - A_k = \sum_{i=k+1}^r \sigma_i u_i v_i^T$ 的奇异值就是被丢弃的尾巴 $\sigma_{k+1}, \dots, \sigma_r$，由命题 \ref{prop:ch4-norms} 立刻有
+\[
+  \|A - A_k\|_2 = \sigma_{k+1}, \qquad \|A - A_k\|_F = \sqrt{\sum_{i=k+1}^r \sigma_i^2}.
+\]
+令人震撼的是：在\textbf{所有}秩不超过 $k$ 的矩阵中，没有任何其他构造能比直接截断 SVD 更接近原矩阵 $A$！
+
+\begin{thmBox}
+\begin{theorem}[Eckart--Young--Mirsky 最优低秩近似定理]
+\label{thm:ch4-eym}
+设 $A = \sum_{i=1}^r \sigma_i u_i v_i^T \in \R^{m\times n}$，且整数 $1 \le k < r$。则对\textbf{任意}满足 $\rank(B) \le k$ 的矩阵 $B \in \R^{m\times n}$，同时有
+\begin{equation}
+  \|A - B\|_2 \;\ge\; \|A - A_k\|_2 = \sigma_{k+1}, \qquad
+  \|A - B\|_F \;\ge\; \|A - A_k\|_F = \sqrt{\sum_{i=k+1}^r \sigma_i^2}. \label{eq:ch4-eym}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}[谱范数版本的 10 行精简证明]
+我们要证：对任意满足 $\rank(B) \le k$ 的矩阵 $B$，总能找到一个单位向量 $z \in \R^n$ 使得 $\|(A-B)z\|_2 \ge \sigma_{k+1}$。
+\begin{enumerate}
+  \item 由第 2 章秩-零度定理，$\rank(B) \le k \implies \dim\nul(B) = n - \rank(B) \ge n - k$。
+  \item 记前 $k+1$ 个右奇异向量张成的子空间为 $W := \spanop\{v_1, \dots, v_{k+1}\} \subseteq \R^n$，显然 $\dim(W) = k+1$。
+  \item 由子空间维数公式（因 $\nul(B) + W \subseteq \R^n$ 维数至多为 $n$）：
+  \[
+    \dim\bigl(\nul(B) \cap W\bigr) = \dim\nul(B) + \dim(W) - \dim\bigl(\nul(B) + W\bigr) \ge (n - k) + (k + 1) - n = 1.
+  \]
+  \item 因此交空间 $\nul(B) \cap W$ 中至少存在一个\textbf{单位向量} $z$（$\|z\|_2 = 1$）。既然 $z \in W$，可写成 $z = \sum_{i=1}^{k+1} c_i v_i$，且系数满足 $\sum_{i=1}^{k+1} c_i^2 = \|z\|_2^2 = 1$。
+  \item 又因 $z \in \nul(B)$ 即 $Bz = 0$，利用 $\{u_1,\dots,u_{k+1}\}$ 的标准正交性与 $\sigma_1 \ge \dots \ge \sigma_{k+1}$：
+  \[
+    \|(A - B)z\|_2^2 = \|Az\|_2^2
+    = \norm{\sum_{i=1}^{k+1} \sigma_i c_i u_i}_2^2
+    = \sum_{i=1}^{k+1} \sigma_i^2 c_i^2
+    \;\ge\; \sigma_{k+1}^2 \sum_{i=1}^{k+1} c_i^2
+    = \sigma_{k+1}^2.
+  \]
+\end{enumerate}
+两边开方并由算子 2-范数定义，得 $\|A - B\|_2 \ge \|(A - B)z\|_2 \ge \sigma_{k+1} = \|A - A_k\|_2$。
+\end{proof}
+
+\begin{extBox}{Frobenius 范数版本的证明思路}
+Frobenius 范数版本 $\|A - B\|_F^2 \ge \sum_{i=k+1}^r \sigma_i^2$ 同样不需要繁重的行列式技巧，只需结合第 2 章的正交投影即可证明：固定 $\col(B)$（其维数 $\le k$），在所有列空间含于 $\col(B)$ 的矩阵中，最小化 $\|A - B\|_F^2 = \sum_{j=1}^n \|a_j - b_j\|_2^2$ 的唯一最优解正是把 $A$ 的每一列正交投影到 $\col(B)$ 上，即 $B^* = P_k A$（$P_k$ 为秩 $\le k$ 的正交投影阵）。于是 $\|A - B\|_F^2 \ge \|(I - P_k)A\|_F^2 = \tr\bigl((I - P_k)A A^T\bigr)$，归结为在 $(m-k)$ 维子空间上极小化对称阵 $AA^T$ 的迹（由谱定理/Ky Fan 极值原理，最小值恰为最小 $m-k$ 个特征值之和 $\sum_{i=k+1}^r \sigma_i^2$）。初读直接记住并使用式 \eqref{eq:ch4-eym} 即可。
+\end{extBox}
+
+\begin{insightBox}{从截断 SVD 到第 6 卷大模型 LoRA 微调（$\Delta W = B A$）}
+在微调十亿至千亿参数的大语言模型时，直接更新每一层的全尺寸权重矩阵 $W_0 \in \R^{d\times d}$（例如 $d = 4096$ 时单个矩阵就含 $1677$ 万个参数）代价极高。研究发现，微调产生的权重增量 $\Delta W = W_{\mathrm{ft}} - W_0$ 虽然尺寸庞大，但其奇异值衰减极快，具有很低的\textbf{内在秩}（intrinsic rank）。
+
+\textbf{LoRA（Low-Rank Adaptation，第 6 卷核心技术）}正是 Eckart--Young 思想的直接工程化：冻结原始权重 $W_0$，把增量强制参数化为两个瘦长矩阵的乘积（秩 $k \ll d$）：
+\[
+  W = W_0 + \Delta W = W_0 + B A, \qquad B \in \R^{d\times k},\quad A \in \R^{k\times d}.
+\]
+当 $d = 4096,\; k = 8$ 时，可训练参数量从 $4096^2 = 16\,777\,216$ 暴降至 $8 \times (4096 + 4096) = 65\,536$——整整\textbf{压缩了 256 倍（仅占 0.39\%）}，却能保留 $\Delta W$ 绝大部分的主导低秩能量！
+\end{insightBox}
+
+% =========================================================================
+\section{Moore--Penrose 伪逆与欠定系统的最小范数解}
+\label{sec:ch4-pinv}
+
+回到第 2 章末尾留下的开放问题：当线性回归设计矩阵 $A \in \R^{m\times n}$ \textbf{列满秩且超定}（$m > n,\; r = n$）时，正规方程给出的最小二乘解 $x^* = (A^T A)^{-1} A^T b$ 是唯一的。但如果 $A$ \textbf{秩亏}（例如特征共线）或者处于\textbf{欠定/过参数化}状态（样本数少于参数数 $m < n$，如同当代神经网络），$A^T A$ 不可逆，使 $\|Ax - b\|_2^2$ 最小的解有无穷多个（构成仿射子空间 $x_0 + \nul(A)$）。面对无穷多个同样能把训练误差压到最低的解，我们应当挑哪一个？SVD 给出了最自然、最唯一的答案：\textbf{Moore--Penrose 伪逆}。
+
+\begin{defBox}
+\begin{definition}[Moore--Penrose 伪逆, Pseudoinverse]
+\label{def:ch4-pinv}
+设矩阵 $A \in \R^{m\times n}$ 的 SVD 为 $A = U\Sigma V^T = U_r \Sigma_r V_r^T$（$\rank(A) = r$）。定义 $A$ 的 \textbf{Moore--Penrose 伪逆}为 $n\times m$ 矩阵：
+\begin{equation}
+  A^+ := V \Sigma^+ U^T = V_r \Sigma_r^{-1} U_r^T = \sum_{i=1}^r \frac{1}{\sigma_i} v_i u_i^T \;\in\; \R^{n\times m}, \label{eq:ch4-pinv}
+\end{equation}
+其中 $\Sigma^+ \in \R^{n\times m}$ 由将 $\Sigma$ 转置并把所有非零奇异值 $\sigma_i$ 替换为倒数 $1/\sigma_i$、零元保持为 $0$ 得到。
+\end{definition}
+\end{defBox}
+
+立刻核对伪逆的几个关键特例与投影恒等式：
+\begin{itemize}
+  \item \textbf{可逆方阵}（$r = m = n$）：$A^+ = V \Sigma^{-1} U^T = A^{-1}$，退化为普通逆矩阵；
+  \item \textbf{列满秩}（$r = n \le m$）：$A^+ = (A^T A)^{-1} A^T$（左逆，正好还原第 2 章的最小二乘解析解）；
+  \item \textbf{行满秩}（$r = m \le n$）：$A^+ = A^T (A A^T)^{-1}$（右逆，满足 $A A^+ = I_m$）；
+  \item \textbf{两大正交投影恒等式}（对照表 \ref{tab:ch4-subspaces} 的标准正交基！）：
+  \begin{equation}
+    A A^+ = U_r U_r^T = P_{\col(A)}, \qquad A^+ A = V_r V_r^T = P_{\row(A)}. \label{eq:ch4-pinv-proj}
+  \end{equation}
+  由此顺手验证全部四条 Moore--Penrose 代数公理：$A A^+ A = A$、$A^+ A A^+ = A^+$、$(AA^+)^T = AA^+$、$(A^+A)^T = A^+A$。
+\end{itemize}
+
+下面用 SVD 坐标变换一步证明伪逆在人工智能与优化中的核心地位。
+
+\begin{thmBox}
+\begin{theorem}[伪逆给出最小二乘集合中的唯一最小范数解]
+\label{thm:ch4-min-norm}
+对\textbf{任意}矩阵 $A \in \R^{m\times n}$（不限形状与秩）与任意向量 $b \in \R^m$，记 $x^+ := A^+ b$。则：
+\begin{enumerate}
+  \item $x^+$ 是最小二乘问题 $\min_{x\in\R^n} \|Ax - b\|_2^2$ 的全局极小解；
+  \item 在所有满足最小二乘极小的解 $x^*$ 中，$x^+$ 具有\textbf{严格最小的欧氏范数}：$\|x^+\|_2 \le \|x^*\|_2$，等号成立当且仅当 $x^* = x^+$。
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+代入 $A = U\Sigma V^T$，令正交变量代换 $y := V^T x \in \R^n$ 与 $c := U^T b \in \R^m$。由于正交矩阵保欧氏范数，有 $\|x\|_2^2 = \|y\|_2^2$ 且
+\begin{equation}
+  \|Ax - b\|_2^2 = \|U(\Sigma V^T x - U^T b)\|_2^2 = \|\Sigma y - c\|_2^2
+  = \sum_{i=1}^r (\sigma_i y_i - c_i)^2 + \sum_{i=r+1}^m c_i^2. \label{eq:ch4-svd-ls}
+\end{equation}
+观察式 \eqref{eq:ch4-svd-ls} 的两项：第二项 $\sum_{i=r+1}^m c_i^2$ 与变量 $y$ 完全无关（它是 $b$ 落在 $\nul(A^T)$ 中的不可消残差）；第一项是非负平方和，其最小值为 $0$，且\textbf{当且仅当}
+\[
+  y_i = \frac{c_i}{\sigma_i} \qquad (i = 1, \dots, r)
+\]
+时取到！而余下的坐标 $y_{r+1}, \dots, y_n$（对应零空间 $\nul(A)$ 的分量）可以任意取值而不改变残差。
+
+现在，在所有最小二乘解中进一步极小化欧氏范数平方：
+\[
+  \|x\|_2^2 = \|y\|_2^2 = \sum_{i=1}^r \left(\frac{c_i}{\sigma_i}\right)^2 + \sum_{i=r+1}^n y_i^2.
+\]
+显然，此式取得严格唯一最小值的充要条件是令所有自由零空间分量为零：$y_{r+1} = \dots = y_n = 0$！将最优坐标 $y^+$ 换回原空间，即得
+\[
+  x^+ = V y^+ = \sum_{i=1}^r \frac{c_i}{\sigma_i} v_i = \sum_{i=1}^r \frac{u_i^T b}{\sigma_i} v_i = V_r \Sigma_r^{-1} U_r^T b = A^+ b.
+\]
+\end{proof}
+
+\begin{example}[二维欠定方程的最小范数解]
+\label{ex:ch4-underdet}
+解单方程双未知数欠定系统 $x_1 + 2x_2 = 5$，即 $A = \begin{pmatrix}1 & 2\end{pmatrix} \in \R^{1\times 2},\; b = (5)$。因 $A$ 行满秩，直接算得 $A^+ = A^T(AA^T)^{-1} = \frac{1}{5}\begin{pmatrix}1\\2\end{pmatrix}$，于是最小范数解为 $x^+ = A^+ b = \begin{pmatrix}1\\2\end{pmatrix}$（范数 $\|x^+\|_2 = \sqrt{5}$）。从几何上看，所有解构成直线 $x_1 + 2x_2 = 5$，而 $x^+ = (1,2)^T \in \row(A)$ 恰好是\textbf{从原点向该直线所作垂线的垂足}——离原点最近的点！
+\end{example}
+
+\begin{insightBox}{过参数化神经网络的隐式偏置（Implicit Bias）}
+现代深度学习模型往往参数量远超样本数（$n \gg m$），能够以零训练误差插值整个数据集。为什么它们常常没有彻底过拟合？一个关键理论起点正来自定理 \ref{thm:ch4-min-norm}：对欠定线性回归 $Aw = b$，若从零初始化 $w^{(0)} = 0$ 出发运行梯度下降 $w^{(t+1)} = w^{(t)} - \eta A^T(Aw^{(t)} - b)$，由于每一步更新向量 $A^T(\cdot)$ 永远落在行空间 $\row(A) = \nul(A)^\perp$ 内，迭代终点 $w^{(\infty)}$ 必然在 $\nul(A)$ 上零分量——也就是说，\textbf{哪怕不加任何显式正则项，零初始化梯度下降也会自动收敛到最小范数伪逆解 $w^+ = A^+ b$}！这正是第 4--5 卷“梯度下降隐式正则化”的雏形（习题 4.7 将带你亲手跑通这一惊人现象）。
+\end{insightBox}
+
+\begin{failBox}{微小奇异值放大噪声与截断阈值 \texttt{rcond}}
+观察公式 $x^+ = \sum_{i=1}^r \frac{u_i^T b}{\sigma_i} v_i$：如果数据矩阵接近秩亏，某个奇异值小到 $\sigma_r = 10^{-12}$，那么观测向量 $b$ 中即便只有 $10^{-6}$ 的微小测量噪声，除以 $\sigma_r$ 后也会被瞬间放大 $10^{12}$ 倍，彻底摧毁解的精度！因此，NumPy 的 \texttt{np.linalg.pinv(A, rcond=1e-15)} 默认把所有小于 $\text{rcond}\cdot \sigma_1$ 的极小奇异值视作零而丢弃；而在机器学习回归中，更平滑的替代方案是第 2 章的岭回归（习题 4.6 将证明岭回归把生硬的 $1/\sigma_i$ 平滑阻尼为 $\frac{\sigma_i}{\sigma_i^2 + \lambda}$）。
+\end{failBox}
+
+% =========================================================================
+\section{主成分分析（PCA）的双重视角等价与 SVD 图像压缩实战}
+\label{sec:ch4-pca-compression}
+
+\subsection{从二维倾斜点云出发：降维的两种等价愿望}
+
+设想我们收集了 $n$ 名学生的“数学成绩”与“物理成绩”二维数据，画在平面上是一团沿着 $45^\circ$ 方向拉长的倾斜椭圆点云（中心在样本均值 $\mu$）。现在要把这批二维点压缩到穿过均值 $\mu$ 的\textbf{一条一维直线}上，该挑哪条直线？
+
+直觉上有两种看似不同的标准：
+\begin{itemize}
+  \item \textbf{视角 1（统计视角 · 最大投影方差）}：希望投影到直线上的坐标尽可能拉开差距（方差最大），从而保留最多的信息区分度；
+  \item \textbf{视角 2（几何视角 · 最小正交重构误差）}：希望每个样本点到这条直线的垂直距离平方和尽可能小，从而用一维坐标还原二维点时失真最小。
+\end{itemize}
+在任意 $d$ 维空间中把数据降到 $k$ 维子空间时，这两种愿望竟是\textbf{完全等价}的，而且其精确解正是去中心化数据矩阵的 SVD！
+
+\subsection{PCA 双重视角等价定理的完整证明}
+
+设原始数据矩阵为 $X \in \R^{n\times d}$（第 $i$ 行为样本 $x_i^T \in \R^{1\times d}$）。第一步\textbf{必须去中心化}：计算样本均值 $\mu = \frac{1}{n}\sum_{i=1}^n x_i = \frac{1}{n}X^T \mathbf{1} \in \R^d$，构造中心化矩阵
+\[
+  \widetilde{X} := X - \mathbf{1}\mu^T \in \R^{n\times d}, \qquad \text{第 } i \text{ 行为 } \tilde{x}_i^T = (x_i - \mu)^T.
+\]
+对应的样本协方差矩阵为 $\Sigma_{\mathrm{cov}} := \frac{1}{n}\widetilde{X}^T \widetilde{X} \in \R^{d\times d}$（第 3 章已证 $\Sigma_{\mathrm{cov}} \succeq 0$）。设我们寻找 $k$ 个两两正交的单位主轴向量，按列拼成矩阵 $W \in \R^{d\times k}$（满足 $W^T W = I_k$）。样本 $\tilde{x}_i$ 在该 $k$ 维子空间上的低维坐标为 $z_i = W^T \tilde{x}_i \in \R^k$，对应的正交重构点为 $\hat{x}_i = W z_i = W W^T \tilde{x}_i \in \R^d$。
+
+\begin{thmBox}
+\begin{theorem}[PCA 双重视角等价定理与 SVD 解]
+\label{thm:ch4-pca}
+设中心化数据矩阵 $\widetilde{X} \in \R^{n\times d}$ 的 SVD 为 $\widetilde{X} = U \Sigma V^T$，非零奇异值 $\sigma_1 \ge \dots \ge \sigma_r > 0$。对任意目标维数 $1 \le k \le r$，在正交约束 $W^T W = I_k$ 下：
+\begin{enumerate}
+  \item \textbf{最大投影方差问题} $\displaystyle\max_{W^T W = I_k} \tr(W^T \Sigma_{\mathrm{cov}} W) = \max_{W^T W = I_k} \frac{1}{n}\|\widetilde{X} W\|_F^2$，与
+  \item \textbf{最小正交重构误差问题} $\displaystyle\min_{W^T W = I_k} \frac{1}{n}\sum_{i=1}^n \|\tilde{x}_i - W W^T \tilde{x}_i\|_2^2 = \min_{W^T W = I_k} \frac{1}{n}\|\widetilde{X} - \widetilde{X} W W^T\|_F^2$
+\end{enumerate}
+\textbf{严格等价}，且共同最优主轴矩阵由 $\widetilde{X}$ 的前 $k$ 个右奇异向量给出：$W^* = V_k = [v_1,\dots,v_k]$。降维后的主成分坐标矩阵为
+\begin{equation}
+  Z_k = \widetilde{X} V_k = U_k \Sigma_k \;\in\; \R^{n\times k}, \label{eq:ch4-pca-scores}
+\end{equation}
+前 $k$ 个主成分的\textbf{累计解释方差比}（explained variance ratio）为 $\dfrac{\sum_{i=1}^k \sigma_i^2}{\sum_{i=1}^r \sigma_i^2}$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{第一步：用勾股定理证双视角严格等价。}
+因 $W^T W = I_k$，矩阵 $P := W W^T$ 是对称正交投影阵（$P^2 = P = P^T$），故对每个去中心化样本 $\tilde{x}_i$，重构误差向量 $\tilde{x}_i - P\tilde{x}_i$ 与投影向量 $P\tilde{x}_i$ 严格正交。由勾股定理，
+\[
+  \|\tilde{x}_i\|_2^2 = \|P\tilde{x}_i\|_2^2 + \|\tilde{x}_i - P\tilde{x}_i\|_2^2
+  = \|W^T \tilde{x}_i\|_2^2 + \|\tilde{x}_i - W W^T \tilde{x}_i\|_2^2,
+\]
+其中用到 $\|W(W^T\tilde{x}_i)\|_2^2 = (W^T\tilde{x}_i)^T (W^T W)(W^T\tilde{x}_i) = \|W^T\tilde{x}_i\|_2^2$。对 $i = 1, \dots, n$ 求和并除以 $n$，得矩阵恒等式：
+\begin{equation}
+  \underbrace{\frac{1}{n}\|\widetilde{X}\|_F^2}_{\text{常数（总方差）}}
+  = \underbrace{\frac{1}{n}\|\widetilde{X} W\|_F^2}_{\text{投影总方差}}
+  + \underbrace{\frac{1}{n}\|\widetilde{X} - \widetilde{X} W W^T\|_F^2}_{\text{正交重构误差}}. \label{eq:ch4-pca-pythag}
+\end{equation}
+等号左侧与 $W$ 无关！因此最大化投影总方差与最小化正交重构误差是\textbf{同一件事}。
+
+\textbf{第二步：求最优 $W^*$ 与坐标 $Z_k$。}
+\begin{itemize}
+  \item 当 $k = 1$ 时，投影方差 $\frac{1}{n}\|\widetilde{X}w\|_2^2 = w^T \Sigma_{\mathrm{cov}} w$ 正是协方差矩阵的 Rayleigh 商！因 $\Sigma_{\mathrm{cov}} = \frac{1}{n} V \Sigma^T \Sigma V^T$ 的最大特征值为 $\sigma_1^2/n$，由第 3 章推论 \ref{cor:ch3-rayleigh}，最优方向就是 $w^* = v_1$。
+  \item 对一般 $k \ge 1$，注意到重构矩阵 $\widehat{X} := \widetilde{X} W W^T$ 的秩至多为 $k$。由 Eckart--Young--Mirsky 定理（定理 \ref{thm:ch4-eym} 的 Frobenius 范数界），
+  \[
+    \frac{1}{n}\|\widetilde{X} - \widetilde{X} W W^T\|_F^2 \;\ge\; \frac{1}{n}\sum_{i=k+1}^r \sigma_i^2.
+  \]
+  取 $W^* = V_k$，直接算出 $\widetilde{X} V_k V_k^T = (U\Sigma V^T) V_k V_k^T = U_k \Sigma_k V_k^T = \widetilde{X}_k$，其重构误差恰好等于理论下界 $\frac{1}{n}\sum_{i=k+1}^r \sigma_i^2$！此时投影方差为 $\frac{1}{n}\sum_{i=1}^k \sigma_i^2$，总方差为 $\frac{1}{n}\sum_{i=1}^r \sigma_i^2$，降维坐标满足 $Z_k = \widetilde{X} V_k = U\Sigma V^T V_k = U_k \Sigma_k$。
+\end{itemize}
+\end{proof}
+
+\begin{failBox}{PCA 工程实践的两大经典翻车反例}
+\begin{enumerate}
+  \item \textbf{忘记去中心化（直接对原始 $X$ 做 SVD）}：设二维样本紧凑分布在 $(100, 100)$ 附近，真实数据沿 $(1, -1)$ 方向伸展（标准差为 $2$），沿 $(1,1)$ 方向几乎无变化。若忘记减去均值 $\mu = (100,100)^T$，原点到点云中心的距离平方高达 $20\,000$，彻底淹没真实方差 $4$——未中心化的“第一主成分”会盲目指向均值方向 $(1,1)/\sqrt{2}$，与真正方差最大的 $(1,-1)/\sqrt{2}$ 垂直！
+  \item \textbf{异质特征未做量纲标准化}：设房价数据包含“面积（单位 $\mathrm{cm}^2$，量级 $10^6$）”与“卧室数量（量级 $3$）”。前者原始方差比后者大 $10^{11}$ 倍，直接做 PCA 会让第一主成分完全退化为“纯面积轴”，彻底无视卧室数与其他相关性。当各特征量纲不同时，务必先做 Z-score 标准化（减均值再除以各自标准差）再执行 PCA！
+\end{enumerate}
+\end{failBox}
+
+\subsection{实测实战：$64\times 64$ 灰度图像的 SVD 压缩与 NumPy 实现}
+
+为了直观感受低秩近似的压缩威力，我们在 \texttt{code/vol1\_experiments.py} 中构造了一幅非可分的 $64\times 64$ 合成灰度图像（叠加圆盘、圆环、对角高斯光带与二维正弦条纹，总计 $4096$ 个浮点数），对其做截断 SVD $A_k = U_k \Sigma_k V_k^T$。存储 $U_k \in \R^{64\times k}$、$\sigma_{1:k} \in \R^k$ 与 $V_k^T \in \R^{k\times 64}$ 共需 $k(64 + 64 + 1) = 129k$ 个浮点数，存储占比为 $129k / 4096$。表 \ref{tab:ch4-svd-compress} 与图 \ref{fig:ch4-svd-compress} 展示了实测数据（\texttt{data/svd\_compress.csv}）：
+
+\begin{table}[htbp]
+  \centering
+  \caption{$64\times 64$ 非可分灰度图像截断 SVD 压缩实测结果（\texttt{data/svd\_compress.csv}）}
+  \label{tab:ch4-svd-compress}
+  \small
+  \begin{tabular}{@{}cccc@{}}
+    \toprule
+    \textbf{保留秩 $k$} & \textbf{相对误差 $\|A-A_k\|_F/\|A\|_F$} & \textbf{累计能量占比 $\sum_{i\le k}\sigma_i^2/\sum\sigma_i^2$} & \textbf{存储占比 $129k/4096$} \\
+    \midrule
+    $1$  & $0.5657$ & $68.00\%$ & $3.15\%$ \\
+    $2$  & $0.4526$ & $79.52\%$ & $6.30\%$ \\
+    $4$  & $0.2617$ & $\mathbf{93.15\%}$ & $\mathbf{12.60\%}$ \\
+    $8$  & $0.1320$ & $\mathbf{98.26\%}$ & $\mathbf{25.20\%}$ \\
+    $12$ & $0.0874$ & $99.24\%$ & $37.79\%$ \\
+    $16$ & $0.0542$ & $\mathbf{99.71\%}$ & $50.39\%$ \\
+    $24$ & $0.0100$ & $99.99\%$ & $75.59\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+请注意表中每行数据都严格满足勾股能量守恒恒等式：$\text{相对误差}^2 + \text{累计能量比} = 1$（例如 $k=4$ 时 $0.26167^2 + 0.93153 = 1.0000$）。仅保留 $k=4$ 个秩 1 图层，就能用 \textbf{12.60\%} 的存储体积还原 \textbf{93.15\%} 的图像总能量；保留 $k=8$ 时仅需约四分之一存储即可恢复 \textbf{98.26\%} 的能量！
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      name=leftplot,
+      width=0.47\linewidth,
+      height=5.2cm,
+      xlabel={保留秩 $k$},
+      ylabel={百分比（\%）},
+      xmin=0, xmax=25,
+      ymin=0, ymax=106,
+      grid=major,
+      grid style={dashed, gray!25},
+      legend pos=south east,
+      legend style={font=\scriptsize, fill=white, draw=codeborder},
+      tick label style={font=\footnotesize},
+      label style={font=\small\sffamily},
+      title={\small\sffamily\bfseries 累计能量 vs 存储占比}
+    ]
+      \addplot[color=teal, very thick, mark=*, mark size=1.8pt] table[x=k, y=energy_pct, col sep=comma] {data/svd_compress.csv};
+      \addlegendentry{累计能量占比}
+      \addplot[color=ochre, thick, dashed, mark=square*, mark size=1.6pt] table[x=k, y=ratio_pct, col sep=comma] {data/svd_compress.csv};
+      \addlegendentry{存储占比}
+      \node[anchor=west, font=\scriptsize\sffamily, color=tealDark, fill=white, fill opacity=0.85, text opacity=1, inner sep=1pt] at (axis cs:6.8, 76) {$k=4$: $93.15\%$};
+      \draw[-{Stealth[length=1.8mm]}, color=tealDark, thin] (axis cs:6.7, 79) -- (axis cs:4.3, 91.5);
+    \end{axis}
+
+    \begin{axis}[
+      at={(leftplot.east)},
+      anchor=west,
+      xshift=1.4cm,
+      width=0.47\linewidth,
+      height=5.2cm,
+      xlabel={保留秩 $k$},
+      ylabel={相对 Frobenius 误差},
+      xmin=0, xmax=25,
+      ymin=0, ymax=0.63,
+      grid=major,
+      grid style={dashed, gray!25},
+      tick label style={font=\footnotesize},
+      label style={font=\small\sffamily},
+      title={\small\sffamily\bfseries 重构相对误差衰减曲线}
+    ]
+      \addplot[color=navy, very thick, mark=triangle*, mark size=2pt] table[x=k, y=rel_err, col sep=comma] {data/svd_compress.csv};
+      \node[anchor=west, font=\scriptsize\sffamily, color=navy] at (axis cs:5.5, 0.30) {$k=4\;(0.262)$};
+      \draw[-{Stealth[length=1.6mm]}, color=navy, thin] (axis cs:5.4, 0.295) -- (axis cs:4.25, 0.268);
+      \node[anchor=west, font=\scriptsize\sffamily, color=navy] at (axis cs:10.0, 0.22) {$k=8\;(0.132)$};
+      \draw[-{Stealth[length=1.6mm]}, color=navy, thin] (axis cs:10.0, 0.205) -- (axis cs:8.25, 0.142);
+      \node[anchor=west, font=\scriptsize\sffamily, color=navy] at (axis cs:15.5, 0.13) {$k=16\;(0.054)$};
+      \draw[-{Stealth[length=1.6mm]}, color=navy, thin] (axis cs:17.2, 0.112) -- (axis cs:16.1, 0.064);
+    \end{axis}
+  \end{tikzpicture}
+  \caption{$64\times 64$ 灰度图像 SVD 压缩的实测权衡曲线（数据源：\texttt{data/svd\_compress.csv}）。左图显示极低秩（$k=4, 8$）就能捕获绝大多数能量；右图显示相对重构误差随 $k$ 迅速衰减。}
+  \label{fig:ch4-svd-compress}
+\end{figure}
+
+最后，给出工业界标准的纯 NumPy 实现。\textbf{数值工程要点}：实现 PCA 时应当直接对中心化矩阵 $\widetilde{X}$ 调用 \texttt{np.linalg.svd}，而\textbf{不要}先算格拉姆矩阵 $\widetilde{X}^T\widetilde{X}$ 再调 \texttt{eigh}——因为形成 $\widetilde{X}^T\widetilde{X}$ 会将条件数平方（$\cond(\widetilde{X}^T\widetilde{X}) = \cond(\widetilde{X})^2$），在浮点运算下可能彻底淹没较小的奇异值（见习题 4.8）。
+
+\begin{lstlisting}[caption={工业级 \texttt{pca\_via\_svd} 与 \texttt{svd\_compress} 纯 NumPy 实现},label={lst:ch4-pca-svd}]
+import numpy as np
+
+def pca_via_svd(X: np.ndarray, k: int):
+    """Exact PCA via economy SVD on centered data (avoids squaring cond(X))."""
+    mu = X.mean(axis=0, keepdims=True)         # (1, d)
+    Xc = X - mu                                # mandatory centering
+    U, s, Vt = np.linalg.svd(Xc, full_matrices=False)
+    V_k = Vt[:k].T                             # (d, k) principal axes
+    Z_k = U[:, :k] * s[:k]                     # (n, k) == Xc @ V_k
+    X_hat = mu + Z_k @ V_k.T                   # (n, d) reconstruction
+    explained_ratio = (s[:k] ** 2) / np.sum(s ** 2)
+    return Z_k, V_k, X_hat, explained_ratio
+
+def svd_compress(img: np.ndarray, k: int):
+    """Rank-k optimal Frobenius approximation via truncated SVD."""
+    U, s, Vt = np.linalg.svd(img, full_matrices=False)
+    img_k = (U[:, :k] * s[:k]) @ Vt[:k, :]     # broadcasting avoids diag(s)
+    rel_err = np.linalg.norm(img - img_k, "fro") / np.linalg.norm(img, "fro")
+    energy = float(np.sum(s[:k] ** 2) / np.sum(s ** 2))
+    assert np.isclose(rel_err ** 2 + energy, 1.0)
+    return img_k, rel_err, energy
+
+# Quick self-check on a 2D tilted cloud
+X_demo = np.array([[1.0, 4.0], [3.0, 2.0], [5.0, 8.0], [7.0, 6.0]])
+Z1, V1, X1_hat, ratio = pca_via_svd(X_demo, k=1)
+print(f"PC1 ratio={ratio[0]:.2%}, axis={np.round(V1[:, 0], 4)}")  # 80.00%
+\end{lstlisting}
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch4-exercises}
+
+\exTier{A. 概念辨析与反例查错}{区分 SVD 与特征分解、看破伪逆与 PCA 的常见误区}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（SVD、PCA 与伪逆核心概念辨析）} 判断以下四个命题正误；对错误命题给出反例，对正确命题简述理由：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 对任意实方阵 $A \in \R^{n\times n}$，其奇异值必然等于其特征值的绝对值 $|\lambda_i|$；
+    \item 对样本均值显著偏离原点的紧凑点云，若忘记去中心化直接做 SVD，得到的第一右奇异向量通常会偏向样本均值方向而非点云真实的伸展主方向；
+    \item 用 \texttt{eigh(Xc.T @ Xc)} 与直接用 \texttt{svd(Xc)} 求 PCA 主轴在精确算术下等价，但在浮点计算中后者数值更稳健，因为前者会将矩阵条件数平方；
+    \item 对欠定线性系统 $Ax = b$，只要方程组有解（即 $b \in \col(A)$），$x^+ = A^+ b$ 就必然精确满足 $Ax^+ = b$ 且具有最小欧氏范数。
+  \end{enumerate}
+
+  \item \textbf{（伪逆的代数反例）} 对于可逆方阵，恒有 $(AB)^{-1} = B^{-1}A^{-1}$ 与 $AA^{-1} = A^{-1}A = I$。请构造一对简单的 $2\times 2$ 矩阵 $A, B$ 作为反例，验证一般情形下 $(AB)^+ \neq B^+ A^+$；并举出一个简单反例说明 $A A^+$ 一般不等于 $A^+ A$。
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手算出长方形 SVD、最小范数解与完整 2D PCA}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（$2\times 3$ 长方形矩阵手算 SVD 与伪逆）} 给定矩阵 $A = \begin{pmatrix} 1 & 1 & 0 \\ 0 & 0 & 2 \end{pmatrix} \in \R^{2\times 3}$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 手算 $A$ 的完整 SVD（$U, \Sigma, V^T$）与紧凑 SVD，写出秩 1 最佳近似矩阵 $A_1$ 及其相对 Frobenius 误差 $\|A - A_1\|_F / \|A\|_F$；
+    \item 计算 Moore--Penrose 伪逆 $A^+$，并求出欠定方程组 $Ax = \begin{pmatrix}2 \\ 4\end{pmatrix}$ 的最小 $\ell_2$ 范数解 $x^+$；
+    \item 写出 $\nul(A)$ 的一组基，直接验证 $x^+ \perp \nul(A)$。
+  \end{enumerate}
+
+  \item \textbf{（2D 小样本手算 PCA 全流程）} 给定 4 个二维样本点：$(1,4),\; (3,2),\; (5,8),\; (7,6)$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 计算样本均值 $\mu$ 与去中心化数据矩阵 $\widetilde{X} \in \R^{4\times 2}$；
+    \item 计算样本协方差矩阵 $\Sigma_{\mathrm{cov}} = \frac{1}{4}\widetilde{X}^T\widetilde{X}$，手算其特征值与单位正交特征向量；
+    \item 将样本降到 1 维，写出主成分坐标 $Z_1 = \widetilde{X} v_1$、重构后的二维坐标 $\widehat{X}_1 = \mathbf{1}\mu^T + Z_1 v_1^T$，以及第一主成分的解释方差比。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{理解极分解的几何美感与岭回归的谱过滤本质}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（SVD 的正交不变性与矩阵极分解）} 设任意实矩阵 $A \in \R^{m\times n}$ 的 SVD 为 $A = U\Sigma V^T$。
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 证明对任意正交矩阵 $Q_1 \in \R^{m\times m}$ 与 $Q_2 \in \R^{n\times n}$，矩阵 $Q_1 A Q_2$ 与 $A$ 具有完全相同的奇异值、算子 2-范数与 Frobenius 范数；
+    \item 当 $A \in \R^{n\times n}$ 为方阵时，证明 $A$ 可分解为 $A = Q S$，其中 $Q = U V^T$ 为正交矩阵，$S = V\Sigma V^T \succeq 0$ 为半正定对称矩阵（称为\textbf{极分解}，是复数极坐标 $z = e^{i\theta}r$ 在高维矩阵上的精确推广）。
+  \end{enumerate}
+  \exHint{第 (1) 问考察 $(Q_1 A Q_2)^T(Q_1 A Q_2)$ 与 $A^T A$ 的正交相似关系；第 (2) 问在 $U\Sigma V^T$ 中间插入 $V^T V = I_n$。}
+
+  \item \textbf{（岭回归的谱过滤与伪逆极限）} 设任意实矩阵 $A = U\Sigma V^T \in \R^{m\times n}$（$\rank(A) = r$）及目标向量 $b \in \R^m$。对任意正则参数 $\lambda > 0$，岭回归目标 $J_\lambda(x) = \|Ax - b\|_2^2 + \lambda\|x\|_2^2$ 的唯一解析解为 $x_\lambda = (A^T A + \lambda I_n)^{-1} A^T b$。利用 SVD 证明：
+  \[
+    x_\lambda = \sum_{i=1}^r \frac{\sigma_i}{\sigma_i^2 + \lambda}(u_i^T b) v_i,
+    \qquad \lim_{\lambda \to 0^+} x_\lambda = A^+ b.
+  \]
+  并从滤波器因子 $f_\lambda(\sigma_i) = \dfrac{\sigma_i^2}{\sigma_i^2 + \lambda}$ 的角度，解释岭回归如何选择性地抑制极小奇异值上的噪声放大。
+  \exHint{将 $A^T A + \lambda I_n = V(\Sigma^T \Sigma + \lambda I_n)V^T$ 代入求逆，再右乘 $A^T = V\Sigma^T U^T$。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用代码亲眼验证隐式偏置与条件数平方精度损失}
+
+\begin{enumerate}[label=\textbf{4.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（欠定系统梯度下降隐式偏置实验）} 用固定随机种子生成欠定线性方程组 $A \in \R^{30\times 100}$、$b \in \R^{30}$：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 用 \texttt{np.linalg.pinv(A) @ b} 计算最小范数解 $x^+$；
+    \item 从零初始化 $x^{(0)} = 0$ 出发，运行梯度下降 $x^{(t+1)} = x^{(t)} - \eta A^T(A x^{(t)} - b)$（取步长 $\eta = 1/\sigma_1(A)^2$，迭代 $3000$ 步）得到 $x_{\mathrm{GD}}$；
+    \item 从标准正态随机初值 $x^{(0)} \sim \mathcal{N}(0, I_{100})$ 出发运行相同梯度下降得到 $x_{\mathrm{GD,rand}}$。比较三者的残差 $\|Ax - b\|_2$、范数 $\|x\|_2$，以及 $\|x_{\mathrm{GD}} - x^+\|_2$。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,三者的残差 $\|Ax - b\|_2$ 均应 $< 10^{-8}$；零初始化解须满足 $\|x_{\mathrm{GD}} - x^+\|_2 < 10^{-7}$；而随机初始化解的范数应严格大于 $\|x^+\|_2$，且差向量 $x_{\mathrm{GD,rand}} - x^+$ 在行空间 $\row(A)$ 上的投影范数 $\|A^+ A(x_{\mathrm{GD,rand}} - x^+)\|_2 < 10^{-7}$。}
+
+  \item \textbf{（图像压缩能量守恒与 \texttt{svd} vs \texttt{eigh} 精度对比）} 编写 Python 脚本完成以下两项验证：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 复现本节 $64\times 64$ 合成灰度图像（参考 \texttt{code/vol1\_experiments.py}），对 $k \in \{1,2,4,8,12,16,24\}$ 调用 \texttt{svd\_compress}，验证每组 $k$ 均满足 $|\text{rel\_err}^2 + \text{energy} - 1| < 10^{-12}$；
+    \item 构造经典病态矩阵 $X = \begin{pmatrix} 1 & 1 \\ \varepsilon & 0 \\ 0 & \varepsilon \end{pmatrix}$（取 $\varepsilon = 10^{-8}$，其精确奇异值为 $\sigma_1 = \sqrt{2 + \varepsilon^2},\; \sigma_2 = \varepsilon = 10^{-8}$），对比直接调用 \texttt{np.linalg.svd(X)} 与先计算格拉姆矩阵再调用 \texttt{np.linalg.eigh(X.T @ X)} 后对非负特征值开方所求得的最小奇异值 $\sigma_2$。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,$k=4$ 时累计能量须为 $93.15\%$、相对误差 $0.2617$；对 $\varepsilon = 10^{-8}$ 的 $3\times 2$ 矩阵，\texttt{np.linalg.svd} 求得的 $\sigma_2$ 相对误差应 $< 10^{-14}$，而 \texttt{eigh(X.T @ X)} 会因浮点吸收 $1 + 10^{-16} = 1$ 彻底丢失 $\sigma_2$（输出 $0$ 或严重失真）。}
+\end{enumerate}

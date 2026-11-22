@@ -1,0 +1,1201 @@
+% !TeX root = ../main.tex
+\renewcommand{\chapWatermarkNum}{\thechapter}
+\ctexset{chapter={name={附录\ ,}, number=\Alph{chapter}}}
+\renewcommand{\chaptermark}[1]{\markboth{附录 \thechapter\quad #1}{}}
+\chapter[全卷 48 道分层习题完整精解]{全卷 48 道分层习题完整精解}
+\label{app:solutions}
+\chapEpigraph{计算的目的不在于数字，而在于洞察。}{Richard W. Hamming（理查德·汉明，《科学计算的艺术》）}
+
+\begin{chapIntro}{本附录使用说明}
+本附录收录第 1--6 章全部 48 道分层习题（第 1--3 章编号为 4.1.1--4.3.8，第 4--6 章编号为 4.1--6.8）的完整、自洽精解，所有手算数值、反例验算、不等式常数与代码实测基准均经独立 Python/NumPy 脚本交叉验证：
+\begin{itemize}
+  \item \textbf{A 层（基础概念与快速验算）}：给出明确正误/凸性/合法性结论、闭式手算步骤与显式反例；
+  \item \textbf{B 层（定理推演与手工求解）}：保留精确分数与四位小数，完整呈现 KKT 消元、对偶 QP、回归树剪枝与 EM 迭代细节；
+  \item \textbf{C 层（深度理论证明）}：给出零跳步的严格推导与构造性证明；
+  \item \textbf{D 层（代码实现与实验基准）}：提供核心 NumPy 实现逻辑、排错要点以及固定随机种子下的实测数值自检表。
+\end{itemize}
+\end{chapIntro}
+
+% =========================================================================
+\section*{第 1 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 1 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 4.1.1\quad 凸性判别与反例}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{$f_1(x) = e^{a^\top x + b}\;(x\in\R^d)$}：\textbf{凸函数}；当且仅当 $d = 1$ 且 $a \neq 0$ 时为\textbf{严格凸函数}，否则（$d \ge 2$ 或 $a = 0$）非严格凸。
+  \emph{证明}：计算海森矩阵得
+  \[
+    \nabla f_1(x) = e^{a^\top x + b} a, \qquad
+    \nabla^2 f_1(x) = e^{a^\top x + b} a a^\top.
+  \]
+  对任意 $v \in \R^d$，有 $v^\top \nabla^2 f_1(x) v = e^{a^\top x + b}(a^\top v)^2 \ge 0$，故 $\nabla^2 f_1(x) \succeq 0$，$f_1$ 为凸函数。当 $d \ge 2$ 时，可取非零向量 $v \perp a$，沿直线 $x + tv$ 函数保持常数 $e^{a^\top x + b}$，违反严格凸性（例如 $a=(1,0)^\top, b=0$，取 $x=(0,0)^\top, y=(0,2)^\top$，有 $f_1(\frac{x+y}{2}) = 1 = \frac{1}{2}(f_1(x)+f_1(y))$）；当 $d = 1$ 且 $a \neq 0$ 时，$f_1''(x) = a^2 e^{ax+b} > 0$，严格凸。
+
+  \item \textbf{$f_2(x_1, x_2) = x_1 x_2\;(x \in \R_{++}^2)$}：\textbf{非凸函数}。
+  \emph{证明与反例}：其海森矩阵为常阵
+  \[
+    \nabla^2 f_2(x) = \begin{pmatrix} 0 & 1 \\ 1 & 0 \end{pmatrix},
+  \]
+  特征值为 $\lambda_1 = +1$ 与 $\lambda_2 = -1$，矩阵不定。显式反例：取 $x = (1, 2)^\top,\; y = (2, 1)^\top \in \R_{++}^2$，中点为 $\frac{x+y}{2} = (1.5, 1.5)^\top$，则
+  \[
+    f_2\!\left(\frac{x+y}{2}\right) = 1.5 \times 1.5 = 2.25 > \frac{1}{2}\big(f_2(x) + f_2(y)\big) = \frac{2 + 2}{2} = 2.0,
+  \]
+  违反 Jensen 不等式，故非凸。
+
+  \item \textbf{$f_3(x) = -\sum_{i=1}^d \ln x_i\;(x \in \R_{++}^d)$}：\textbf{严格凸函数}（当然也是凸函数）。
+  \emph{证明}：海森矩阵为对角阵 $\nabla^2 f_3(x) = \diag(x_1^{-2}, \dots, x_d^{-2})$。对任意 $x \in \R_{++}^d$ 与任意非零向量 $v \in \R^d$，有 $v^\top \nabla^2 f_3(x) v = \sum_{i=1}^d (v_i / x_i)^2 > 0$，即 $\nabla^2 f_3(x) \succ 0$，因此 $f_3$ 在凸域 $\R_{++}^d$ 上严格凸。
+
+  \item \textbf{$f_4(w) = \max_{1\le k\le K}(a_k^\top w + b_k)\;(w\in\R^d)$}：\textbf{凸函数，但非严格凸}。
+  \emph{证明}：每个仿射函数 $g_k(w) = a_k^\top w + b_k$ 均为凸函数，由命题~\ref{prop:v4-preserve}（逐点取最大值保凸），$f_4$ 为凸函数。但 $f_4$ 是分段仿射函数，在任意一段激活区域内部均呈线性，无法严格凸；显式反例：令 $K=2, d=1, f_4(w)=\max(w, -w) = |w|$，取 $w_1 = 1, w_2 = 3$，则 $f_4(\frac{1+3}{2}) = 2 = \frac{1}{2}(|1| + |3|)$。
+\end{enumerate}
+
+\subsection*{习题 4.1.2\quad Log-Sum-Exp 函数的凸性与光滑常数}
+\begin{proof}
+记 $S(z) = \sum_{j=1}^K e^{z_j} > 0$ 及 Softmax 概率向量 $p_k(z) = e^{z_k} / S(z)$（满足 $p_k > 0$ 且 $\sum_{k=1}^K p_k = 1$）。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{一阶与二阶导数}：直接求偏导得 $\frac{\partial \mathrm{LSE}(z)}{\partial z_k} = \frac{e^{z_k}}{S(z)} = p_k$，故 $\nabla \mathrm{LSE}(z) = p$。再次求导：
+  \[
+    \frac{\partial^2 \mathrm{LSE}(z)}{\partial z_k \partial z_j}
+    = \frac{\partial}{\partial z_j}\!\left(\frac{e^{z_k}}{S(z)}\right)
+    = \frac{\delta_{kj} e^{z_k} S(z) - e^{z_k} e^{z_j}}{S(z)^2}
+    = p_k \delta_{kj} - p_k p_j,
+  \]
+  写成矩阵形式即为 $\nabla^2 \mathrm{LSE}(z) = \diag(p) - p p^\top$。
+
+  \item \textbf{凸性证明（$\nabla^2 \mathrm{LSE}(z) \succeq 0$）}：对任意 $v \in \R^K$，记 $V$ 为以概率分布 $p$ 取值 $v_k$ 的离散随机变量，则
+  \[
+    v^\top \big(\diag(p) - p p^\top\big) v
+    = \sum_{k=1}^K p_k v_k^2 - \left(\sum_{k=1}^K p_k v_k\right)^2
+    = \Var_{p}(V) \ge 0.
+  \]
+  （等价地，由 Cauchy-Schwarz 不等式，对向量 $(\sqrt{p_k} v_k)$ 与 $(\sqrt{p_k})$ 有 $(\sum_k p_k v_k)^2 \le (\sum_k p_k v_k^2)(\sum_k p_k) = \sum_k p_k v_k^2$。）故 $\nabla^2 \mathrm{LSE}(z) \succeq 0$，从而 $\mathrm{LSE}$ 是 $\R^K$ 上的凸函数。
+
+  \item \textbf{$1$-光滑性证明（$\nabla^2 \mathrm{LSE}(z) \preceq I_K$）}：因 $p_k \in (0, 1)$ 且 $(\sum_k p_k v_k)^2 \ge 0$，对任意 $v \in \R^K$ 有
+  \[
+    v^\top \big(\diag(p) - p p^\top\big) v
+    \le \sum_{k=1}^K p_k v_k^2
+    \le \left(\max_{1\le k\le K} p_k\right)\sum_{k=1}^K v_k^2
+    \le \norm{v}_2^2.
+  \]
+  故对一切 $z \in \R^K$ 有 $0 \preceq \nabla^2 \mathrm{LSE}(z) \preceq I_K$，即其梯度是 $1$-Lipschitz 连续的。（注：实际上还存在更紧的谱上界 $\nabla^2 \mathrm{LSE}(z) \preceq \frac{1}{2}I_K$，因 $v^\top(\diag(p)-pp^\top)v = \frac{1}{2}\sum_{j,k} p_j p_k(v_j-v_k)^2 \le \frac{1}{2}\norm{v}_2^2$；此处 $L=1$ 亦严格成立。）\qedhere
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.1.3\quad 最小二乘与岭回归的精确条件数}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{海森矩阵与精确特征值}：目标函数 $F_\lambda(w) = \frac{1}{2N}\norm{Xw - y}_2^2 + \frac{\lambda}{2}\norm{w}_2^2$ 是二次函数，其海森矩阵为常阵
+  \[
+    H_\lambda = \nabla^2 F_\lambda(w) = \frac{1}{N}X^\top X + \lambda I_D.
+  \]
+  由于 $X \in \R^{N\times D}$ 的奇异值为 $\sigma_1 \ge \dots \ge \sigma_D \ge 0$，矩阵 $X^\top X$ 的特征值恰好为 $\sigma_1^2 \ge \dots \ge \sigma_D^2 \ge 0$。加上 $\lambda I_D$ 使所有特征值统一平移 $\lambda$，故 $H_\lambda$ 的最大与最小特征值分别为
+  \[
+    L = \lambda_{\max}(H_\lambda) = \frac{\sigma_1^2}{N} + \lambda, \qquad
+    \mu = \lambda_{\min}(H_\lambda) = \frac{\sigma_D^2}{N} + \lambda.
+  \]
+  因海森阵恒定，这两个常数正是 $F_\lambda$ 的\textbf{紧致}光滑常数与强凸常数，对应精确条件数为
+  \[
+    \kappa(F_\lambda) = \frac{L}{\mu} = \frac{\sigma_1^2 + N\lambda}{\sigma_D^2 + N\lambda}.
+  \]
+
+  \item \textbf{秩亏时 $\lambda > 0$ 对收敛阶的质变}：当 $X$ 秩亏（如高维情形 $D > N$ 或存在完全共线性特征）时，$\sigma_D = 0$：
+  \begin{itemize}
+    \item 若 $\lambda = 0$（无正则最小二乘），则 $\mu = 0$，目标仅光滑凸而不强凸（条件数 $\kappa = \infty$），梯度下降只能保证次线性收敛速率 $O(1/T)$，且最小二乘解不唯一；
+    \item 一旦加入任意 $\lambda > 0$（岭回归），立刻将最小特征值抬升至 $\mu = \lambda > 0$，使目标变为全局 $\lambda$-强凸，条件数变为有限值 $\kappa = 1 + \frac{\sigma_1^2}{N\lambda}$，梯度下降的收敛率瞬间从次线性 $O(1/T)$ 跃升为\textbf{指数级线性收敛} $O\!\big((1 - 1/\kappa)^T\big)$，同时保证了全局最优解的唯一性与数值稳定性。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 4.1.4\quad 一般步长 $\eta \in (0, 2/L)$ 的线性收敛率}
+\begin{proof}
+由 $L$-光滑下降引理~\eqref{eq:v4-step-drop}，对一步梯度下降 $x_{t+1} = x_t - \eta\nabla f(x_t)$ 有
+\[
+  f(x_{t+1}) \le f(x_t) - \eta\!\left(1 - \frac{L\eta}{2}\right)\norm{\nabla f(x_t)}_2^2.
+\]
+当 $\eta \in (0, 2/L)$ 时，系数 $\eta(1 - L\eta/2) > 0$。将 PL 不等式~\eqref{eq:v4-pl} 即 $\norm{\nabla f(x_t)}_2^2 \ge 2\mu(f(x_t) - f^*)$ 代入上式，并在两边同时减去 $f^*$：
+\[
+  f(x_{t+1}) - f^*
+  \le \big(f(x_t) - f^*\big) - 2\mu\eta\!\left(1 - \frac{L\eta}{2}\right)\big(f(x_t) - f^*\big)
+  = \rho(\eta)\big(f(x_t) - f^*\big),
+\]
+其中单步收缩系数为
+\[
+  \rho(\eta) = 1 - 2\mu\eta + \mu L \eta^2 = 1 - \frac{\mu}{L} + \mu L\!\left(\eta - \frac{1}{L}\right)^2.
+\]
+验证区间与最优步长：
+\begin{itemize}
+  \item 因 $0 < \mu \le L$ 且 $\eta \in (0, 2/L)$，有 $0 < 2\mu\eta(1 - L\eta/2) \le \frac{\mu}{L} \le 1$，故 $0 \le \rho(\eta) < 1$，迭代对区间内任意固定步长均保持线性收敛：$f(x_T) - f^* \le \rho(\eta)^T (f(x_0) - f^*)$。
+  \item 由配方形式（或求导 $\rho'(\eta) = -2\mu + 2\mu L\eta = 0$ 且 $\rho''(\eta) = 2\mu L > 0$）立得：当且仅当 $\eta^* = \frac{1}{L}$ 时，$\rho(\eta)$ 取得全局最小值 $\rho(1/L) = 1 - \frac{\mu}{L} = 1 - \frac{1}{\kappa}$。\qedhere
+\end{itemize}
+\end{proof}
+
+\subsection*{习题 4.1.5\quad 共强制性（Co-coercivity）与强凸参数距离收缩}
+\begin{proof}
+分两步证明：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{证明共强制性}：固定 $x \in \R^d$，构造辅助函数 $g_x(z) := f(z) - \nabla f(x)^\top z$。
+  \begin{itemize}
+    \item $g_x$ 与 $f$ 相差一个线性项，因此 $g_x$ 依然是凸函数且 $L$-光滑，其梯度为 $\nabla g_x(z) = \nabla f(z) - \nabla f(x)$。
+    \item 在 $z = x$ 处 $\nabla g_x(x) = 0$，由凸函数驻点的全局最优性（定理~\ref{thm:v4-global-opt}），$z = x$ 是 $g_x$ 的全局极小点。
+    \item 从任意点 $y \in \R^d$ 出发对 $g_x$ 做一步步长为 $1/L$ 的梯度下降，由下降引理~\eqref{eq:v4-1overL-drop} 得
+    \[
+      g_x(x) \le g_x\!\left(y - \frac{1}{L}\nabla g_x(y)\right) \le g_x(y) - \frac{1}{2L}\norm{\nabla g_x(y)}_2^2.
+    \]
+    展开 $g_x$ 的定义并移项，即得
+    \[
+      f(y) - f(x) - \nabla f(x)^\top(y - x) \ge \frac{1}{2L}\norm{\nabla f(y) - \nabla f(x)}_2^2.
+    \]
+    \item 交换 $x$ 与 $y$ 的角色，同理有
+    \[
+      f(x) - f(y) - \nabla f(y)^\top(x - y) \ge \frac{1}{2L}\norm{\nabla f(x) - \nabla f(y)}_2^2.
+    \]
+    两式相加，$f(x)$ 与 $f(y)$ 精确相消，立得共强制性不等式：
+    \[
+      \big(\nabla f(y) - \nabla f(x)\big)^\top(y - x) \ge \frac{1}{L}\norm{\nabla f(y) - \nabla f(x)}_2^2.
+    \]
+  \end{itemize}
+
+  \item \textbf{证明 $\mu$-强凸下的参数一步收缩}：因 $x^*$ 是全局极小点，有 $\nabla f(x^*) = 0$。一方面，由上述共强制性（取 $y = x_t, x = x^*$）得
+  \[
+    \nabla f(x_t)^\top(x_t - x^*) \ge \frac{1}{L}\norm{\nabla f(x_t)}_2^2.
+  \]
+  另一方面，由 $\mu$-强凸性的一阶下界 $f(x^*) \ge f(x_t) + \nabla f(x_t)^\top(x^* - x_t) + \frac{\mu}{2}\norm{x_t - x^*}_2^2$ 与 $f(x_t) \ge f(x^*) + \frac{\mu}{2}\norm{x_t - x^*}_2^2$ 相加，得强单调性
+  \[
+    \nabla f(x_t)^\top(x_t - x^*) \ge \mu\norm{x_t - x^*}_2^2.
+  \]
+  现在展开一步梯度下降 $x_{t+1} = x_t - \eta\nabla f(x_t)$ 距最优解的平方距离，并将交叉项 $-2\eta\nabla f(x_t)^\top(x_t - x^*)$ 拆为两半分别代入上述两个下界：
+  \begin{align*}
+    \norm{x_{t+1} - x^*}_2^2
+    &= \norm{x_t - x^*}_2^2 - 2\eta\nabla f(x_t)^\top(x_t - x^*) + \eta^2\norm{\nabla f(x_t)}_2^2 \\
+    &\le \norm{x_t - x^*}_2^2 - \eta\mu\norm{x_t - x^*}_2^2 - \frac{\eta}{L}\norm{\nabla f(x_t)}_2^2 + \eta^2\norm{\nabla f(x_t)}_2^2 \\
+    &= (1 - \mu\eta)\norm{x_t - x^*}_2^2 + \eta\!\left(\eta - \frac{1}{L}\right)\norm{\nabla f(x_t)}_2^2.
+  \end{align*}
+  由于步长满足 $0 < \eta \le \frac{1}{L}$，末项 $\eta(\eta - 1/L)\norm{\nabla f(x_t)}_2^2 \le 0$，舍去即证
+  \[
+    \norm{x_{t+1} - x^*}_2^2 \le (1 - \mu\eta)\norm{x_t - x^*}_2^2. \qedhere
+  \]
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.1.6\quad 满足 PL 条件的非凸函数}
+考察 $f(x) = x^2 + 3\sin^2 x$（偶函数）。
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{非凸性验证}：利用 $\sin^2 x = \frac{1 - \cos(2x)}{2}$ 求导得
+  \[
+    f'(x) = 2x + 3\sin(2x), \qquad f''(x) = 2 + 6\cos(2x).
+  \]
+  在 $x = \frac{\pi}{2}$ 处，$f''(\pi/2) = 2 + 6\cos\pi = -4 < 0$，故 $f$ 在 $\R$ 上不是凸函数。
+
+  \item \textbf{唯一全局极小点}：对任意 $x \in \R$，$x^2 \ge 0$ 且 $3\sin^2 x \ge 0$，故 $f(x) \ge 0 = f(0)$。等号成立当且仅当 $x^2 = 0$ 且 $\sin^2 x = 0$，即 $x = 0$。因此 $x^* = 0$ 是唯一全局极小点且 $f^* = 0$。
+
+  \item \textbf{全局 PL 不等式证明}：因 $f(-x) = f(x)$ 且 $(f'(-x))^2 = (f'(x))^2$，只需对 $x > 0$ 证明 $\frac{(f'(x))^2}{2f(x)} \ge \mu$（$x = 0$ 时两边均为 $0$）。将 $x > 0$ 分为三段：
+  \begin{itemize}
+    \item \textbf{区间 1：$x \in (0, \pi/2]$}。此时 $2x \in (0, \pi]$，故 $\sin(2x) \ge 0$，有 $f'(x) = 2x + 3\sin(2x) \ge 2x$；同时 $|\sin x| \le x$，故 $f(x) = x^2 + 3\sin^2 x \le 4x^2$。于是
+    \[
+      \frac{(f'(x))^2}{2f(x)} \ge \frac{4x^2}{8x^2} = \frac{1}{2}.
+    \]
+    \item \textbf{区间 2：$x \in (\pi/2, 3]$}。先求 $f'(x) = 2x + 3\sin(2x)$ 在此区间内的严格正下界：$f''(x) = 2 + 6\cos(2x) = 0 \iff \cos(2x) = -\frac{1}{3}$。在 $2x \in (\pi, 6]$ 内仅有一个驻点 $2x_0 = \pi + \arccos(1/3) \approx 4.3726$（此处 $f''$ 由负变正，为 $f'$ 的极小值点），对应 $\sin(2x_0) = -\frac{2\sqrt{2}}{3}$，故在此区间恒有
+    \[
+      f'(x) \ge f'(x_0) = \pi + \arccos\!\left(\frac{1}{3}\right) - 2\sqrt{2} \approx 1.5441 > \frac{3}{2}.
+    \]
+    另一方面，在 $(\pi/2, 3]$ 上 $f(x) = x^2 + 3\sin^2 x \le 3^2 + 3 = 12$，故
+    \[
+      \frac{(f'(x))^2}{2f(x)} > \frac{(3/2)^2}{2 \times 12} = \frac{9}{96} = \frac{3}{32} > \frac{1}{32}.
+    \]
+    \item \textbf{区间 3：$x > 3$}。因 $|\sin(2x)| \le 1$，有 $f'(x) \ge 2x - 3 > x$（当 $x > 3$ 时 $2x - 3 > x$）；同时 $f(x) \le x^2 + 3 < x^2 + \frac{1}{3}x^2 = \frac{4}{3}x^2$，故
+    \[
+      \frac{(f'(x))^2}{2f(x)} > \frac{x^2}{2 \cdot \frac{4}{3}x^2} = \frac{3}{8}.
+    \]
+  \end{itemize}
+  综合三段，对一切 $x \in \R$ 均满足 $\frac{1}{2}(f'(x))^2 \ge \frac{3}{32} f(x) \ge \frac{1}{32}(f(x) - f^*)$（Python 密集扫描测得全局最紧 PL 常数为 $\mu^* \approx 0.1755$，在 $x \approx 2.2017$ 处达到），因此取 $\mu = \frac{1}{32}$ 严格满足全局 PL 条件，梯度下降对其仍享指数级线性收敛。
+\end{enumerate}
+
+\subsection*{习题 4.1.7\quad 特征标准化对条件数 $\kappa$ 的震撼效应}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{核心代码改动}：在 \texttt{exp1\_opt\_acceleration} 生成原始矩阵 $X$ 后，加入一行逐列零均值单位方差标准化：\texttt{X = (X - X.mean(axis=0)) / X.std(axis=0)}，其余优化器代码不变。
+  \item \textbf{实测对比基准}（\texttt{seed=2026}, $N=300, D=15, \lambda=0.05$）：
+  \begin{center}\footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+    \textbf{预处理状态} & $L$ & $\mu$ & 条件数 $\kappa$ & $t=50$ GD & $t=150$ GD & $t=150$ NAG \\
+    \midrule
+    未标准化（原实验） & $51.5233$ & $0.0500$ & $1030.47$ & $1.01\times 10^{-1}$ & $2.222\times 10^{-2}$ & $3.361\times 10^{-6}$ \\
+    列标准化后 & $0.3975$ & $0.0500$ & $\mathbf{7.95}$ & $5.551\times 10^{-17}$ & $0.000\times 10^{0}$ & $0.000\times 10^{0}$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \item \textbf{工程启示}：标准化将设计矩阵各列尺度拉齐后，最大光滑常数 $L$ 暴跌两个数量级（$51.52 \to 0.40$），条件数从极度病态的 $\kappa = 1030.5$ 骤降至几乎各向同性的 $\kappa = 7.95$。此时连最朴素的纯 GD 仅用 50 步就直达双精度机器零（$5.55\times 10^{-17}$）。这揭示了机器学习中“\textbf{数据预处理即隐式预条件（Preconditioning）}”的本质——改变地形几何往往比更换更复杂的优化器收益高出一个数量级。
+\end{enumerate}
+
+\subsection*{习题 4.1.8\quad Nesterov 自适应重启（Adaptive Restart）实验}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{核心实现逻辑}：在 NAG 迭代循环中计算 \texttt{w\_next = y\_nag - eta * g\_y} 后，检测梯度方向与位移方向内积：
+  \begin{lstlisting}
+if np.dot(g_y, w_next - w_nag) > 0.0:
+    y_nag = w_next.copy()   # 冲过谷底：清零惯性重启
+else:
+    y_nag = w_next + beta_nag * (w_next - w_nag)
+w_nag = w_next
+  \end{lstlisting}
+  \item \textbf{实测数值基准}（未标准化病态逻辑回归，$\kappa = 1030.47$）：
+  \begin{itemize}
+    \item \textbf{原版 NAG}：$t=50$ 次优度 $2.76\times 10^{-3}$，$t=100$ 次优度 $5.92\times 10^{-5}$，$t=150$ 次优度 $3.361\times 10^{-6}$，且出现两次明显回弹波纹；
+    \item \textbf{梯度重启版 NAG}：在前 150 步中共触发 \textbf{4 次重启}（位于 $t = 34, 65, 78, 121$），所有回弹被彻底抹平；实测 $t=50$ 降至 $4.399\times 10^{-4}$，$t=100$ 降至 $4.531\times 10^{-7}$，$t=150$ 降至 $\mathbf{3.198\times 10^{-10}}$，相比原版 NAG 精度足足提升超过 \textbf{4 个数量级}（约 $10{,}500\times$）！
+  \end{itemize}
+\end{enumerate}
+
+% =========================================================================
+\section*{第 2 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 2 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 4.2.1\quad 最小欧氏范数线性方程组的对偶问题}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{拉格朗日函数}：引入等式对偶乘子 $\nu \in \R^m$，写出
+  \[
+    \mathcal{L}(x, \nu) = \frac{1}{2}x^\top x + \nu^\top (Ax - b).
+  \]
+  \item \textbf{对偶函数 $g(\nu)$}：对 $x$ 求梯度并置零得 $\nabla_x \mathcal{L}(x, \nu) = x + A^\top \nu = 0 \implies x(\nu) = -A^\top \nu$。回代 $\mathcal{L}$ 得
+  \[
+    g(\nu) = \inf_{x\in\R^d} \mathcal{L}(x, \nu)
+    = \frac{1}{2}\nu^\top A A^\top \nu - \nu^\top A A^\top \nu - \nu^\top b
+    = -\frac{1}{2}\nu^\top (A A^\top)\nu - b^\top \nu.
+  \]
+  \item \textbf{对偶最优解与原始最优解}：因 $A \in \R^{m\times d}$ 行满秩，对称阵 $A A^\top \succ 0$ 可逆，故 $g(\nu)$ 为严格凹二次函数。令 $\nabla g(\nu) = -(AA^\top)\nu - b = 0$，得唯一对偶最优解
+  \[
+    \nu^* = -(A A^\top)^{-1} b, \qquad
+    x^* = -A^\top \nu^* = A^\top (A A^\top)^{-1} b.
+  \]
+  直接验证可行性：$A x^* = A A^\top (A A^\top)^{-1} b = b$。
+  \item \textbf{强对偶验证（$d^* = p^*$）}：计算原始最优值与对偶最优值：
+  \begin{align*}
+    p^* &= \frac{1}{2}(x^*)^\top x^* = \frac{1}{2} b^\top (AA^\top)^{-1} A A^\top (AA^\top)^{-1} b = \frac{1}{2} b^\top (A A^\top)^{-1} b, \\
+    d^* &= g(\nu^*) = -\frac{1}{2} b^\top (AA^\top)^{-1} b + b^\top (AA^\top)^{-1} b = \frac{1}{2} b^\top (A A^\top)^{-1} b = p^*.
+  \end{align*}
+  对偶间隙精确为零（与无不等式约束的线性等式凸问题满足 Slater 条件一致）。
+\end{enumerate}
+
+\subsection*{习题 4.2.2\quad 软阈值算子与 $\ell_1$ 次微分手算}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{软阈值算子计算}：逐坐标应用 $S_\tau(z_j) = \sign(z_j)\max(|z_j| - \tau, 0)$（$\tau = 0.8$）：
+  \begin{itemize}
+    \item $z_1 = 2.4$：$|2.4| > 0.8 \implies +(2.4 - 0.8) = 1.6$；
+    \item $z_2 = -0.6$：$|-0.6| \le 0.8 \implies 0$；
+    \item $z_3 = 0.8$：$|0.8| \le 0.8 \implies 0$；
+    \item $z_4 = -3.1$：$|-3.1| > 0.8 \implies -(3.1 - 0.8) = -2.3$。
+  \end{itemize}
+  因此 $\prox_{0.8\norm{\cdot}_1}(z) = \mathbf{(1.6,\; 0,\; 0,\; -2.3)^\top}$。
+
+  \item \textbf{$\ell_1$ 范数的三维次微分}：由可分函数的逐坐标次微分规则，对 $x = (2, 0, -1)^\top$：
+  $x_1 = 2 > 0 \implies \partial |x_1| = \{+1\}$；$x_2 = 0 \implies \partial |x_2| = [-1, 1]$；$x_3 = -1 < 0 \implies \partial |x_3| = \{-1\}$。因此完整次微分集合为三维空间中的一条闭线段：
+  \[
+    \partial g(2, 0, -1) = \big\{(1,\, s,\, -1)^\top : s \in [-1, 1]\big\} = \{1\} \times [-1, 1] \times \{-1\}.
+  \]
+
+  \item \textbf{合页损失在折点 $z = 1$ 处的次微分}：$h(z) = \max(0, 1 - z)$ 在 $z=1$ 左侧斜率为 $-1$、右侧斜率为 $0$。检验次梯度定义 $h(y) \ge h(1) + g(y - 1) = g(y - 1)$：
+  \begin{itemize}
+    \item 当 $y > 1$ 时要求 $0 \ge g(y - 1) \iff g \le 0$；
+    \item 当 $y < 1$ 时要求 $1 - y \ge g(y - 1) = -g(1 - y) \iff g \ge -1$。
+  \end{itemize}
+  故完整次微分集合为 $\partial h(1) = \mathbf{[-1, 0]}$。
+\end{enumerate}
+
+\subsection*{习题 4.2.3\quad 最大熵分布与 Softmax 的 KKT 起源}
+\begin{proof}
+目标函数 $f_0(p) = \sum_{k=1}^K (p_k \ln p_k - s_k p_k)$ 的海森矩阵为 $\diag(1/p_1, \dots, 1/p_K) \succ 0$，在单纯形上严格凸，且均匀分布 $p = (\frac{1}{K}, \dots, \frac{1}{K})^\top$ 严格满足 $p_k > 0$（Slater 条件成立），故 KKT 条件是全局唯一最优解的充要条件。
+
+构造拉格朗日函数（不等式写为 $-p_k \le 0$，乘子 $\lambda_k \ge 0$；等式乘子 $\nu \in \R$）：
+\[
+  \mathcal{L}(p, \lambda, \nu) = \sum_{k=1}^K p_k \ln p_k - \sum_{k=1}^K s_k p_k - \sum_{k=1}^K \lambda_k p_k + \nu\!\left(\sum_{k=1}^K p_k - 1\right).
+\]
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{为何所有 $p_k^* > 0$ 且 $\lambda_k^* = 0$}：若存在某个坐标 $p_k^* = 0$，则必有另一坐标 $p_j^* > 0$。沿可行方向把极小质量 $\varepsilon > 0$ 从 $p_j^*$ 移至 $p_k^*$，目标函数一阶变化率为 $\lim_{\varepsilon\to 0^+}\big(\ln\varepsilon - \ln p_j^* - s_k + s_j\big) = -\infty < 0$，说明边界点绝不可能是极小值点。因此必有 $p_k^* > 0\;(\forall k)$。再由互补松弛 $\lambda_k^* p_k^* = 0$，立得所有不等式乘子自动为零：$\lambda_k^* = 0\;(\forall k)$。
+  \item \textbf{平稳性与归一化}：令 $\frac{\partial \mathcal{L}}{\partial p_k} = \ln p_k^* + 1 - s_k + \nu^* = 0$，解得
+  \[
+    p_k^* = e^{-(1+\nu^*)} e^{s_k}.
+  \]
+  代入原始等式约束 $\sum_{j=1}^K p_j^* = 1$ 得 $e^{-(1+\nu^*)} = \left(\sum_{j=1}^K e^{s_j}\right)^{-1}$，回代即得唯一最优解为 Softmax 分布：
+  \[
+    p_k^* = \frac{e^{s_k}}{\sum_{j=1}^K e^{s_j}}, \qquad k = 1, \dots, K. \qedhere
+  \]
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.2.4\quad 注水算法（Water-Filling）的 KKT 求解}
+\begin{proof}
+目标 $f_0(x) = -\sum_{i=1}^d \ln(\alpha_i + x_i)$ 在可行域 $\{x \ge 0 : \sum_i x_i = 1\}$ 上严格凸，且内点 $x = (\frac{1}{d}, \dots, \frac{1}{d})^\top$ 满足 Slater 条件，故 KKT 条件充要。构造拉格朗日函数：
+\[
+  \mathcal{L}(x, \lambda, \nu) = -\sum_{i=1}^d \ln(\alpha_i + x_i) - \sum_{i=1}^d \lambda_i x_i + \nu\!\left(\sum_{i=1}^d x_i - 1\right).
+\]
+KKT 全部条件为（对 $i = 1, \dots, d$）：
+\[
+  -\frac{1}{\alpha_i + x_i^*} - \lambda_i^* + \nu^* = 0, \qquad
+  \lambda_i^* \ge 0, \qquad x_i^* \ge 0, \qquad
+  \lambda_i^* x_i^* = 0, \qquad \sum_{i=1}^d x_i^* = 1.
+\]
+先由平稳性得 $\nu^* = \lambda_i^* + \frac{1}{\alpha_i + x_i^*} > 0$（故水位线 $w := (\nu^*)^{-1} > 0$ 有定义），且 $\lambda_i^* = \nu^* - \frac{1}{\alpha_i + x_i^*} \ge 0$。分类讨论每个分量 $i$：
+\begin{itemize}
+  \item 若 $\alpha_i < (\nu^*)^{-1}$：假设 $x_i^* = 0$，则 $\lambda_i^* = \nu^* - \frac{1}{\alpha_i} < 0$，与对偶可行性 $\lambda_i^* \ge 0$ 矛盾！故必有 $x_i^* > 0$，由互补松弛得 $\lambda_i^* = 0$，代入平稳性解得 $x_i^* = (\nu^*)^{-1} - \alpha_i > 0$。
+  \item 若 $\alpha_i \ge (\nu^*)^{-1}$：假设 $x_i^* > 0$，则由互补松弛 $\lambda_i^* = 0$，平稳性给出 $\alpha_i + x_i^* = (\nu^*)^{-1} \le \alpha_i \implies x_i^* \le 0$，矛盾！故必有 $x_i^* = 0$（此时 $\lambda_i^* = \nu^* - \alpha_i^{-1} \ge 0$ 自动满足）。
+\end{itemize}
+合并两种情形即得 $x_i^* = \max\!\big(0,\; (\nu^*)^{-1} - \alpha_i\big)$。最后令 $\phi(w) = \sum_{i=1}^d \max(0, w - \alpha_i)$：该函数在 $w \ge \min_i \alpha_i$ 上连续、严格单调递增，且 $\phi(\min_i \alpha_i) = 0$、$\lim_{w\to+\infty}\phi(w) = +\infty$，由介值定理方程 $\phi(w) = 1$ 存在唯一解 $w^* = (\nu^*)^{-1}$。
+\end{proof}
+
+\subsection*{习题 4.2.5\quad Lasso 全零解的精确临界阈值 $\lambda_{\max}$}
+\begin{proof}
+Lasso 目标函数 $F_\lambda(w) = \underbrace{\frac{1}{2N}\norm{Xw - y}_2^2}_{f(w)} + \lambda\norm{w}_1$ 为无约束凸函数，因此 $w^* = 0$ 为全局极小点的充要条件是次梯度最优性条件 $0 \in \partial F_\lambda(0)$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item 光滑项在 $w = 0$ 处的梯度为 $\nabla f(0) = \frac{1}{N}X^\top(X\cdot 0 - y) = -\frac{1}{N}X^\top y$。
+  \item 非光滑项 $\lambda\norm{w}_1$ 在 $w = 0$ 处的次微分为超立方体 $\lambda\,\partial\norm{0}_1 = [-\lambda, \lambda]^D$。
+  \item 由次微分加法规则，$\partial F_\lambda(0) = \left\{-\frac{1}{N}X^\top y + s : s \in [-\lambda, \lambda]^D\right\}$，故
+  \[
+    0 \in \partial F_\lambda(0)
+    \iff \frac{1}{N}X^\top y \in [-\lambda, \lambda]^D
+    \iff \max_{1\le j\le D}\abs{\frac{1}{N}x_j^\top y} \le \lambda
+    \iff \lambda \ge \lambda_{\max} \coloneqq \frac{1}{N}\norm{X^\top y}_\infty.
+  \]
+\end{enumerate}
+\textbf{结合第 2.4 节实测核验}：对 \texttt{exp2\_lasso\_ista}（$N=120, D=20$, \texttt{seed=42}）的标准化特征矩阵 $X$ 与目标 $y$ 直接计算得精确临界值
+\[
+  \lambda_{\max} = \frac{1}{120}\norm{X^\top y}_\infty = \mathbf{3.5615}.
+\]
+表~\ref{tab:v4-ch2-lasso} 中最后一个正则点 $\lambda = 3.80 > 3.5615 = \lambda_{\max}$，满足全零解充要条件，因此 ISTA 迭代将全部 20 个系数精准归零（\texttt{nnz = 0}）。
+\end{proof}
+
+\subsection*{习题 4.2.6\quad 弹性网（Elastic Net）的闭式近端算子}
+\begin{proof}
+根据近端算子定义，对 $g(w) = \lambda_1\norm{w}_1 + \frac{\lambda_2}{2}\norm{w}_2^2$（$\lambda_1, \lambda_2 > 0$）：
+\[
+  \prox_{\eta g}(z) = \argmin_{x \in \R^D}\left\{\frac{1}{2}\norm{x - z}_2^2 + \frac{\eta\lambda_2}{2}\norm{x}_2^2 + \eta\lambda_1\norm{x}_1\right\}.
+\]
+目标函数关于各个坐标 $x_j$ 完全可分。对第 $j$ 个坐标配方整理（忽略与 $x_j$ 无关的常数项）：
+\begin{align*}
+  \frac{1}{2}(x_j - z_j)^2 + \frac{\eta\lambda_2}{2}x_j^2 + \eta\lambda_1 |x_j|
+  &= \frac{1 + \eta\lambda_2}{2}x_j^2 - z_j x_j + \eta\lambda_1 |x_j| + \frac{1}{2}z_j^2 \\
+  &= (1 + \eta\lambda_2)\left[\frac{1}{2}\!\left(x_j - \frac{z_j}{1 + \eta\lambda_2}\right)^2 + \frac{\eta\lambda_1}{1 + \eta\lambda_2}|x_j|\right] + \text{const}.
+\end{align*}
+因 $1 + \eta\lambda_2 > 0$，极小化方括号内函数等价于对点 $\tilde{z}_j = \frac{z_j}{1+\eta\lambda_2}$ 施加阈值为 $\tilde{\tau} = \frac{\eta\lambda_1}{1+\eta\lambda_2}$ 的软阈值算子（定理~\ref{thm:v4-soft-thresh}）。再提取公共正因子 $\frac{1}{1+\eta\lambda_2}$ 即得闭式解析解：
+\[
+  \big[\prox_{\eta g}(z)\big]_j
+  = S_{\frac{\eta\lambda_1}{1+\eta\lambda_2}}\!\left(\frac{z_j}{1+\eta\lambda_2}\right)
+  = \frac{1}{1 + \eta\lambda_2}\, S_{\eta\lambda_1}(z_j)
+  = \frac{\sign(z_j)\max(|z_j| - \eta\lambda_1,\, 0)}{1 + \eta\lambda_2}.
+\]
+几何意义极为清晰：先用 $\ell_1$ 软阈值把弱特征精确归零，再统一乘以 $\ell_2$ 阻尼因子 $\frac{1}{1+\eta\lambda_2}$ 收缩非零幅值。
+\end{proof}
+
+\subsection*{习题 4.2.7\quad ISTA vs FISTA 与次梯度下降三法实测}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{核心算法对比实现}（基于 \texttt{exp2\_lasso\_ista} 数据，$\lambda = 0.20, L = 1.7474, \eta = 1/L = 0.5723$）：
+  \begin{itemize}
+    \item \textbf{次梯度下降}：每步更新 $w^{(t+1)} = w^{(t)} - \frac{0.5}{\sqrt{t+1}}\big(\frac{1}{N}X^\top(Xw^{(t)}-y) + \lambda\sign(w^{(t)})\big)$；
+    \item \textbf{ISTA}：每步更新 $w^{(t+1)} = S_{\eta\lambda}\big(w^{(t)} - \eta\nabla f(w^{(t)})\big)$；
+    \item \textbf{FISTA}：维护辅助序列 $y^{(t)}$ 与动量标量 $t_0 = 1$：
+    \begin{lstlisting}
+w_next = soft_thresh(y_f - eta * grad(y_f), eta * lam)
+t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * tk * tk))
+y_f = w_next + ((tk - 1.0) / t_next) * (w_next - w_f)
+    \end{lstlisting}
+  \end{itemize}
+  \item \textbf{实测自检基准}（以 5000 步 FISTA 求得精确基准 $F^* = 1.848404$，真稀疏度 $\texttt{nnz}^* = 4$）：
+  \begin{center}\small
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{算法} & $t=10$ 次优度 / \texttt{nnz} & $t=20$ 次优度 / \texttt{nnz} & $t=40$ 次优度 / \texttt{nnz} & $t=200$ 次优度 / \texttt{nnz} \\
+    \midrule
+    次梯度下降 & $8.76\times 10^{-2}$ / \textbf{20} & $3.28\times 10^{-2}$ / \textbf{20} & $2.34\times 10^{-2}$ / \textbf{20} & $1.01\times 10^{-2}$ / \textbf{20} \\
+    ISTA & $2.39\times 10^{-5}$ / \textbf{4} & $1.11\times 10^{-10}$ / \textbf{4} & $<10^{-15}$ / \textbf{4} & $<10^{-15}$ / \textbf{4} \\
+    FISTA & $3.30\times 10^{-5}$ / \textbf{4} & $1.48\times 10^{-8}$ / \textbf{4} & $1.02\times 10^{-14}$ / \textbf{4} & $0.00$ / \textbf{4} \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \item \textbf{关键洞察}：(i) 次梯度下降在 200 步后误差仍高达 $1.01\times 10^{-2}$，且全部 20 维系数在零点附近来回锯齿震荡（\texttt{nnz = 20}），\textbf{永远无法产出精确零解}；(ii) ISTA 与 FISTA 均凭借软阈值算子在第 10 步内就锁死真实稀疏支撑集（\texttt{nnz = 4}），40 步内达到双精度机器精度；(iii) 注意在本例标准化弱相关矩阵上（局部限制条件数 $\kappa_S$ 很小），ISTA 本身已呈极快线性收敛，FISTA 因无重启的惯性过冲在前 40 步略慢于 ISTA；一旦换成高相关病态特征矩阵（$\kappa_S \gg 100$），FISTA 的 $O(1/t^2)$ 加速优势将迅速甩开 ISTA 两个数量级。
+\end{enumerate}
+
+\subsection*{习题 4.2.8\quad 单纯形投影算子（Simplex Projection）推导与实现}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$O(d\log d)$ 阈值公式推导}：求解 $\min_p \frac{1}{2}\norm{p - z}_2^2$ s.t. $p_i \ge 0,\; \sum_{i=1}^d p_i = 1$。拉格朗日函数为 $\mathcal{L}(p, \lambda, \tau) = \frac{1}{2}\norm{p - z}_2^2 - \lambda^\top p + \tau(\mathbf{1}^\top p - 1)$。由平稳性 $p_i^* - z_i - \lambda_i^* + \tau = 0$、$\lambda_i^* \ge 0$ 与互补松弛 $\lambda_i^* p_i^* = 0$，与习题 4.2.4 完全同理可得：
+  \[
+    p_i^* = \max(z_i - \tau,\, 0), \qquad \sum_{i=1}^d \max(z_i - \tau,\, 0) = 1.
+  \]
+  将 $z$ 降序排列为 $u_1 \ge u_2 \ge \dots \ge u_d$。因 $p_i^* > 0 \iff z_i > \tau$，正分量必对应排序后的前 $\rho$ 个最大元素 $u_1, \dots, u_\rho$，且满足归一化方程 $\sum_{j=1}^\rho (u_j - \tau) = 1 \implies \tau = \frac{1}{\rho}\big(\sum_{j=1}^\rho u_j - 1\big)$。同时必须满足截断边界条件 $u_\rho > \tau \ge u_{\rho+1}$。可以验证序列 $\Delta_k := u_k - \frac{1}{k}(\sum_{j=1}^k u_j - 1)$ 满足单调变号性质，因而满足 $u_k > \frac{1}{k}(\sum_{j=1}^k u_j - 1)$ 的\textbf{最大下标} $\rho$ 即为唯一精确支撑大小（排序耗时 $O(d\log d)$，前缀和扫描耗时 $O(d)$）。
+
+  \item \textbf{纯 NumPy 实现与自检基准}：
+  \begin{lstlisting}
+def proj_simplex(z):
+    u = np.sort(z)[::-1]
+    cssv = np.cumsum(u) - 1.0
+    ind = np.arange(1, len(z) + 1)
+    rho = ind[u - cssv / ind > 0][-1]
+    tau = cssv[rho - 1] / rho
+    return np.maximum(z - tau, 0.0)
+  \end{lstlisting}
+  \textbf{手算与随机自检}：取 $z = (1.5, 0.2, -0.5, 0.8)^\top$，排序得 $u = (1.5, 0.8, 0.2, -0.5)$。检验：$k=1$ 时 $1.5 > 0.5$；$k=2$ 时 $0.8 > \frac{2.3-1}{2} = 0.65$；$k=3$ 时 $0.2 \not> \frac{2.5-1}{3} = 0.5$。故 $\rho = 2, \tau = 0.65$，投影结果为 $p^* = \mathbf{(0.85,\; 0,\; 0,\; 0.15)^\top}$。在 100 组随机 15 维高斯向量上检验 KKT 四项条件（$p_i \ge 0$、$\sum p_i = 1$、$\lambda_i = p_i - z_i + \tau \ge 0$、$\max_i |\lambda_i p_i| < 10^{-10}$），全部以机器精度通过。
+\end{enumerate}
+
+% =========================================================================
+\section*{第 3 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 3 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 4.3.1\quad 常值估计器的偏差与方差手算}
+训练输入 $x_1, \dots, x_N$ 固定，$y_i = f(x_i) + \varepsilon_i$，其中 $\varepsilon_i$ 独立且均值 $0$、方差 $\sigma^2$。模型预测为 $\hat{f}_{\mathcal{D}}(x) = \bar{y} = \frac{1}{N}\sum_{i=1}^N y_i$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{期望预测与平方偏差}：
+  \[
+    \bar{f}(x) = \E_{\mathcal{D}}[\bar{y}] = \frac{1}{N}\sum_{i=1}^N \E[f(x_i) + \varepsilon_i] = \frac{1}{N}\sum_{i=1}^N f(x_i) \eqqcolon \bar{f}_{\mathrm{tr}}.
+  \]
+  故在任意测试点 $x$ 处的平方偏差为 $\Bias^2(\hat{f}(x)) = \big(\bar{f}_{\mathrm{tr}} - f(x)\big)^2$。
+  \item \textbf{方差}：由训练噪声 $\varepsilon_1, \dots, \varepsilon_N$ 相互独立，
+  \[
+    \Var(\hat{f}(x)) = \Var\!\left(\frac{1}{N}\sum_{i=1}^N \varepsilon_i\right) = \frac{1}{N^2}\sum_{i=1}^N \sigma^2 = \frac{\sigma^2}{N}.
+  \]
+  \item \textbf{期望测试 MSE 与 $N \to \infty$ 极限}：由偏差-方差-噪声分解定理，
+  \[
+    \E\big[(y - \hat{f}_{\mathcal{D}}(x))^2\big]
+    = \underbrace{\big(\bar{f}_{\mathrm{tr}} - f(x)\big)^2}_{\Bias^2}
+    + \underbrace{\frac{\sigma^2}{N}}_{\Var}
+    + \underbrace{\sigma^2}_{\text{不可约噪声}}.
+  \]
+  当 $N \to \infty$ 时，方差项 $\sigma^2 / N \to 0$，不可约噪声恒为 $\sigma^2$，而平方偏差收敛至 $\big(\E_X[f(X)] - f(x)\big)^2$（除非真实函数 $f$ 本身是常数，否则该项永不消失）。这清晰揭示了高偏差欠拟合模型的致命局限：单纯增加样本量只能消灭方差，无法降低系统性偏差。
+\end{enumerate}
+
+\subsection*{习题 4.3.2\quad PAC 样本复杂度计算}
+代入有限假设空间样本复杂度公式~\eqref{eq:v4-sample-comp}：$N \ge \frac{1}{2\varepsilon^2}\ln\frac{2|\mathcal{H}|}{\delta}$，其中 $|\mathcal{H}| = 2^{20}$、$\varepsilon = 0.02$，故 $\frac{1}{2\varepsilon^2} = \frac{1}{2 \times 0.0004} = 1250$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{置信度 $99\%$（$\delta = 0.01$）}：
+  \[
+    \ln\frac{2 \times 2^{20}}{0.01} = 21\ln 2 + \ln 100 \approx 21 \times 0.693147 + 4.605170 = 19.16126,
+  \]
+  因此 $N_{0.01} \ge 1250 \times 19.16126 = 23{,}951.58$，至少需要 $\mathbf{23{,}952}$ 个 i.i.d. 样本。
+  \item \textbf{置信度 $90\%$（$\delta = 0.10$）}：
+  \[
+    \ln\frac{2 \times 2^{20}}{0.10} = 21\ln 2 + \ln 10 \approx 14.55609 + 2.302585 = 16.85868,
+  \]
+  因此 $N_{0.10} \ge 1250 \times 16.85868 = 21{,}073.34$，至少需要 $\mathbf{21{,}074}$ 个样本。
+  \item \textbf{样本需求减少比例}：
+  \[
+    \frac{23951.58 - 21073.34}{23951.58} = \frac{\ln 10}{21\ln 2 + \ln 100} \approx \mathbf{12.02\%}
+  \]
+  （按向上取整后的整数算为 $(23952 - 21074)/23952 \approx 12.02\%$）。失败概率放大整整 10 倍，样本量却只省了 $12\%$——因为样本复杂度对 $\delta$ 仅为极温和的对数依赖 $\ln(1/\delta)$，真正昂贵的是精度项 $1/\varepsilon^2$。
+\end{enumerate}
+
+\subsection*{习题 4.3.3\quad 岭回归的存在性优势：一定存在 $\lambda > 0$ 严格胜过 OLS}
+\begin{proof}
+由式~\eqref{eq:v4-ridge-var} 与式~\eqref{eq:v4-ridge-bias}（设设计矩阵 $X$ 列满秩，即 $\sigma_1 \ge \dots \ge \sigma_D > 0$），岭回归总参数均方误差为
+\[
+  \mathrm{MSE}(\lambda)
+  = \underbrace{\sigma^2 \sum_{j=1}^D \frac{\sigma_j^2}{(\sigma_j^2 + \lambda)^2}}_{V(\lambda)}
+  + \underbrace{\sum_{j=1}^D \frac{\lambda^2}{(\sigma_j^2 + \lambda)^2}\,(v_j^\top w_{\mathrm{true}})^2}_{B(\lambda)}.
+\]
+对 $\lambda \ge 0$ 逐项求一阶导数：
+\begin{align*}
+  V'(\lambda) &= -2\sigma^2 \sum_{j=1}^D \frac{\sigma_j^2}{(\sigma_j^2 + \lambda)^3}, \\
+  B'(\lambda) &= \sum_{j=1}^D \frac{2\lambda(\sigma_j^2 + \lambda)^2 - 2\lambda^2(\sigma_j^2 + \lambda)}{(\sigma_j^2 + \lambda)^4}(v_j^\top w_{\mathrm{true}})^2
+               = 2\lambda \sum_{j=1}^D \frac{\sigma_j^2}{(\sigma_j^2 + \lambda)^3}(v_j^\top w_{\mathrm{true}})^2.
+\end{align*}
+在 $\lambda = 0$ 处求值：
+\[
+  V'(0) = -2\sigma^2 \sum_{j=1}^D \frac{1}{\sigma_j^4}, \qquad
+  B'(0) = 0,
+\]
+从而总误差在原点处的一阶导数为
+\[
+  \left.\frac{d}{d\lambda}\mathrm{MSE}(\lambda)\right|_{\lambda=0}
+  = -2\sigma^2 \sum_{j=1}^D \frac{1}{\sigma_j^4} < 0 \qquad (\text{只要 }\sigma^2 > 0).
+\]
+由导数保号性，存在 $\delta > 0$，使得对任意 $\lambda \in (0, \delta)$ 均有 $\mathrm{MSE}(\lambda) < \mathrm{MSE}(0) = \mathrm{MSE}_{\mathrm{OLS}}$。直觉上，在 $\lambda = 0$ 附近引入微小正则化只带来二阶小量 $O(\lambda^2)$ 的平方偏差，却立竿见影地削减了一阶量 $O(\lambda)$ 的方差，这是一场数学上稳赚不赔的交易。
+\end{proof}
+
+\subsection*{习题 4.3.4\quad 三类几何假设空间的精确 VC 维}
+\begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+  \item \textbf{一维单侧阈值 $\mathcal{H}_1 = \{\mathbb{I}[x \ge \theta] : \theta \in \R\}$}：$\mathbf{d_{\mathrm{VC}}(\mathcal{H}_1) = 1}$。
+  \begin{itemize}
+    \item \emph{能打散 1 点}：取 $x_1 = 0$，取 $\theta = -1$ 得 $+1$，取 $\theta = 1$ 得 $0$，实现全部 $2^1 = 2$ 种标记。
+    \item \emph{不能打散任意 2 点}：设 $x_1 < x_2$，任何阈值分类器均满足单调性 $h(x_1) \le h(x_2)$，故标记 $(y_1, y_2) = (1, 0)$ 永远无法实现。
+  \end{itemize}
+
+  \item \textbf{一维闭区间 $\mathcal{H}_2 = \{\mathbb{I}[a \le x \le b] : a \le b\}$}：$\mathbf{d_{\mathrm{VC}}(\mathcal{H}_2) = 2}$。
+  \begin{itemize}
+    \item \emph{能打散 2 点}：取 $x_1 = 0,\; x_2 = 2$。四种标记 $(0,0)$、$(1,0)$、$(0,1)$、$(1,1)$ 分别由闭区间 $[-2,-1]$、$[-0.5, 0.5]$、$[1.5, 2.5]$、$[0, 2]$ 精确实现。
+    \item \emph{不能打散任意 3 点}：设 $x_1 < x_2 < x_3$，任何闭区间 $[a, b]$ 若同时包含两端点 $x_1, x_3$，由区间凸性必包含中间点 $x_2$，因此标记 $(1, 0, 1)$ 永远无法实现。
+  \end{itemize}
+
+  \item \textbf{二维轴对齐矩形 $\mathcal{H}_3$}：$\mathbf{d_{\mathrm{VC}}(\mathcal{H}_3) = 4}$。
+  \begin{itemize}
+    \item \emph{能打散 4 点}：取菱形四顶点 $A(-1,0),\, B(1,0),\, C(0,1),\, D(0,-1)$。任取其一子集 $S \subseteq \{A,B,C,D\}$：若 $S = \varnothing$ 取远离原点的空区矩形；否则取 $S$ 的最小轴对齐包围盒 $[\min_{p\in S} x_1,\, \max_{p\in S} x_1] \times [\min_{p\in S} x_2,\, \max_{p\in S} x_2]$。容易逐一检验（例如只选 $A, B$ 得 $[-1,1]\times[0,0]$ 不含 $C, D$；选 $A, B, C$ 得 $[-1,1]\times[0,1]$ 不含 $D$），全部 $2^4 = 16$ 种二分标记均可实现。
+    \item \emph{不能打散任意 5 点}：任给平面上 5 个点，分别找出 $x_1$ 最小、$x_1$ 最大、$x_2$ 最小、$x_2$ 最大的至多 4 个极值点（若有并列任取其一），将其标为 $+1$，至少余下第 5 个点 $q$，将其标为 $0$。任何包含那 4 个极值点的轴对齐矩形必满足 $a_1 \le x_{1,\min} \le q_1 \le x_{1,\max} \le b_1$ 且 $a_2 \le x_{2,\min} \le q_2 \le x_{2,\max} \le b_2$，因而必然把 $q$ 也包入正类，该标记不可实现。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 4.3.5\quad 留一法（LOOCV）线性回归的 $O(1)$ 快捷公式}
+\begin{proof}
+设设计矩阵 $X \in \R^{N\times D}$ 列满秩，第 $i$ 行为 $x_i^\top$，记 $A = X^\top X$，则帽子矩阵对角元为 $h_{ii} = x_i^\top A^{-1} x_i \in (0, 1)$，全量 OLS 估计为 $\hat{w} = A^{-1} X^\top y$，全量拟合值为 $\hat{y}_i = x_i^\top \hat{w}$。
+
+删去第 $i$ 个样本后，新正规方程的系数矩阵为 $A_{(-i)} = X_{(-i)}^\top X_{(-i)} = A - x_i x_i^\top$，右侧向量为 $X_{(-i)}^\top y_{(-i)} = X^\top y - x_i y_i$。应用 Sherman-Morrison 秩-1 逆矩阵公式：
+\[
+  (A - x_i x_i^\top)^{-1} = A^{-1} + \frac{A^{-1} x_i x_i^\top A^{-1}}{1 - x_i^\top A^{-1} x_i}
+  = A^{-1} + \frac{A^{-1} x_i x_i^\top A^{-1}}{1 - h_{ii}}.
+\]
+将其代入留一参数 $\hat{w}^{(-i)} = (A - x_i x_i^\top)^{-1}(X^\top y - x_i y_i)$，并左乘 $x_i^\top$ 计算留一预测值 $\hat{y}_i^{(-i)} = x_i^\top \hat{w}^{(-i)}$：
+\begin{align*}
+  \hat{y}_i^{(-i)}
+  &= \left(x_i^\top A^{-1} + \frac{h_{ii}\, x_i^\top A^{-1}}{1 - h_{ii}}\right)(X^\top y - x_i y_i)
+   = \frac{1}{1 - h_{ii}}\, x_i^\top A^{-1}(X^\top y - x_i y_i) \\
+  &= \frac{1}{1 - h_{ii}}\big(\hat{y}_i - h_{ii} y_i\big).
+\end{align*}
+因此第 $i$ 个样本的留一预测残差为
+\[
+  y_i - \hat{y}_i^{(-i)}
+  = \frac{(1 - h_{ii}) y_i - (\hat{y}_i - h_{ii} y_i)}{1 - h_{ii}}
+  = \frac{y_i - \hat{y}_i}{1 - h_{ii}}.
+\]
+于是整个 $N$ 折留一法均方误差仅需拟合一次全量模型即可精确算出：$\mathrm{LOOCV} = \frac{1}{N}\sum_{i=1}^N \left(\frac{y_i - \hat{y}_i}{1 - h_{ii}}\right)^2$。（Python 核验：在随机 $30\times 5$ 回归数据上与暴力重训 30 次的最大绝对误差为 $2.11\times 10^{-15}$。）
+\end{proof}
+
+\subsection*{习题 4.3.6\quad 单边可实现情形（Realizable PAC）的 $O(1/\varepsilon)$ 加速界}
+\begin{proof}
+定义“坏假设”集合 $\mathcal{H}_{\mathrm{bad}} := \{h \in \mathcal{H} : R(h) > \varepsilon\}$。因问题可实现（存在 $h^* \in \mathcal{H}$ 使 $R(h^*) = 0$，从而 $R_{\mathrm{emp}}(h^*) = 0$），一致学习器 $\hat{h}$ 总能找到满足 $R_{\mathrm{emp}}(\hat{h}) = 0$ 的假设。
+
+事件 $\{R(\hat{h}) > \varepsilon\}$ 发生，意味着至少存在一个坏假设 $h \in \mathcal{H}_{\mathrm{bad}}$ 在全部 $N$ 个 i.i.d. 训练样本上恰好零失误（$R_{\mathrm{emp}}(h) = 0$）。对任意固定 $h \in \mathcal{H}_{\mathrm{bad}}$，其在单个样本上预测正确的概率为 $1 - R(h) < 1 - \varepsilon$，由样本独立性与初等不等式 $1 - \varepsilon \le e^{-\varepsilon}$ 得
+\[
+  \Prob\!\big(R_{\mathrm{emp}}(h) = 0\big) = \big(1 - R(h)\big)^N \le (1 - \varepsilon)^N \le e^{-N\varepsilon}.
+\]
+对所有坏假设取并集界（注意 $|\mathcal{H}_{\mathrm{bad}}| \le |\mathcal{H}|$，实际上因 $h^* \notin \mathcal{H}_{\mathrm{bad}}$ 甚至有 $|\mathcal{H}_{\mathrm{bad}}| \le |\mathcal{H}| - 1$）：
+\[
+  \Prob\!\big(R(\hat{h}) > \varepsilon\big)
+  \le \Prob\!\left(\exists h \in \mathcal{H}_{\mathrm{bad}} : R_{\mathrm{emp}}(h) = 0\right)
+  \le \sum_{h \in \mathcal{H}_{\mathrm{bad}}} \Prob\!\big(R_{\mathrm{emp}}(h) = 0\big)
+  \le |\mathcal{H}|\, e^{-N\varepsilon}.
+\]
+令上界 $|\mathcal{H}|\, e^{-N\varepsilon} \le \delta$，两边取对数即得 $N \ge \frac{1}{\varepsilon}\ln\frac{|\mathcal{H}|}{\delta}$。在无噪声可实现情形下，由于单边零误差事件按指数 $(1-\varepsilon)^N$ 衰减（无需依赖均值集中在 $\sqrt{N}$ 尺度的 Hoeffding 界），样本复杂度从 $O(1/\varepsilon^2)$ 锐减至 $O(1/\varepsilon)$。
+\end{proof}
+
+\subsection*{习题 4.3.7\quad 岭回归压制高阶多项式方差实验}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{核心实现要点}：固定多项式次数 $d = 9$，构造惩罚矩阵 $P = \diag(0, 1, \dots, 1) \in \R^{10\times 10}$（不惩罚截距 $w_0$），用 \texttt{np.linalg.solve(A\_tr.T @ A\_tr + lam * P, A\_tr.T @ y\_tr)} 替代普通最小二乘，在相同 400 轮随机训练抽样（\texttt{seed=7}）上精确统计 $\Bias^2$、$\Var$ 与总 MSE。
+  \item \textbf{400 轮实测数值自检表}（不可约噪声 $\sigma^2 = 0.0900$；无正则 $d=3$ 基准总 MSE $= 0.1073$）：
+  \begin{center}\small
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+    $\lambda$ & $0$（OLS） & $10^{-8}$ & $10^{-6}$ & $\mathbf{10^{-4}}$ & $10^{-2}$ & $10^{-1}$ \\
+    \midrule
+    $\Bias^2$ & $0.0000$ & $0.0000$ & $0.0001$ & $\mathbf{0.0007}$ & $0.0364$ & $0.0740$ \\
+    $\Var$ & $0.0381$ & $0.0267$ & $0.0220$ & $\mathbf{0.0174}$ & $0.0128$ & $0.0101$ \\
+    总 MSE & $0.1281$ & $0.1167$ & $0.1121$ & $\mathbf{0.1081}$ & $0.1392$ & $0.1740$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \item \textbf{结论解读}：随着 $\lambda$ 从 $0$ 增至 $10^{-4}$，高阶 $d=9$ 多项式的方差被腰斩一半以上（$0.0381 \to 0.0174$），而平方偏差仅微增 $0.0007$，总测试 MSE 从 $0.1281$ 降至 $\mathbf{0.1081}$，已与无正则最优低阶 $d=3$（$0.1073$）几乎持平！若进一步过大（$\lambda \ge 10^{-2}$），则过度压缩高次系数引发欠拟合，偏差飙升至 $0.0740$ 导致总误差反弹。
+\end{enumerate}
+
+\subsection*{习题 4.3.8\quad 亲手复现“特征选择数据泄露”假象}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{实验设定与实测基准}：使用 \texttt{rng = np.random.default\_rng(2026)} 生成 $N=100, D=5000$ 的纯标准正态噪声矩阵 $X$ 及独立均匀随机二分类标签 $y \in \{0,1\}$，配合 $L_2$ 逻辑回归（$\lambda = 0.1$）执行 5 折交叉验证：
+  \begin{itemize}
+    \item \textbf{错误流程（全量预筛 Top-20 特征后 CV）}：5 折平均验证准确率竟虚高至 $\mathbf{91.0\%}$！原因是在 5000 个纯噪声特征中，仅靠多重比较的随机巧合就总能挑出 20 列在全部 100 个样本（含验证折）上与 $y$ 高度伪相关的列；
+    \item \textbf{正确流程（每折仅用 80 训练样本筛 Top-20 特征）}：5 折平均验证准确率诚实回归至 $\mathbf{58.0\%}$（受 $N=100$ 有限样本标准误 $\approx 5\%$ 波动，跨多随机种子均值严格收于 $50.0\%$）。
+  \end{itemize}
+  \item \textbf{工程防错铁律}：凡是\textbf{依赖样本统计量或标签}的任何预处理步骤（特征筛选、标准化均值/方差、PCA 主成分、SMOTE 过采样、目标编码），都必须封装进交叉验证的\textbf{单折内部 Pipeline}，严格遵循“只在训练折 \texttt{fit}，在验证折仅 \texttt{transform}”原则。
+\end{enumerate}
+
+% =========================================================================
+\section*{第 4 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 4 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 4.1\quad 规范超平面与间隔计算}
+已知超平面参数 $w = (3, -4)^\top,\; b = 5$，法向量模长为 $\norm{w}_2 = \sqrt{3^2 + (-4)^2} = 5$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{函数间隔与几何间隔逐点计算}：由 $\hat{\gamma}_i = y_i(w^\top x_i + b)$ 与 $\gamma_i = \hat{\gamma}_i / \norm{w}_2$：
+  \begin{itemize}
+    \item $x_1 = (1, 1)^\top,\; y_1 = +1$：$w^\top x_1 + b = 3 - 4 + 5 = 4$，故 $\hat{\gamma}_1 = 4,\; \gamma_1 = \frac{4}{5} = 0.8$；
+    \item $x_2 = (0, 2)^\top,\; y_2 = -1$：$w^\top x_2 + b = 0 - 8 + 5 = -3$，故 $\hat{\gamma}_2 = (-1)(-3) = 3,\; \gamma_2 = \frac{3}{5} = 0.6$；
+    \item $x_3 = (3, 1)^\top,\; y_3 = +1$：$w^\top x_3 + b = 9 - 4 + 5 = 10$，故 $\hat{\gamma}_3 = 10,\; \gamma_3 = \frac{10}{5} = 2.0$；
+    \item $x_4 = (-1, 3)^\top,\; y_4 = -1$：$w^\top x_4 + b = -3 - 12 + 5 = -10$，故 $\hat{\gamma}_4 = (-1)(-10) = 10,\; \gamma_4 = \frac{10}{5} = 2.0$。
+  \end{itemize}
+  \item \textbf{规范超平面缩放与隔离带总宽度}：最小函数间隔为 $\hat{\gamma} = \min_i \hat{\gamma}_i = 3$（在 $x_2$ 处取到）。将 $(w, b)$ 同除以 $3$ 得规范超平面参数：
+  \[
+    w_{\mathrm{can}} = \frac{w}{3} = \left(1,\; -\frac{4}{3}\right)^\top, \qquad
+    b_{\mathrm{can}} = \frac{5}{3}.
+  \]
+  此时 $\norm{w_{\mathrm{can}}}_2 = \sqrt{1 + \frac{16}{9}} = \frac{5}{3}$，四个样本的几何间隔全部保持不变（最小几何间隔仍为 $\gamma = 1 / \norm{w_{\mathrm{can}}}_2 = \frac{3}{5} = 0.6$），对应的隔离带总宽度为
+  \[
+    \frac{2}{\norm{w_{\mathrm{can}}}_2} = 2 \times \frac{3}{5} = \frac{6}{5} = \mathbf{1.2}.
+  \]
+\end{enumerate}
+
+\subsection*{习题 4.2\quad 合法核函数的快速甄别}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$K(x, z) = 3 K_1(x, z) + 2 K_2(x, z)$}：\textbf{必为合法核}。
+  对任意有限点集 $\{x_i\}_{i=1}^n$ 与任意向量 $c \in \R^n$，Gram 矩阵满足 $c^\top (3K_1 + 2K_2) c = 3(c^\top K_1 c) + 2(c^\top K_2 c) \ge 0$（正定核锥对非负线性组合封闭）。
+
+  \item \textbf{$K(x, z) = K_1(x, z) - K_2(x, z)$}：\textbf{不一定为合法核}。
+  \emph{显式反例}：取 $K_1(x, z) = x^\top z$ 与 $K_2(x, z) = 2 x^\top z$，两者均为合法线性核；但其差 $K(x, z) = -x^\top z$ 在单点 $x = (1, 0, \dots, 0)^\top$ 处就有 $K(x, x) = -1 < 0$，对应 $1\times 1$ Gram 矩阵 $[-1]$ 非半正定，故不是合法核。
+
+  \item \textbf{$K(x, z) = \big(K_1(x, z) + 1\big)^3$}：\textbf{必为合法核}。
+  展开得 $K(x, z) = K_1(x, z)^3 + 3 K_1(x, z)^2 + 3 K_1(x, z) + 1$。常数核 $1 = \inner{1}{1}$ 合法；由 Schur 乘积闭合性（习题 4.6），合法核的逐点乘积 $K_1^2, K_1^3$ 均合法；再由非负线性组合闭合性即证。
+
+  \item \textbf{$K(x, z) = \cos(x - z)\;(x, z \in \R)$}：\textbf{必为合法核}。
+  由三角和差公式直接分解为二维显式特征内积：
+  \[
+    \cos(x - z) = \cos x \cos z + \sin x \sin z = \inner{\phi(x)}{\phi(z)}, \qquad
+    \phi(x) = \begin{pmatrix} \cos x \\ \sin x \end{pmatrix} \in \R^2.
+  \]
+  因可表为欧氏内积，其任意 Gram 矩阵 $K = \Phi\Phi^\top \succeq 0$，必为合法核。
+\end{enumerate}
+
+\subsection*{习题 4.3\quad 一维非线性可分数据的二次核手算}
+样本：$x_1 = -1\ (y_1 = +1)$，$x_2 = 0\ (y_2 = -1)$，$x_3 = 1\ (y_3 = +1)$，特征映射 $\phi(x) = (x, x^2)^\top$：
+\[
+  \phi(x_1) = (-1, 1)^\top, \qquad \phi(x_2) = (0, 0)^\top, \qquad \phi(x_3) = (1, 1)^\top.
+\]
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$3\times 3$ 核矩阵 $K$}：计算两两内积 $K_{ij} = \phi(x_i)^\top \phi(x_j) = x_i x_j + x_i^2 x_j^2$：
+  $K_{11} = (-1)^2 + 1^2 = 2$，$K_{33} = 1^2 + 1^2 = 2$，$K_{13} = (-1)(1) + (1)(1) = 0$，且含 $x_2 = 0$ 的行列全为 $0$，故
+  \[
+    K = \begin{pmatrix}
+      2 & 0 & 0 \\
+      0 & 0 & 0 \\
+      0 & 0 & 2
+    \end{pmatrix}.
+  \]
+  \item \textbf{手解硬间隔对偶 QP}：对偶问题~\eqref{eq:svm-kernel-dual} 为
+  \[
+    \max_{\alpha_1, \alpha_2, \alpha_3 \ge 0}\;
+    \alpha_1 + \alpha_2 + \alpha_3 - \frac{1}{2}\big(2\alpha_1^2 + 2\alpha_3^2\big)
+    \quad\text{s.t.}\quad \alpha_1 - \alpha_2 + \alpha_3 = 0.
+  \]
+  将等式约束 $\alpha_2 = \alpha_1 + \alpha_3$ 代入目标函数，消去 $\alpha_2$ 得完全解耦的凹二次函数：
+  \[
+    W(\alpha_1, \alpha_3) = 2\alpha_1 + 2\alpha_3 - \alpha_1^2 - \alpha_3^2
+    = -( \alpha_1 - 1 )^2 - ( \alpha_3 - 1 )^2 + 2.
+  \]
+  当且仅当 $\alpha_1^* = 1,\; \alpha_3^* = 1$ 时取得全局最大值 $W^* = 2$，回代等式约束得 $\alpha_2^* = \alpha_1^* + \alpha_3^* = 2$。因此
+  \[
+    \alpha^* = \mathbf{(1,\; 2,\; 1)^\top}
+  \]
+  （全部 3 个点均为支持向量！）。由 $w^* = \sum_i \alpha_i^* y_i \phi(x_i) = 1\cdot(-1,1)^\top - 2\cdot(0,0)^\top + 1\cdot(1,1)^\top = (0, 2)^\top$，代入任一支持向量（例如 $x_2 = 0, y_2 = -1$）求偏置：
+  \[
+    b^* = y_2 - \sum_{i=1}^3 \alpha_i^* y_i K(x_i, x_2) = -1 - 0 = \mathbf{-1}.
+  \]
+  检验其余两点：$y_1 f(x_1) = 1\cdot(2\cdot 1 - 1) = 1$，$y_3 f(x_3) = 1\cdot(2\cdot 1 - 1) = 1$，全部精确落在间隔边界上，且原始目标值 $\frac{1}{2}\norm{w^*}_2^2 = 2 = W^*$ 满足强对偶！
+
+  \item \textbf{最终判别函数与一维决策边界点}：
+  \[
+    f(x) = \sum_{i=1}^3 \alpha_i^* y_i K(x_i, x) + b^*
+    = 1\cdot(-x + x^2) + 1\cdot(x + x^2) - 1
+    = \mathbf{2x^2 - 1}.
+  \]
+  令 $f(x) = 0 \implies 2x^2 - 1 = 0$，得原一维实轴上的两个决策边界点为 $\mathbf{x = -\frac{\sqrt{2}}{2}}$ 与 $\mathbf{x = +\frac{\sqrt{2}}{2}}$（约 $\pm 0.7071$）：区间 $(-\frac{\sqrt{2}}{2}, \frac{\sqrt{2}}{2})$ 内判为 $-1$，两侧判为 $+1$。
+\end{enumerate}
+
+\subsection*{习题 4.4\quad 软间隔支持向量状态诊断}
+已知 $C = 2.0,\; w^* = (1, 0)^\top,\; b^* = -1$，故判别函数为 $f^*(x) = x_1 - 1$，且四个样本标签均为 $y = +1$。由最优松弛变量 $\xi_i^* = \max(0, 1 - y_i f^*(x_i))$ 及第~\ref{sec:svm-soft} 节 KKT 互补松弛条件（$\alpha_i^*[1 - \xi_i^* - y_i f^*(x_i)] = 0$ 且 $(C - \alpha_i^*)\xi_i^* = 0$），逐一诊断如下：
+\begin{center}\small
+\begin{tabular}{@{}lccccl@{}}
+  \toprule
+  \textbf{样本} & $y_i f^*(x_i)$ & $\xi_i^*$ & $\alpha_i^*$ \textbf{状态} & \textbf{几何位置} & \textbf{可否用于求 $b^*$？} \\
+  \midrule
+  $A(3, 1)$ & $2.0$ & $0$ & $\alpha_A^* = 0$ & 隔离带外侧（非支持向量） & 否 \\
+  $B(2, -2)$ & $1.0$ & $0$ & $0 \le \alpha_B^* \le C$（典型为 $(0, C)$） & 恰好落在间隔边界上（自由 SV） & \textbf{是}（若 $0 < \alpha_B^* < C$） \\
+  $C(1.5, 0)$ & $0.5$ & $0.5$ & $\alpha_C^* = C = 2.0$ & 侵入隔离带内但仍分类正确 & 否 \\
+  $D(0.5, 2)$ & $-0.5$ & $1.5$ & $\alpha_D^* = C = 2.0$ & 越过超平面被误分类 & 否 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\textbf{说明}：对 $C, D$ 两点因 $\xi_i^* > 0$，互补松弛 $(C - \alpha_i^*)\xi_i^* = 0$ 强制 $\alpha_C^* = \alpha_D^* = C = 2.0$；对 $A$ 点因 $y_A f^*(x_A) = 2 > 1$ 且 $\xi_A^* = 0$，必有 $\alpha_A^* = 0$；只有处于间隔边界上的样本 $B$ 满足 $y_B f^*(x_B) = 1$（当其为自由支持向量 $0 < \alpha_B^* < C$ 时，可直接由 $b^* = y_B - (w^*)^\top x_B = 1 - 2 = -1$ 精确解出偏置 $b^*$）。
+
+\subsection*{习题 4.5\quad 支持向量乘子之和与最大间隔的精确恒等式}
+\begin{proof}
+对于线性可分的硬间隔 SVM，原始问题为严格凸二次规划且存在严格可行点（Slater 条件满足），因此强对偶成立：$p^* = d^*$。
+\begin{itemize}
+  \item 原始最优值为 $p^* = \frac{1}{2}\norm{w^*}_2^2$；
+  \item 由 KKT 平稳性条件 $w^* = \sum_{i=1}^N \alpha_i^* y_i x_i$，对偶目标中的二次项恰好等于
+  \[
+    \frac{1}{2}\sum_{i=1}^N\sum_{j=1}^N \alpha_i^* \alpha_j^* y_i y_j (x_i^\top x_j)
+    = \frac{1}{2}\norm{\sum_{i=1}^N \alpha_i^* y_i x_i}_2^2
+    = \frac{1}{2}\norm{w^*}_2^2.
+  \]
+  故对偶最优值为 $d^* = \sum_{i=1}^N \alpha_i^* - \frac{1}{2}\norm{w^*}_2^2$。
+\end{itemize}
+由强对偶 $p^* = d^*$ 立得
+\[
+  \frac{1}{2}\norm{w^*}_2^2 = \sum_{i=1}^N \alpha_i^* - \frac{1}{2}\norm{w^*}_2^2
+  \implies \sum_{i=1}^N \alpha_i^* = \norm{w^*}_2^2 = \frac{1}{(\gamma^*)^2},
+\]
+其中 $\gamma^* = 1/\norm{w^*}_2$ 为最大几何间隔。
+
+\textbf{几何意义}：正负两类数据越贴近、越难线性分开，所能容纳的最大几何间隔 $\gamma^*$ 就越小，因此 $\norm{w^*}_2 = 1/\gamma^*$ 必然越大，支撑起超平面的“对偶支撑力总和” $\sum_{i=1}^N \alpha_i^* = 1/(\gamma^*)^2$ 便按平方反比急剧增大。
+\end{proof}
+
+\subsection*{习题 4.6\quad 多项式核的特征维度与舒尔乘积合法性证明}
+\begin{proof}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{Schur 乘积定理（$A, B \succeq 0 \implies A \had B \succeq 0$）}：因 $A \in \R^{n\times n}$ 对称半正定，做正交谱分解 $A = \sum_{r=1}^n \lambda_r u_r u_r^\top$，其中特征值 $\lambda_r \ge 0$。对任意向量 $c \in \R^n$，直接展开二次型：
+  \begin{align*}
+    c^\top (A \had B) c
+    &= \sum_{i=1}^n \sum_{j=1}^n c_i c_j A_{ij} B_{ij}
+     = \sum_{i=1}^n \sum_{j=1}^n c_i c_j \left(\sum_{r=1}^n \lambda_r u_{r,i} u_{r,j}\right) B_{ij} \\
+    &= \sum_{r=1}^n \lambda_r \sum_{i=1}^n \sum_{j=1}^n (c_i u_{r,i}) B_{ij} (c_j u_{r,j})
+     = \sum_{r=1}^n \lambda_r (c \had u_r)^\top B (c \had u_r).
+  \end{align*}
+  由于 $B \succeq 0$，每一项 $(c \had u_r)^\top B (c \had u_r) \ge 0$，又 $\lambda_r \ge 0$，故 $c^\top (A \had B) c \ge 0$ 对任意 $c \in \R^n$ 成立，且 $A \had B$ 显然对称，从而 $A \had B \succeq 0$。
+
+  \item \textbf{核乘积与多项式核的合法性}：任取有限点集 $\{x_1, \dots, x_n\} \subset \R^d$，记 $K_1, K_2$ 对应的 Gram 矩阵为 $G^{(1)}, G^{(2)} \succeq 0$。逐点乘积函数 $K(x, z) = K_1(x, z) K_2(x, z)$ 的 Gram 矩阵恰好为 Hadamard 积 $G^{(1)} \had G^{(2)}$，由第 (1) 问立即得 $G^{(1)} \had G^{(2)} \succeq 0$，故 $K_1 K_2$ 必为合法正定核。
+
+  对多项式核 $K(x, z) = (x^\top z + c)^p$（$c \ge 0, p \in \N^+$）：基础线性核 $K_{\mathrm{lin}}(x, z) = x^\top z$（Gram 阵 $XX^\top \succeq 0$）与非负常数核 $K_c(x, z) = c$（Gram 阵 $c\mathbf{1}\mathbf{1}^\top \succeq 0$）均合法，故其和 $K_{\mathrm{base}}(x, z) = x^\top z + c$ 合法；对其反复应用 $p - 1$ 次 Schur 乘积闭合性，立得 $(x^\top z + c)^p$ 对任意维度 $d$ 均为合法正定核（其对应的多项式单项式隐式特征空间维度为 $\binom{d + p}{p}$）。\qedhere
+\end{enumerate}
+\end{proof}
+
+\subsection*{习题 4.7\quad 原始次梯度求解线性软间隔 SVM 与对偶解一致性校验}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{合页损失目标的次梯度公式}：记式~\eqref{eq:svm-hinge} 的目标为 $J(w, b) = \frac{1}{2}\norm{w}_2^2 + C\sum_{i=1}^N \max\!\big(0, 1 - y_i(w^\top x_i + b)\big)$，令活跃违约集合 $\mathcal{M}(w, b) = \{i : y_i(w^\top x_i + b) < 1\}$，则一个有效次梯度为：
+  \[
+    g_w = w - C\sum_{i \in \mathcal{M}(w, b)} y_i x_i, \qquad
+    g_b = -C\sum_{i \in \mathcal{M}(w, b)} y_i.
+  \]
+  \item \textbf{核心实现与收敛技巧}：采用衰减步长 $\eta_t = \frac{0.05}{\sqrt{t}}$ 配合后半程 Polyak 参数平均（消除折点附近的锯齿抖动），与线性核 $K = X X^\top$ 版 SMO 求解器（$C = 1.0$，充分遍历直至对偶间隙 $< 2\times 10^{-3}$）进行交叉核验。
+  \item \textbf{实测一致性自检基准}（\texttt{seed=2026}, $N=100$ 二维含轻度重叠高斯二分类数据，$C = 1.0$）：
+  \begin{itemize}
+    \item \textbf{对偶线性 SMO}：$w_{\mathrm{SMO}} = (1.31715,\; 0.82475)^\top,\; b_{\mathrm{SMO}} = 0.14974$，原始目标 $J = 7.783541$（对偶值 $7.781543$，间隙 $2.00\times 10^{-3}$）；
+    \item \textbf{原始次梯度（Polyak 平均）}：$w_{\mathrm{SG}} = (1.31859,\; 0.82588)^\top,\; b_{\mathrm{SG}} = 0.14972$，原始目标 $J = 7.781608$；
+    \item \textbf{相对误差校验}：权重相对误差 $\mathbf{0.118\%}$、偏置相对误差 $\mathbf{0.008\%}$、目标函数值相对误差 $\mathbf{0.025\%}$，全部远小于 $1\%$ 校验红线！
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 4.8\quad RBF-SVM 的 $(C, \gamma)$ 二维网格搜索与过拟合诊断}
+复用 \texttt{exp4\_rbf\_svm\_circles} 的含噪同心圆数据集（\texttt{seed=2026}, 160 训练 / 80 测试）与 SMO 算法（每次重置 \texttt{alpha=0, b=0}，固定 SMO 内核随机种子 \texttt{42}，35 轮扫描），测得完整 $3\times 5$ 对照矩阵（格内依次为 \textbf{测试准确率\% / 支持向量占比\% / 过拟合间隙(训练$-$测试)\%}）：
+\begin{center}\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+  \toprule
+  $C \backslash \gamma$ & $\gamma = 0.05$ & $\gamma = 0.2$ & $\gamma = 0.8$ & $\gamma = 4.0$ & $\gamma = 12.0$ \\
+  \midrule
+  $C = 0.5$ & $73.8 / 88.1 / +6.9$ & $96.2 / 54.4 / -3.8$ & $93.8 / 48.1 / +1.9$ & $95.0 / 65.0 / +1.9$ & $93.8 / 92.5 / +3.8$ \\
+  $C = 5.0$ & $96.2 / 49.4 / -3.8$ & $96.2 / 29.4 / -2.5$ & $95.0 / 26.2 / +1.9$ & $93.8 / 49.4 / +3.8$ & $92.5 / 78.1 / +6.2$ \\
+  $C = 50.0$ & $96.2 / 31.2 / -0.6$ & $96.2 / 30.6 / +0.0$ & $95.0 / 27.5 / +1.2$ & $95.0 / 48.8 / +3.1$ & $\mathbf{92.5 / 79.4 / +6.9}$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\textbf{偏差-方差机理剖析}：
+\begin{itemize}
+  \item \textbf{左下角（低 $C=0.5$ + 低 $\gamma=0.05$）——典型高偏差欠拟合}：核带宽极宽、曲率极平，叠加对违约惩罚很轻，模型画不出足够弯曲的闭环，测试准确率暴跌至 $73.8\%$，且高达 $88.1\%$ 的样本沦为带内支持向量；
+  \item \textbf{黄金带（$C \in \{5, 50\},\; \gamma \in \{0.2, 0.8\}$）}：支持向量最稀疏（最低仅占 $\mathbf{26.2\%}$），测试准确率稳定达到 $95.0\%$--$96.2\%$，训练与测试间隙接近零；
+  \item \textbf{右下角（高 $C=50$ + 高 $\gamma=12.0$）——最危险的高方差过拟合角落}：高 $\gamma$ 使每个样本的高斯核塌缩成极窄“针尖”（$\sigma = (2\gamma)^{-1/2} \approx 0.20$），失去跨样本共享信息的能力，导致支持向量比例反常飙升至 $79.4\%$；同时高 $C$ 强迫模型绝不放过任何噪声离群点，在噪声环交界处雕出细碎孤岛，使训练准确率飙至 $99.4\%$ 而测试准确率跌至 $92.5\%$（过拟合间隙扩至全场最高的 $+6.9\%$）。
+\end{itemize}
+
+% =========================================================================
+\section*{第 5 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 5 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 5.1\quad 三分类节点不纯度计算}
+父节点共 10 个样本，三类频数为 $(5, 3, 2)$，概率向量 $p = (0.5, 0.3, 0.2)$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{父节点 Gini 不纯度与香农熵}：
+  \begin{align*}
+    G(p) &= 1 - (0.5^2 + 0.3^2 + 0.2^2) = 1 - (0.25 + 0.09 + 0.04) = \mathbf{0.6200}, \\
+    H(p) &= -\big(0.5\log_2 0.5 + 0.3\log_2 0.3 + 0.2\log_2 0.2\big) \\
+         &\approx 0.5000 + 0.5211 + 0.4644 = \mathbf{1.4855\;\text{bits}}.
+  \end{align*}
+  \item \textbf{分裂后的 Gini 增益与信息增益}：
+  \begin{itemize}
+    \item 左子节点 $(5, 0, 0)$（权重 $\frac{5}{10} = 0.5$）：完全纯净，故 $G_L = 0,\; H_L = 0$。
+    \item 右子节点 $(0, 3, 2)$（权重 $\frac{5}{10} = 0.5$，比例 $0.6, 0.4$）：
+    \begin{align*}
+      G_R &= 1 - (0.6^2 + 0.4^2) = 1 - 0.52 = \mathbf{0.4800}, \\
+      H_R &= -\big(0.6\log_2 0.6 + 0.4\log_2 0.4\big) \approx 0.4422 + 0.5288 = \mathbf{0.9710\;\text{bits}}.
+    \end{align*}
+  \end{itemize}
+  按样本比例加权求差，得
+  \begin{align*}
+    \Delta G &= G(p) - \big(0.5 G_L + 0.5 G_R\big) = 0.6200 - 0.5 \times 0.4800 = \mathbf{0.3800}, \\
+    \operatorname{IG} &= H(p) - \big(0.5 H_L + 0.5 H_R\big) = 1.4855 - 0.5 \times 0.9710 = \mathbf{1.0000\;\text{bits}}.
+  \end{align*}
+  （注：信息增益恰为精确的 $1.0000\;\text{bit}$！因为按二元分裂区分出占比 $0.5$ 的第 1 类，恰等价于揭示了 1 枚公平硬币的信息量：$H(0.5, 0.3, 0.2) = H(0.5, 0.5) + 0.5 H(0.6, 0.4)$。）
+\end{enumerate}
+
+\subsection*{习题 5.2\quad 随机森林 vs GBDT 诊断四连问}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{错误}。由集成方差公式~\eqref{eq:rf-var-formula} $\Var(\bar{T}_M) = \rho\sigma^2 + \frac{1-\rho}{M}\sigma^2$，随着随机森林树数 $M$ 增大，第二项 $\frac{1-\rho}{M}\sigma^2$ 严格单调趋近于 $0$，集成方差单调下降并收敛至下界 $\rho\sigma^2$，而偏差保持与单棵树一致不变。因此单纯增加 $M$ \textbf{不会}引起随机森林过拟合，只会使测试误差趋稳（代价是计算开销增加）。
+  \item \textbf{正确}。GBDT 采用前向串行加法模型 $F_M(x) = F_0 + \eta\sum_{m=1}^M h_m(x)$，每棵新树都在刻意拟合前序模型的剩余残差。当树数 $M$ 过大且学习率 $\eta = 0.2$ 较大时，模型会不断在函数空间中记住训练噪声，导致方差持续攀升、测试误差掉头恶化（严重过拟合）。
+  \item \textbf{正确}。CART 分类树在寻找切分时只依赖单个特征值的\textbf{相对排序次序}（比较 $x_{ij} \le s$）。因为 $x \mapsto \ln(1 + x)$ 在 $x \ge 0$ 上严格单调递增，它完好保留所有样本在该特征上的全序关系，每个候选切分的左右样本划分完全一致，故树结构、不纯度增益及预测结果均完全不变（仅分裂阈值 $s$ 对应变换为 $\ln(1 + s)$）。
+  \item \textbf{错误，正好说反！}随机森林（Bagging）的核心任务是\textbf{降方差}，无法降低基模型的偏差，因此必须使用低偏差、高方差的\textbf{深树}（通常不剪枝）作为基学习器；而 GBDT（Boosting）的核心任务是串行\textbf{降偏差}，若单棵树过深（$d=20$）会一步就把训练噪声吸干导致剧烈过拟合，因此 GBDT 偏好高偏差、低方差的\textbf{浅树}（如 $d \in \{2, 3, \dots, 6\}$ 甚至决策树桩）。
+\end{enumerate}
+
+\subsection*{习题 5.3\quad 一维回归树手算与代价复杂度剪枝}
+给定 4 个样本 $(1, 1),\, (2, 2),\, (3, 9),\, (4, 10)$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{评估全部 3 个中点切分的残差平方和（RSS）}：
+  \begin{itemize}
+    \item $s = 1.5$：左 $\{1\}$（均值 $1$，RSS $= 0$），右 $\{2, 9, 10\}$（均值 $7$，RSS $= (2-7)^2 + (9-7)^2 + (10-7)^2 = 25 + 4 + 9 = 38$），总 RSS $= \mathbf{38}$；
+    \item $s = 2.5$：左 $\{1, 2\}$（均值 $1.5$，RSS $= 0.25 + 0.25 = 0.5$），右 $\{9, 10\}$（均值 $9.5$，RSS $= 0.25 + 0.25 = 0.5$），总 RSS $= \mathbf{1.0}$；
+    \item $s = 3.5$：左 $\{1, 2, 9\}$（均值 $4$，RSS $= 9 + 4 + 25 = 38$），右 $\{10\}$（均值 $10$，RSS $= 0$），总 RSS $= \mathbf{38}$。
+  \end{itemize}
+  因此最优第一次分裂为 $\mathbf{x \le 2.5}$（总误差从根节点骤降至 $1$）。
+
+  \item \textbf{三棵候选树的代价复杂度 $R_\alpha(T) = R(T) + \alpha|T|$ 与最优 $\alpha$ 区间}：
+  先算根节点均值 $\bar{y} = \frac{1+2+9+10}{4} = 5.5$，其总残差平方和为
+  \[
+    R(T_{\mathrm{root}}) = (-4.5)^2 + (-3.5)^2 + 3.5^2 + 4.5^2 = 20.25 + 12.25 + 12.25 + 20.25 = \mathbf{65}.
+  \]
+  三棵树的代价复杂度分别为：
+  \begin{itemize}
+    \item 单叶根节点 $T_{\mathrm{root}}$（$|T_{\mathrm{root}}| = 1$）：$R_\alpha(T_{\mathrm{root}}) = 65 + \alpha$；
+    \item 1 次分裂树 $T_1$（$|T_1| = 2$）：$R_\alpha(T_1) = 1 + 2\alpha$；
+    \item 4 叶完全树 $T_0$（$|T_0| = 4$）：$R_\alpha(T_0) = 0 + 4\alpha = 4\alpha$。
+  \end{itemize}
+  要求 $T_1$ 严格优于 $T_0$ 与 $T_{\mathrm{root}}$，同时解两个不等式：
+  \[
+    \begin{cases}
+      R_\alpha(T_1) < R_\alpha(T_0) \iff 1 + 2\alpha < 4\alpha \iff \alpha > 0.5, \\
+      R_\alpha(T_1) < R_\alpha(T_{\mathrm{root}}) \iff 1 + 2\alpha < 65 + \alpha \iff \alpha < 64.
+    \end{cases}
+  \]
+  故当且仅当 $\mathbf{\alpha \in (0.5,\; 64)}$ 时，1 次分裂树 $T_1$ 严格胜出——几何上也最直观：只要叶节点惩罚适中，模型就会果断抓住从 $2$ 到 $9$ 的巨大跃迁，而拒绝为组内微小的 $1$ 单位噪声继续过度切分。
+\end{enumerate}
+
+\subsection*{习题 5.4\quad XGBoost 二阶叶权重与分裂增益手算}
+已知 $y = (1, 1, 0, 0),\; p = (0.8, 0.4, 0.6, 0.2),\; \lambda = 1.0,\; \gamma = 0.05$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{逐样本一阶导 $g_i = p_i - y_i$ 与二阶导 $h_i = p_i(1 - p_i)$}：
+  \begin{center}\small
+  \begin{tabular}{@{}ccccc@{}}
+    \toprule
+    样本 $i$ & $y_i$ & $p_i$ & $g_i = p_i - y_i$ & $h_i = p_i(1 - p_i)$ \\
+    \midrule
+    1 & $1$ & $0.8$ & $-0.2$ & $0.16$ \\
+    2 & $1$ & $0.4$ & $-0.6$ & $0.24$ \\
+    3 & $0$ & $0.6$ & $+0.6$ & $0.24$ \\
+    4 & $0$ & $0.2$ & $+0.2$ & $0.16$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \item \textbf{分裂前父叶最优权重 $w^*$}：汇总 $G = \sum_{i=1}^4 g_i = -0.2 - 0.6 + 0.6 + 0.2 = 0$，$H = \sum_{i=1}^4 h_i = 0.16 + 0.24 + 0.24 + 0.16 = 0.80$。由式~\eqref{eq:xgb-leaf-gain} 得
+  \[
+    w^* = -\frac{G}{H + \lambda} = -\frac{0}{0.80 + 1.0} = \mathbf{0}.
+  \]
+  （因为父节点中正负样本的欠预测与过预测误差恰好对称抵消，不分裂时无法对全体给出有效统一修正。）
+
+  \item \textbf{分裂 $I_L = \{1, 2\},\; I_R = \{3, 4\}$ 的增益 $\operatorname{Gain}$ 与决策}：
+  汇总左右子叶统计量：
+  \begin{align*}
+    G_L &= -0.2 - 0.6 = -0.8, & H_L &= 0.16 + 0.24 = 0.40, \\
+    G_R &= 0.6 + 0.2 = +0.8, & H_R &= 0.24 + 0.16 = 0.40.
+  \end{align*}
+  核验守恒：$G_L + G_R = 0 = G$，$H_L + H_R = 0.80 = H$。代入式~\eqref{eq:xgb-split-gain}：
+  \begin{align*}
+    \operatorname{Gain}
+    &= \frac{1}{2}\left[\frac{(-0.8)^2}{0.40 + 1.0} + \frac{(0.8)^2}{0.40 + 1.0} - \frac{0^2}{0.80 + 1.0}\right] - 0.05 \\
+    &= \frac{1}{2}\left[\frac{0.64}{1.4} + \frac{0.64}{1.4} - 0\right] - 0.05
+    = \frac{16}{35} - \frac{1}{20} = \frac{57}{140} \approx \mathbf{0.4071}.
+  \end{align*}
+  因为 $\operatorname{Gain} \approx 0.4071 > 0$，\textbf{应当执行该分裂}！分裂后左叶输出正权重 $w_L^* = +\frac{0.8}{1.4} = +\frac{4}{7}$ 抬高正类概率，右叶输出负权重 $w_R^* = -\frac{4}{7}$ 压低负类概率。
+\end{enumerate}
+
+\subsection*{习题 5.5\quad 回归中位数叶预测与 $L_1$ 绝对值损失的 GBDT}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{证明最小化 $\sum_{i=1}^n |y_i - c|$ 的最优常数是样本中位数}：
+  \begin{proof}
+  目标函数 $L(c) = \sum_{i=1}^n |c - y_i|$ 是关于 $c \in \R$ 的连续凸函数，故 $c^*$ 为全局极小值点当且仅当 $0 \in \partial L(c^*)$。由次微分加法法则：
+  \[
+    \partial L(c) = \sum_{i : y_i < c} (+1) + \sum_{i : y_i > c} (-1) + \sum_{i : y_i = c} [-1, 1].
+  \]
+  记 $n_<(c) = \#\{i : y_i < c\}$、$n_>(c) = \#\{i : y_i > c\}$、$n_=(c) = \#\{i : y_i = c\}$，则
+  \[
+    0 \in \partial L(c^*)
+    \iff \big|n_<(c^*) - n_>(c^*)\big| \le n_=(c^*).
+  \]
+  将样本排序为 $y_{(1)} \le y_{(2)} \le \dots \le y_{(n)}$：
+  \begin{itemize}
+    \item 若 $n = 2k + 1$ 为奇数，取 $c^* = y_{(k+1)}$ 时至多有 $k$ 个严格小于 $c^*$、至多 $k$ 个严格大于 $c^*$，满足 $|n_< - n_>| \le n_=$（反之若 $c < y_{(k+1)}$ 则 $n_> - n_< \ge 1 + n_=$）；
+    \item 若 $n = 2k$ 为偶数，则闭区间 $[y_{(k)}, y_{(k+1)}]$ 上任一点均满足 $n_< = n_> = k$（端点处亦满足 $|n_< - n_>| \le n_=$），惯例取中点 $\frac{1}{2}(y_{(k)} + y_{(k+1)})$。
+  \end{itemize}
+  综上所述，$c^* = \operatorname{median}(y_1, \dots, y_n)$ 恰是全局最优常数预测。
+  \end{proof}
+
+  \item \textbf{$L_1$-GBDT 的伪残差与叶输出重估机制}：
+  \begin{itemize}
+    \item \textbf{第 $m$ 轮伪残差}：损失函数 $\ell_1(y_i, F) = |y_i - F|$ 关于预测值 $F$ 的负次梯度为符号函数：
+    \[
+      r_{im} = -\left.\frac{\partial \ell_1(y_i, F)}{\partial F}\right|_{F = F_{m-1}(x_i)} = \sign\!\big(y_i - F_{m-1}(x_i)\big) \in \{-1, 0, +1\}.
+    \]
+    \item \textbf{为何树分裂后必须重估叶输出为残差中位数}：拟合回归树 $h_m(x)$ 时仅利用了伪残差 $r_{im} \in \{-1, +1\}$（只包含误差\textbf{方向}信息、彻底丢弃了误差\textbf{幅度}信息！）来划分出若干叶区域 $\{R_{jm}\}$。若直接沿用回归树叶均值（在 $[-1, 1]$ 内），步长幅值完全失真。因此一旦划分好叶区域 $R_{jm}$，标准 $L_1$-GBDT 回到真实 $L_1$ 损失执行最优线搜索：
+    \[
+      \gamma_{jm} = \argmin_{\gamma \in \R} \sum_{i \in R_{jm}} \big|y_i - F_{m-1}(x_i) - \gamma\big|
+      = \operatorname{median}_{i \in R_{jm}}\!\big(y_i - F_{m-1}(x_i)\big),
+    \]
+    恰好应用了第 (1) 问的结论！这使得 $L_1$-GBDT 既能用平方误差树高效切分特征空间，又能对重尾离群点保持极强鲁棒性。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 5.6\quad 随机森林特征子采样相关性极限分析}
+由定理~\ref{thm:rf-variance}，记纯 Bagging（$m_{\mathrm{try}} = d$）与随机森林（$m_{\mathrm{try}} = \sqrt{d}$）的集成方差分别为：
+\begin{align*}
+  V_{\mathrm{bag}}(M) &= \left(\rho_0 + \frac{1 - \rho_0}{M}\right)\sigma^2 = \left(0.60 + \frac{0.40}{M}\right)\sigma^2, \\
+  V_{\mathrm{rf}}(M)  &= \left(\rho_1 + \frac{1 - \rho_1}{M}\right)(1.25\sigma^2) = \left(0.3125 + \frac{0.9375}{M}\right)\sigma^2.
+\end{align*}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{$M \to \infty$ 极限下的方差降幅}：取极限得 $V_{\mathrm{bag}}(\infty) = 0.60\sigma^2$，$V_{\mathrm{rf}}(\infty) = 0.3125\sigma^2$。相对降低百分比为
+  \[
+    \frac{0.60 - 0.3125}{0.60} \times 100\% = \frac{0.2875}{0.60} \times 100\% = \frac{23}{48} \times 100\% \approx \mathbf{47.92\%}.
+  \]
+  尽管单棵树方差略增 $25\%$，但由于打破强特征垄断使树间相关性腰斩以上，大森林极限方差反而骤降近一半！
+  \item \textbf{随机森林开始严格优于纯 Bagging 的最小树数 $M_{\min}$}：解严格不等式 $V_{\mathrm{rf}}(M) < V_{\mathrm{bag}}(M)$：
+  \[
+    0.3125 + \frac{0.9375}{M} < 0.60 + \frac{0.40}{M}
+    \iff \frac{0.5375}{M} < 0.2875
+    \iff M > \frac{0.5375}{0.2875} = \frac{43}{23} \approx 1.8696.
+  \]
+  因 $M$ 为正整数，故仅需 $\mathbf{M_{\min} = 2}$ 棵树，随机森林即可严格击败纯 Bagging（检验：$M=1$ 时 $1.25 > 1.00$，单棵树 Bagging 略优；$M=2$ 时 $V_{\mathrm{rf}}(2) = 0.78125\sigma^2 < 0.80\sigma^2 = V_{\mathrm{bag}}(2)$）。
+\end{enumerate}
+
+\subsection*{习题 5.7\quad 手写随机森林袋外（OOB）验证器}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{核心实现代码}（嵌入 \texttt{exp5\_trees\_rf\_gbdt} 随机森林循环）：
+  \begin{lstlisting}
+oob_sum, oob_cnt = np.zeros(N_tr), np.zeros(N_tr)
+for m in range(1, M_max + 1):
+    b_idx = rng.integers(0, N_tr, size=N_tr)
+    oob_mask = ~(np.bincount(b_idx, minlength=N_tr) > 0)
+    tree = fit_reg_tree(X_tr[b_idx], y_tr[b_idx],
+                        max_depth=8, min_leaf=2, max_features=3, rng_local=rng)
+    oob_sum[oob_mask] += pred_tree(tree, X_tr[oob_mask])
+    oob_cnt[oob_mask] += 1
+    valid = oob_cnt > 0
+    oob_mse = np.mean((oob_sum[valid] / oob_cnt[valid] - y_tr[valid]) ** 2)
+  \end{lstlisting}
+  \item \textbf{实测自检基准与有限样本现象解析}：
+  \begin{itemize}
+    \item \textbf{OOB 树数占比收敛于 $e^{-1} \approx 36.79\%$}：在 $N_{\mathrm{tr}} = 220$ 上实测 $M = 10, 20, 40, 60$ 时每样本平均 OOB 树数占比依次为 $\mathbf{37.05\%,\; 36.50\%,\; 36.83\%,\; 36.83\%}$，精准贴合理论极限 $36.8\%$。
+    \item \textbf{OOB MSE 与含噪测试 MSE 一致性检验}：注意 OOB 评估对象是\textbf{含噪训练标签} $y_{\mathrm{tr}} = f(x) + \varepsilon$，因此它估计的是含噪测试 MSE $= \text{clean test MSE} + \sigma^2$（$\sigma^2 = 0.49$）。在 10 组不同随机种子（$N_{\mathrm{tr}}=220, N_{\mathrm{te}}=1000, M=60$）上跨种子平均，测得 $\overline{\mathrm{OOB\ MSE}} = \mathbf{1.3826}$，而独立含噪测试集均值为 $\mathbf{1.3762}$，相对偏差仅 $\mathbf{0.47\%}$（远小于 $10\%$），严格证实 OOB 是无偏的“免费交叉验证”！若只看单一小样本种子（如 \texttt{seed=2026}），因该批 220 个训练点恰好抽到偏低的经验噪声方差（$0.4279 < 0.49$）与略易拟合的区域，单次 OOB MSE（$1.0830$）与含噪测试 MSE（$1.5438$）会出现有限样本抽样起伏，增大 $N_{\mathrm{tr}}$ 或做多轮平均即迅速收敛到 $1\%$ 以内。
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{习题 5.8\quad GBDT 过拟合警报与早停（Early Stopping）实验}
+基于 \texttt{exp5\_trees\_rf\_gbdt} 数据集（\texttt{seed=2026}, $N_{\mathrm{tr}}=220, N_{\mathrm{te}}=220$，测试 MSE 为无噪真值误差），将迭代拉长至 $M = 250$：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{两组超参数实测轨迹对比}：
+  \begin{center}\footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{超参数组} & 最优测试 MSE（轮数） & $M=50$（训/测） & $M=100$（训/测） & $M=250$（训/测） \\
+    \midrule
+    (A) $d=3,\; \eta=0.05$ & $\mathbf{0.4430}$（$M=250$） & $0.7198 / 1.0827$ & $0.3293 / 0.5970$ & $0.1146 / \mathbf{0.4430}$ \\
+    (B) $d=6,\; \eta=0.30$ & $0.7112$（$M=22$） & $0.0002 / 0.7249$ & $0.0000 / 0.7277$ & $0.0000 / 0.7278$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{现象剖析}：(B) 组深树快步长早在 $\mathbf{M = 22}$ 轮就到达测试误差谷底（$0.7112$），随后在 $M = 50$ 时训练 MSE 已经几乎清零（$0.0002$），测试误差反转上扬并在高位停滞（若进一步取消叶样本限制至 \texttt{min\_leaf=1}，测试 MSE 会直接反弹至 $0.91$ 以上，叠加噪声方差 $0.49$ 后含噪测试 MSE 超过 $1.40$！）；反观 (A) 组“浅树 + 慢步长”虽然前期收敛从容，但 250 轮全程稳定下降至 $\mathbf{0.4430}$，不仅彻底避开过拟合，最终精度比 (B) 组最优时刻还低出近 $38\%$！
+
+  \item \textbf{20\% 留出验证集早停策略（\texttt{patience = 15}）}：将 220 个训练样本切分为 176 训练 + 44 验证，每轮追踪验证集 MSE，若连续 15 轮未刷新历史最小值则终止并回滚至 \texttt{best\_M}：
+  \begin{itemize}
+    \item 对 (B) 组（$d=6, \eta=0.30$）：早停机制精准在 $M = 44$ 轮拉响刹车并回滚至 $\mathbf{\texttt{best\_M} = 29}$（验证 MSE $= 0.9414$，测试 MSE 锁定在 $0.6780$），避免后面 200 余轮无意义且有害的过拟合计算；
+    \item 对 (A) 组（$d=3, \eta=0.05$）：验证 MSE 持续改善至 $M = 250$ 仍未触发停机（验证 MSE $= 0.7913$，测试 MSE $= 0.5059$），再次印证“浅树 + 小学习率 + 早停”是 GBDT 的黄金工程法则。
+  \end{itemize}
+\end{enumerate}
+
+% =========================================================================
+\section*{第 6 章习题解答（共 8 题）}
+\addcontentsline{toc}{section}{第 6 章习题解答（共 8 题）}
+% =========================================================================
+
+\subsection*{习题 6.1\quad GMM 独立参数量计数与自由度对比}
+设维度 $D = 10$、簇数 $K = 4$：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{K-Means}：只需估计 $K$ 个 $D$ 维簇中心 $\mu_1, \dots, \mu_K$，独立参数总数为
+  \[
+    p_{\mathrm{KM}} = K D = 4 \times 10 = \mathbf{40}.
+  \]
+  \item \textbf{对角协方差 GMM}：包括 $K - 1$ 个独立混合权重（因 $\sum_k \pi_k = 1$）、$KD$ 个均值参数、以及每个簇 $D$ 个对角方差参数：
+  \[
+    p_{\mathrm{diag}} = (K - 1) + K D + K D = 3 + 40 + 40 = \mathbf{83}.
+  \]
+  \item \textbf{满协方差 GMM}：每个对称 $D\times D$ 协方差矩阵 $\Sigma_k$ 有 $\frac{D(D+1)}{2}$ 个独立元素，总参数数为
+  \[
+    p_{\mathrm{full}} = (K - 1) + K D + K\frac{D(D+1)}{2} = 3 + 40 + 4 \times 55 = \mathbf{263}.
+  \]
+\end{enumerate}
+\textbf{高维小样本选型启示}：满协方差 GMM 的参数量随特征维度 $D$ 按\textbf{平方阶 $O(KD^2)$} 爆炸。当样本量 $N$ 不大（例如某簇有效样本数 $N_k \le D$）时，经验协方差矩阵 $\hat{\Sigma}_k$ 必然秩亏奇异，导致行列式 $|\hat{\Sigma}_k| \to 0$、对数似然发散至 $+\infty$ 以及严重过拟合；改用对角协方差（$O(KD)$）或球形协方差（$O(KD + K)$）能将自由度压低一个数量级，换取数值可逆性与低方差泛化。
+
+\subsection*{习题 6.2\quad K-Means++ 抽样概率手算}
+一维样本为 $x = (0,\, 1,\, 4,\, 6)$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{已选 $\mu_1 = 0$，抽取第二个质心 $\mu_2$}：计算各点到 $\mu_1 = 0$ 的平方距离 $D(x_i)^2 = (x_i - 0)^2$：
+  \[
+    D^2 = (0^2,\; 1^2,\; 4^2,\; 6^2) = (0,\; 1,\; 16,\; 36), \qquad \sum_{i=1}^4 D(x_i)^2 = 53.
+  \]
+  按平方距离归一化得精确抽样概率：
+  \[
+    P(\mu_2 = 1) = \frac{1}{53} \approx 0.0189, \qquad
+    P(\mu_2 = 4) = \frac{16}{53} \approx 0.3019, \qquad
+    P(\mu_2 = 6) = \frac{36}{53} \approx 0.6792
+  \]
+  （$x_1 = 0$ 的概率为 $0$）。可见最远点 $x_4 = 6$ 占据了超过三分之二的抽中机会。
+
+  \item \textbf{已选 $\{\mu_1, \mu_2\} = \{0, 6\}$，抽取第三个质心 $\mu_3$}：计算各点到最近已选质心的距离 $D(x_i) = \min(|x_i - 0|,\, |x_i - 6|)$：
+  \begin{itemize}
+    \item $x_2 = 1$：$D(1) = \min(1, 5) = 1 \implies D(1)^2 = 1$；
+    \item $x_3 = 4$：$D(4) = \min(4, 2) = 2 \implies D(4)^2 = 4$；
+    \item $x_1 = 0$ 与 $x_4 = 6$ 均已有 $D = 0$。
+  \end{itemize}
+  平方距离总和为 $1 + 4 = 5$，故精确抽样概率为
+  \[
+    P(\mu_3 = 1) = \frac{1}{5} = \mathbf{0.2000}, \qquad
+    P(\mu_3 = 4) = \frac{4}{5} = \mathbf{0.8000}.
+  \]
+\end{enumerate}
+
+\subsection*{习题 6.3\quad 硬币投掷（伯努利混合）模型的 EM 推导}
+设参数 $\theta = (\theta_A, \theta_B)$，先验 $\pi_A = \pi_B = 0.5$ 已知。给定硬币 $k \in \{A, B\}$，第 $i$ 轮（共抛 $L$ 次、出现 $h_i$ 次正面）的二项似然为
+\[
+  P(h_i \mid z_i = k; \theta) = \binom{L}{h_i}\theta_k^{h_i}(1 - \theta_k)^{L - h_i}.
+\]
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{E-步后验响应度}：由贝叶斯定理，分子分母中公共常数 $\frac{1}{2}\binom{L}{h_i}$ 全部精确约去：
+  \[
+    \gamma_{iA} = P\!\left(z_i = A \mid h_i; \theta^{(t)}\right)
+    = \frac{\big(\theta_A^{(t)}\big)^{h_i}\big(1 - \theta_A^{(t)}\big)^{L - h_i}}
+           {\big(\theta_A^{(t)}\big)^{h_i}\big(1 - \theta_A^{(t)}\big)^{L - h_i} + \big(\theta_B^{(t)}\big)^{h_i}\big(1 - \theta_B^{(t)}\big)^{L - h_i}},
+  \]
+  且 $\gamma_{iB} = 1 - \gamma_{iA}$。
+
+  \item \textbf{M-步闭式更新}：写出完全数据期望对数似然 $Q(\theta \mid \theta^{(t)})$（省略与 $\theta$ 无关的常数项）：
+  \[
+    Q(\theta \mid \theta^{(t)}) = \sum_{i=1}^N \Big[
+      \gamma_{iA}\big(h_i \ln\theta_A + (L - h_i)\ln(1 - \theta_A)\big)
+      + \gamma_{iB}\big(h_i \ln\theta_B + (L - h_i)\ln(1 - \theta_B)\big)
+    \Big] + \text{const}.
+  \]
+  关于 $\theta_A$ 求偏导并置零：
+  \[
+    \frac{\partial Q}{\partial \theta_A}
+    = \frac{\sum_{i=1}^N \gamma_{iA} h_i}{\theta_A} - \frac{\sum_{i=1}^N \gamma_{iA}(L - h_i)}{1 - \theta_A} = 0
+    \implies \theta_A^{(t+1)} = \frac{\sum_{i=1}^N \gamma_{iA} h_i}{\sum_{i=1}^N \gamma_{iA} L}.
+  \]
+  同理可得硬币 $B$ 的闭式更新：
+  \[
+    \theta_B^{(t+1)} = \frac{\sum_{i=1}^N \gamma_{iB} h_i}{\sum_{i=1}^N \gamma_{iB} L}.
+  \]
+  直觉极其自然：分子是归因于硬币 $k$ 的\textbf{期望正面总次数}，分母是归因于硬币 $k$ 的\textbf{期望总抛掷次数}，即“按软权重加权的经验正面频率”。
+\end{enumerate}
+
+\subsection*{习题 6.4\quad 例~\ref{ex:gmm-hand} 的对称检验与硬 K-Means 对比}
+一维数据 $x = (-2, -1, 2, 3)$，初始中心 $\mu^{(0)} = (-1, 1)$。
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{标准 K-Means（Lloyd 算法）完整迭代过程}：
+  \begin{itemize}
+    \item \textbf{第 1 轮指派}：计算各点到 $\mu_1^{(0)} = -1$ 与 $\mu_2^{(0)} = 1$ 的距离：
+    $-2$ 距 $(-1, 1)$ 为 $(1, 3) \to$ 簇 1；
+    $-1$ 距 $(-1, 1)$ 为 $(0, 2) \to$ 簇 1；
+    $2$ 距 $(-1, 1)$ 为 $(3, 1) \to$ 簇 2；
+    $3$ 距 $(-1, 1)$ 为 $(4, 2) \to$ 簇 2。
+    故指派结果为 $c^{(1)} = (1, 1, 2, 2)$。
+    \item \textbf{第 1 轮质心更新}：$\mu_1^{(1)} = \frac{-2 + (-1)}{2} = \mathbf{-1.5}$，$\mu_2^{(1)} = \frac{2 + 3}{2} = \mathbf{2.5}$。
+    \item \textbf{第 2 轮验证收敛}：以 $\mu^{(1)} = (-1.5, 2.5)$ 重新指派（中垂线位于 $x = 0.5$），指派结果仍为 $(1, 1, 2, 2)$，质心不再变化，算法在 \textbf{1 轮}即达收敛！
+    \item \textbf{最终目标值（惯量）}：
+    \[
+      J = (-2 + 1.5)^2 + (-1 + 1.5)^2 + (2 - 2.5)^2 + (3 - 2.5)^2 = 0.25 + 0.25 + 0.25 + 0.25 = \mathbf{1.0}.
+    \]
+  \end{itemize}
+  \item \textbf{与 GMM-EM 第 1 轮结果 $(-1.4875, 2.2683)$ 的差异来源}：
+  硬 K-Means 在第 1 轮做了“非黑即白”的 $0/1$ 切割，把 $x = -1$ 百分之百划归左簇；而在等方差 GMM-EM 的第 1 轮 E-步中，由于初始中心 $-1$ 与 $+1$ 距离 $x = -1$ 的方差尺度相当（$\sigma^2 = 1$），由软后验公式 $\gamma_{i2} = \frac{1}{1 + e^{-2x_i}}$，样本 $x = -1$ 仍有高达 $\gamma_{22} = \frac{1}{1 + e^{2}} \approx \mathbf{11.92\%}$ 的概率归属右簇（而 $x = 2$ 归属左簇的权重仅 $\frac{1}{1+e^4} \approx 1.80\%$，不对称！）。正是这 $11.92\%$ 的软权重在 M-步加权平均中把右簇均值 $\mu_2^{(1)}$ 从 $2.5$ 明显向左拽至 $2.2683$（左簇均值仅被 $x=2$ 极微弱地右拉至 $-1.4875$）。随着后续 EM 迭代推进方差缩小，软响应度迅速锐化，最终两簇中心也会收敛到非常接近 $(-1.5, 2.5)$。
+\end{enumerate}
+
+\subsection*{习题 6.5\quad ELBO 在切点处的一阶梯度一致性}
+\begin{proof}
+固定第 $t$ 轮的 E-步最优分布 $q^{(t+1)}(z) = p_{\theta^{(t)}}(z \mid x)$，定义边际对数似然与 ELBO 之差函数：
+\[
+  d(\theta) := \ln p_\theta(x) - \mathcal{L}\big(q^{(t+1)}, \theta\big).
+\]
+由精确 ELBO--KL 分解恒等式（定理~\ref{thm:elbo-decomp}），对任意参数 $\theta$ 恒有
+\[
+  d(\theta) = \DKL\!\Big(q^{(t+1)}(z) \,\big\|\, p_\theta(z \mid x)\Big) \ge 0.
+\]
+又在切点 $\theta = \theta^{(t)}$ 处，$p_{\theta^{(t)}}(z \mid x) = q^{(t+1)}(z)$，故
+\[
+  d(\theta^{(t)}) = \DKL\!\Big(q^{(t+1)} \,\big\|\, q^{(t+1)}\Big) = 0.
+\]
+这表明 $\theta = \theta^{(t)}$ 是非负可微函数 $d(\theta)$ 的无约束全局极小值点！由多元微积分 Fermat 一阶必要条件，必有
+\[
+  \nabla_\theta d(\theta)\Big|_{\theta = \theta^{(t)}} = 0
+  \implies \nabla_\theta \mathcal{L}\big(q^{(t+1)}, \theta\big)\Big|_{\theta = \theta^{(t)}}
+  = \nabla_\theta \ln p_\theta(x)\Big|_{\theta = \theta^{(t)}}.
+\]
+\textbf{推论（EM 不动点必为真实对数似然驻点）}：若 $\theta^*$ 是 EM 算法的不动点，且在参数空间开集内部达到 M-步极大值，则对固定 $q^* = p_{\theta^*}(z \mid x)$，函数 $\theta \mapsto \mathcal{L}(q^*, \theta)$ 在 $\theta = \theta^*$ 处取得极大值，因而 $\nabla_\theta \mathcal{L}(q^*, \theta)\big|_{\theta=\theta^*} = 0$。结合上述梯度一致性定理，立得 $\nabla_\theta \ln p_\theta(x)\big|_{\theta=\theta^*} = 0$，即 $\theta^*$ 必为真实边际对数似然的驻点。
+\end{proof}
+
+\subsection*{习题 6.6\quad 高斯混合马氏距离决策边界}
+在等权重 $\pi_1 = \pi_2 = 0.5$ 下，后验相等边界 $\gamma_{i1} = \gamma_{i2} = 0.5$ 等价于两个高斯密度的对数似然相等：$\ln \mathcal{N}(x \mid \mu_1, \Sigma_1) = \ln \mathcal{N}(x \mid \mu_2, \Sigma_2)$。消去常数 $-\frac{D}{2}\ln(2\pi)$ 并乘以 $-2$，得精确边界方程：
+\[
+  (x - \mu_1)^\top \Sigma_1^{-1} (x - \mu_1) + \ln|\Sigma_1|
+  = (x - \mu_2)^\top \Sigma_2^{-1} (x - \mu_2) + \ln|\Sigma_2|.
+\]
+按 $x$ 的次数整理为二次型方程：
+\[
+  x^\top \big(\Sigma_1^{-1} - \Sigma_2^{-1}\big) x
+  - 2\big(\Sigma_1^{-1}\mu_1 - \Sigma_2^{-1}\mu_2\big)^\top x
+  + \big(\mu_1^\top\Sigma_1^{-1}\mu_1 - \mu_2^\top\Sigma_2^{-1}\mu_2 + \ln|\Sigma_1| - \ln|\Sigma_2|\big) = 0.
+\]
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{共享协方差情形（$\Sigma_1 = \Sigma_2 = \Sigma$，对应 LDA）}：二次项矩阵 $\Sigma_1^{-1} - \Sigma_2^{-1} = 0$ 以及对数行列式差 $\ln|\Sigma_1| - \ln|\Sigma_2| = 0$ 同时精确消去！方程退化为一条直线（仿射超平面）：
+  \[
+    \underbrace{\big[\Sigma^{-1}(\mu_1 - \mu_2)\big]^\top}_{w^\top} x
+    - \frac{1}{2}\big(\mu_1^\top \Sigma^{-1}\mu_1 - \mu_2^\top\Sigma^{-1}\mu_2\big) = 0,
+  \]
+  等价于 $w^\top\!\left(x - \frac{\mu_1 + \mu_2}{2}\right) = 0$。该直线穿过两质心中点，但其法向量为 $w = \Sigma^{-1}(\mu_1 - \mu_2)$——只要 $\Sigma$ 不是球形矩阵 $\sigma^2 I$（存在主轴拉伸与倾斜相关），$\Sigma^{-1}(\mu_1 - \mu_2)$ 便不再平行于 $\mu_1 - \mu_2$，决策直线会顺着椭圆长轴方向发生偏转（这正是第 6.4 节倾斜双椭圆上 GMM 完胜 K-Means 垂直平分线的几何奥秘！）。
+
+  \item \textbf{异方差情形（$\Sigma_1 \neq \Sigma_2$，对应 QDA）}：对称矩阵 $Q := \Sigma_1^{-1} - \Sigma_2^{-1} \neq 0$，方程保留非零二次项 $x^\top Q x + b^\top x + c = 0$。在二维平面上，依 $Q$ 的两个特征值同号、一零一非零、或异号，该方程依次刻画出\textbf{椭圆、抛物线或双曲线}等一般二次曲线决策边界。
+\end{enumerate}
+
+\subsection*{习题 6.7\quad K-Means++ 实现与多重启稳定性对比}
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{K-Means++ 初始化纯 NumPy 核心代码}：
+  \begin{lstlisting}
+def init_kmeans_pp(X, K, rng):
+    N = len(X)
+    idx = [int(rng.integers(0, N))]
+    for _ in range(1, K):
+        d2 = np.min(np.sum((X[:, None, :] - X[idx][None, :, :]) ** 2, axis=2), axis=1)
+        idx.append(int(rng.choice(N, p=d2 / np.sum(d2))))
+    return X[idx].copy()
+  \end{lstlisting}
+  \item \textbf{50 次独立重启实测自检表}（$N=300, K=5$ 个分离二维高斯团簇，\texttt{data\_seed=2026}, \texttt{trial\_seed=42}）：
+  \begin{center}\footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    \textbf{初始化方法} & 惯量均值 & 惯量中位数 & 惯量最差值 & 平均轮数 & 劣质解（$J>550$） \\
+    \midrule
+    完全随机均匀初始化 & $1082.93$ & $532.96$ & $2975.93$ & $7.72$ 轮 & $16 / 50$（$32\%$） \\
+    \textbf{K-Means++ 初始化} & $\mathbf{681.42}$ & $\mathbf{532.96}$ & $\mathbf{2054.95}$ & $\mathbf{3.82}$ \textbf{轮} & $\mathbf{5 / 50}$（$\mathbf{10\%}$） \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{实验结论}：两种方法的中位数均指向同一全局最优解 $J^* = 532.96$，但随机均匀初始化有近三分之一（$32\%$）的概率把两个质心挤进同一团簇而漏掉远处簇，平均惯量高达 $1082.93$；K-Means++ 将陷落劣质局部极小的频率压低至原来的三分之一（$10\%$），平均收敛步数同步砍半（$7.72 \to 3.82$ 轮）。
+\end{enumerate}
+
+\subsection*{习题 6.8\quad GMM-EM 协方差类型对比与 BIC 自动选 $K$ 实验}
+复用 \texttt{exp6\_kmeans\_vs\_gmm\_em} 的倾斜平行双椭圆数据集（\texttt{seed=2026}, $N = 360, D = 2$）：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+  \item \textbf{对角协方差 GMM vs 满协方差 GMM 对比}：在 M-步中把协方差更新替换为仅保留对角方差向量 \texttt{v = (gamma[:, k] @ (diff ** 2)) / Nk[k] + 1e-6} 及 \texttt{Sigmas[k] = np.diag(v)}（5 次随机种子取最大似然）：
+  \begin{itemize}
+    \item \textbf{满协方差 GMM}：聚类纯度 $\mathbf{100.00\%}$，最终对数似然 $\ell = -1286.45$；
+    \item \textbf{对角协方差 GMM}：聚类纯度断崖式暴跌至 $\mathbf{55.00\%}$（下降了整整 $45$ 个百分点，与 K-Means 的球形溃败几乎一样惨！），最终对数似然骤降至 $\ell = -1525.01$。
+  \end{itemize}
+  \textbf{几何成因}：对角协方差强行令非对角项 $\Sigma_{12} = 0$，把每个高斯等高线死锁在\textbf{水平/竖直轴对齐椭圆}内，完全丧失了旋转椭圆去贴合 $45^\circ$ 倾斜双带的能力；因此它被迫像 K-Means 一样从腰部横劈两条平行带（把左下两半合成一簇、右上两半合成另一簇）。
+
+  \item \textbf{满协方差 GMM 遍历 $K \in \{1, 2, 3, 4, 5\}$ 的 BIC 自动选簇实测表}：
+  二维满协方差 GMM 的独立参数量为 $p_K = (K-1) + 2K + 3K = 6K - 1$，$\operatorname{BIC}(K) = -2\ell(\hat{\theta}_K) + p_K \ln N$（$\ln 360 \approx 5.8861$）。每组运行 3 个随机种子（各 80 轮 EM）取最大似然，得实测结果：
+  \begin{center}\small
+  \begin{tabular}{@{}ccccc@{}}
+    \toprule
+    簇数 $K$ & 独立参数量 $p_K = 6K - 1$ & 最大对数似然 $\ell(\hat{\theta}_K)$ & 复杂度惩罚 $p_K\ln 360$ & $\operatorname{BIC}(K)$ \\
+    \midrule
+    $K = 1$ & $5$ & $-1520.36$ & $29.43$ & $3070.15$ \\
+    $\mathbf{K = 2}$ & $\mathbf{11}$ & $\mathbf{-1286.45}$ & $\mathbf{64.75}$ & $\mathbf{2637.65}$ \textbf{（全局最小）} \\
+    $K = 3$ & $17$ & $-1283.36$ & $100.06$ & $2666.77$ \\
+    $K = 4$ & $23$ & $-1275.51$ & $135.38$ & $2686.40$ \\
+    $K = 5$ & $29$ & $-1274.24$ & $170.70$ & $2719.19$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{核心洞察}：训练对数似然 $\ell(\hat{\theta}_K)$ 随 $K$ 从 $1$ 增至 $5$ \textbf{单调严格上升}（$-1520.36 \to -1274.24$），因而绝不能直接看似然选簇数；而 $\operatorname{BIC}(K)$ 在 $K=1 \to 2$ 时因似然暴涨 $+233.9$ 而陡降 $432.5$，但在 $K \ge 3$ 之后每多拆一个冗余簇带来的微小似然收益远不足以抵消 $+6\ln 360 \approx +35.3$ 的复杂度罚金，从而精准在真实簇数 $\mathbf{K = 2}$ 处锁定全局最小值！
+\end{enumerate}

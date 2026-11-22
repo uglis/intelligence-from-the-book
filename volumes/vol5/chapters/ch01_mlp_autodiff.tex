@@ -1,0 +1,642 @@
+\chapter[多层感知机与反向模式自动微分]{多层感知机与反向模式自动微分}
+\label{ch:mlp-autodiff}
+
+\chapEpigraph{凡是我不能亲手创造的，我就不算真正理解。}{Richard P. Feynman（理查德·费曼，黑板遗言，1988）}
+
+\begin{chapIntro}{本章导读：打开深度学习的第一块基石}
+在前面四卷中，我们的模型大多拥有显式而紧凑的数学结构：线性回归、逻辑回归、支持向量机、决策树与高斯混合模型。只要特征空间固定，我们就能用纸笔写出损失函数对每个参数的闭合梯度。然而，当问题变为“从像素识别猫狗”或“从上下文预测下一个词”时，人工设计线性可分特征几乎成为不可能的任务。
+
+本章完成从“浅层线性模型”到“深度可微计算”的决定性一跃：
+\begin{enumerate}
+  \item \textbf{表达力之源}：分析线性模型为何在异或（XOR）与双月（Two-Moons）数据上必然折戟，揭示 ReLU 多层感知机（MLP）通过\textbf{分段线性空间折叠}实现万能逼近的构造性原理。
+  \item \textbf{自动微分的核心引擎}：严格区分符号微分、数值差分与自动微分；从雅可比矩阵出发对比前向模式（JVP）与反向模式（VJP），证明为何反向模式仅用 $O(1)$ 倍前向计算代价即可一次求出标量损失对百万乃至百亿参数的全部梯度。
+  \item \textbf{亲手构造与张量向量化}：逐节点手算一个非线性计算图的前向与反向过程，用约 60 行纯 Python 写出反向模式自动微分引擎并与 PyTorch \texttt{autograd} 互验至机器精度（误差 \texttt{0.00e+00}）；随后推导出矩阵仿射层、ReLU 与数值稳定融合交叉熵的张量 VJP，并在双月数据集上用纯 NumPy 实测验证。
+\end{enumerate}
+\end{chapIntro}
+
+\section{线性模型的天花板与 ReLU 折叠几何}
+\label{sec:mlp-geometry}
+
+\subsection{为什么线性模型注定无法解开异或与双月}
+
+一个二分类线性模型（如第 4 卷中的逻辑回归或线性感知机）对输入 $x \in \R^d$ 计算仿射得分 $z = w^\top x + b$，其决策边界是单张超平面
+\[
+  \mathcal{H} = \{x \in \R^d : w^\top x + b = 0\},
+\]
+它将整个输入空间 $\R^d$ 切成两个凸半空间 $\mathcal{H}^+ = \{w^\top x + b \ge 0\}$ 与 $\mathcal{H}^- = \{w^\top x + b < 0\}$。这意味着：\textbf{线性分类器所能表示的任何一类决策区域都必须是凸集}。
+
+\begin{thmBox}
+\begin{proposition}[异或问题（XOR）的线性不可分性]
+\label{prop:xor-inseparable}
+设二维数据集包含四个点：$x^{(1)} = (0,0)^\top, x^{(4)} = (1,1)^\top$ 属于负类（$y=0$），$x^{(2)} = (0,1)^\top, x^{(3)} = (1,0)^\top$ 属于正类（$y=1$）。不存在任何 $w \in \R^2$ 与 $b \in \R$，使得对正类样本严格有 $w^\top x + b > 0$ 而对负类样本严格有 $w^\top x + b < 0$。
+\end{proposition}
+\begin{proof}
+反证法。假设存在 $(w_1, w_2, b) \in \R^3$ 满足上述严格分离条件，则四个点分别给出四个不等式：
+\begin{align*}
+  (0,0):\quad & b < 0, & (1,1):\quad & w_1 + w_2 + b < 0, \\
+  (0,1):\quad & w_2 + b > 0, & (1,0):\quad & w_1 + b > 0.
+\end{align*}
+将前两式相加得 $w_1 + w_2 + 2b < 0$；将后两式相加得 $w_1 + w_2 + 2b > 0$，矛盾。从凸几何视角看，正类线段与负类线段在中心点 $(\frac{1}{2}, \frac{1}{2})$ 处相交，两类凸包不分离，故不可能被任何单一超平面分开。
+\end{proof}
+\end{thmBox}
+
+Minsky 与 Papert（1969）在《感知机》一书中将这一简洁的凸几何事实推至台前，曾让单层神经网络陷入第一次低谷。在更贴近现实数据的\textbf{双月（Two-Moons）}分布中，两个半环形流形相互咬合，任何单一直线都无法绕过弯钩将两者完整切开（后文实验~\ref{sec:exp-moons} 中线性逻辑回归的准确率将被死死卡在 $89.17\%$）。
+
+打破这一天花板的核心思想异常朴素：\textbf{在最终的线性分类器之前，先学习一个非线性坐标变换 $\phi_\theta: \R^d \to \R^m$，把原始空间中互相纠缠的流形“拉直、折叠”到新的表示空间，使其线性可分}。如果将这样的“仿射变换 + 逐元素非线性”复合 $L$ 层，就得到了\textbf{多层感知机（Multilayer Perceptron, MLP）}。
+
+\begin{defBox}
+\begin{definition}[多层感知机与激活函数]
+设输入为 $h^{(0)} = x \in \R^{d_0}$。一个 $L$ 层全连接前馈网络（MLP）由权重矩阵 $W^{(l)} \in \R^{d_l \times d_{l-1}}$、偏置向量 $b^{(l)} \in \R^{d_l}$ 与逐元素非线性激活函数 $\sigma: \R \to \R$ 定义，逐层递推：
+\begin{equation}
+  z^{(l)} = W^{(l)} h^{(l-1)} + b^{(l)}, \qquad h^{(l)} = \sigma\!\left(z^{(l)}\right), \qquad l = 1, \dots, L-1,
+  \label{eq:mlp-def}
+\end{equation}
+最终输出层通常为线性映射 $\hat{y} = z^{(L)} = W^{(L)} h^{(L-1)} + b^{(L)} \in \R^{d_L}$。若省略非线性（即令 $\sigma(z)=z$），则无论堆叠多少层，复合映射 $\hat{y} = W^{(L)} \cdots W^{(1)} x + \tilde{b}$ 仍退化为单层仿射变换，毫无表达力增益。
+\end{definition}
+\end{defBox}
+
+现代深度学习中最基础、也最具代表性的激活函数是\textbf{修正线性单元（ReLU）}：
+\[
+  \ReLU(z) = \max(0, z).
+\]
+与早期常用的 $\mathrm{sigmoid}(z) = (1+e^{-z})^{-1}$ 或 $\tanh(z)$ 相比，ReLU 在正半轴导数恒为 $1$，不会因输入幅度增大而饱和（第~\ref{ch:train-dynamics} 章将定量展示其对梯度传播的巨大优势），且计算只需一次比较与置零。
+
+\subsection{ReLU 的几何本质：空间折叠与分段线性区域}
+
+理解 ReLU 网络最深刻的方式不是把它看成神秘的“生物神经元”，而是把它看成\textbf{折纸几何}。
+
+考虑隐藏层中的第 $j$ 个神经元 $h_j = \ReLU(w_j^\top x + b_j)$。它在输入空间 $\R^d$ 中画出一张超平面 $w_j^\top x + b_j = 0$：超平面一侧的点保持仿射值不变，另一侧的点全部被压扁到 $0$。这就好比沿一条折痕将纸面的一侧折平。若第一隐藏层有 $m$ 个 ReLU 神经元，它们在 $\R^d$ 中画出 $m$ 张超平面，将空间划分为若干凸多面体区域；在每个区域内部，每个 ReLU 的开关状态（激活或关闭）是恒定的，因此整个网络在该区域内是一个\textbf{纯粹的线性函数}。
+
+用手工构造就能瞬间解决异或问题：设隐藏层含两个 ReLU 神经元
+\[
+  h_1 = \ReLU(x_1 + x_2 - 0.5), \qquad h_2 = \ReLU(x_1 + x_2 - 1.5),
+\]
+再令输出层为 $z = h_1 - 2 h_2 - 0.25$。逐点代入四个角点即可验算：
+\begin{itemize}
+  \item $(0,0) \mapsto (h_1, h_2) = (0, 0) \mapsto z = -0.25 < 0$；
+  \item $(0,1)$ 与 $(1,0) \mapsto (h_1, h_2) = (0.5, 0) \mapsto z = +0.25 > 0$；
+  \item $(1,1) \mapsto (h_1, h_2) = (1.5, 0.5) \mapsto z = 1.5 - 1.0 - 0.25 = +0.25$？注意修正系数：若取 $z = h_1 - 2 h_2 - 0.25$，在 $(1,1)$ 处 $h_1 - 2h_2 = 0.5$ 仍为正！再检查一次：在 $(1,1)$ 处 $h_1 = 1.5, h_2 = 0.5$，我们需要 $z(1,1) < 0$ 且 $z(0,1) > 0$。令 $h_1 = \ReLU(x_1 + x_2 - 0.5)$、$h_2 = \ReLU(x_1 + x_2 - 1.0)$，则四个点映射为：
+  \[
+    (0,0)\mapsto (0,0),\quad (0,1),(1,0)\mapsto (0.5, 0),\quad (1,1)\mapsto (1.5, 1.0).
+  \]
+  取输出 $z = 2h_1 - 4h_2 - 0.5$：在 $(0,0)$ 处 $z = -0.5 < 0$；在 $(0,1),(1,0)$ 处 $z = 1.0 - 0 - 0.5 = +0.5 > 0$；在 $(1,1)$ 处 $z = 3.0 - 4.0 - 0.5 = -1.5 < 0$！两个负类点在隐藏空间中被折叠到了同一侧，单张直线 $2h_1 - 4h_2 = 0.5$ 便将 XOR 完美分开。
+\end{itemize}
+
+更令人惊叹的是\textbf{深度带来的指数级折叠效应}。根据超平面排列的 Zaslavsky 计数定理，$m$ 张超平面在 $\R^d$ 中最多分出 $\sum_{k=0}^{d} \binom{m}{k} = O(m^d)$ 个线性区域；因此宽度为 $m$ 的单隐藏层 ReLU 网络在线性区域数上随 $m$ 呈多项式增长。然而，当我们将 $L$ 层宽度为 $m$（$m \ge d$）的 ReLU 层串联时，每一层都能把上一层所有线性区域\emph{同步再折叠一次}，Montúfar 等人（2014）证明其最大线性区域数可达 $\Omega\!\left((m/d)^{(L-1)d} m^d\right)$——随深度 $L$ 呈\textbf{指数增长}！这从几何上解释了为何“深而窄”的现代架构往往比“浅而宽”的网络更高效地表示复杂函数。
+
+\subsection{万能逼近定理的一维构造性直觉}
+
+单隐藏层神经网络究竟能逼近多大范围的函数？Cybenko（1989）与 Hornik（1991）证明了著名的\textbf{万能逼近定理（Universal Approximation Theorem）}。与其抽象地援引 Hahn-Banach 定理，不如直接用 ReLU 搭出“三角形帐篷（帽函数）”，在十行之内亲眼看见它的构造性证明。
+
+\begin{thmBox}
+\begin{theorem}[一维 ReLU 双层网络的构造性万能逼近]
+\label{thm:uat-1d}
+设 $f: [0, 1] \to \R$ 是闭区间上的任意连续函数。对任意精度 $\epsilon > 0$，存在一个仅有单个隐藏层的 ReLU 神经网络
+\[
+  \hat{f}(x) = c_0 + \sum_{k=1}^{M} a_k\,\ReLU(x - t_k),
+\]
+使得 $\sup_{x \in [0, 1]} \abs{f(x) - \hat{f}(x)} < \epsilon$。
+\end{theorem}
+\begin{proof}
+由于 $f$ 在紧集 $[0, 1]$ 上连续，故 $f$ 一致连续：存在步长 $h = 1/N$（$N \in \N^+$），使得只要 $\abs{x - x'} \le h$，就有 $\abs{f(x) - f(x')} < \epsilon/2$。记等距网格点 $x_k = k h$（$k = 0, 1, \dots, N$）。
+
+\textbf{第一步（构造分段线性插值）}：在每个子区间 $[x_k, x_{k+1}]$ 上，用连接 $(x_k, f(x_k))$ 与 $(x_{k+1}, f(x_{k+1}))$ 的直线段构造连续分段线性函数 $g(x)$。对任意 $x \in [x_k, x_{k+1}]$，存在 $\lambda \in [0, 1]$ 使 $g(x) = (1-\lambda)f(x_k) + \lambda f(x_{k+1})$，因此
+\[
+  \abs{f(x) - g(x)} \le (1-\lambda)\abs{f(x) - f(x_k)} + \lambda \abs{f(x) - f(x_{k+1})} < \frac{\epsilon}{2} < \epsilon.
+\]
+
+\textbf{第二步（用 ReLU 组合精确表示 $g(x)$）}：利用标准三角帽基函数（每个帽函数由 3 个 ReLU 线性组合而成）：
+\[
+  \phi_k(x) = \frac{1}{h}\Big(\ReLU(x - x_{k-1}) - 2\,\ReLU(x - x_k) + \ReLU(x - x_{k+1})\Big),
+\]
+不难验证 $\phi_k(x_k) = 1$，在 $[x_{k-1}, x_k]$ 上线性上升、在 $[x_k, x_{k+1}]$ 上线性下降，且在区间 $[x_{k-1}, x_{k+1}]$ 外恒为 $0$。或者更紧凑地，利用斜率差分直接写出：设 $s_k = \frac{f(x_{k+1}) - f(x_k)}{h}$ 为第 $k$ 段斜率，则对任意 $x \in [0, 1]$，
+\[
+  g(x) = f(0) + s_0\,\ReLU(x - x_0) + \sum_{k=1}^{N-1} (s_k - s_{k-1})\,\ReLU(x - x_k).
+\]
+每当 $x$ 跨过折点 $x_k$ 时，新增的 ReLU 恰好给函数斜率补上跳变量 $s_k - s_{k-1}$，使总斜率变为 $s_k$；而在端点 $x=0$ 处 $g(0) = f(0)$。由此 $g(x)$ 就是一个含 $N$ 个隐藏 ReLU 神经元的单隐藏层网络，满足 $\sup_{x \in [0,1]}\abs{f(x) - g(x)} < \epsilon$。
+\end{proof}
+\end{thmBox}
+
+\begin{insightBox}{万能逼近定理\emph{没有}承诺什么？}
+定理~\ref{thm:uat-1d} 证明的只是\textbf{表示存在性（Expressivity）}，而不是\textbf{优化可达性}与\textbf{样本泛化性}。在高维 $\R^d$ 中，若强行用单隐藏层拼出 $d$ 维网格帐篷，所需神经元数 $N^d$ 会遭遇维度灾难；更重要的是，即使网络架构足以表达目标函数，我们还需要一种高效算法来求得梯度、并在非凸损失面上把参数优化到位——这就是本章自动微分与第~\ref{ch:train-dynamics} 章训练动力学的使命。
+\end{insightBox}
+
+\section{三种求导范式与计算图抽象}
+\label{sec:three-diff}
+
+训练一个拥有 $P$ 个参数的神经网络 $\theta \in \R^P$，核心瓶颈是在每一次迭代中计算标量损失 $\mathcal{L}(\theta) \in \R$ 对全体参数的梯度向量
+\[
+  \nabla_\theta \mathcal{L}(\theta) = \left(\frac{\partial \mathcal{L}}{\partial \theta_1}, \frac{\partial \mathcal{L}}{\partial \theta_2}, \dots, \frac{\partial \mathcal{L}}{\partial \theta_P}\right)^\top \in \R^P.
+\]
+在现代大模型中，$P$ 动辄达到 $10^7 \sim 10^{11}$。计算机科学历史上先后出现过三种计算导数的思路，它们的复杂度与精度天差地别：
+
+\begin{enumerate}
+  \item \textbf{数值微分（Numerical Differentiation）}：利用中心有限差分公式逐坐标近似
+  \[
+    \frac{\partial \mathcal{L}}{\partial \theta_i} \approx \frac{\mathcal{L}(\theta + h e_i) - \mathcal{L}(\theta - h e_i)}{2h}.
+  \]
+  它有两个致命缺陷：第一，每个参数都至少需要额外执行 $1\sim 2$ 次完整前向传播，计算全部 $P$ 个偏导需要 $O(P)$ 次前向计算，对百万参数网络完全不可行；第二，步长 $h$ 面临\textbf{截断误差} $O(h^2)$ 与浮点\textbf{舍入误差} $O(\epsilon_{\text{mach}}/h)$ 的两难权衡（在双精度下 $h \approx 10^{-5}\sim 10^{-6}$ 时最优相对误差仅约 $10^{-11}$）。因此数值微分在深度学习中绝不用于训练，但它是检验手写反向传播代码的黄金工具——\textbf{梯度检验（Gradient Checking）}。
+
+  \item \textbf{符号微分（Symbolic Differentiation）}：像 SymPy 或 Mathematica 一样，对数学表达式树反复套用乘积法则与链式法则，输出封闭的符号公式。问题在于\textbf{表达式膨胀（Expression Swell）}：考虑嵌套复合函数 $f(x) = g_L(g_{L-1}(\cdots g_1(x)\cdots))$ 或带有共享子表达式的计算，如果不显式复用中间变量，展开后的符号导数长度可能随网络深度呈指数级爆炸，且难以直接处理程序中的循环与条件分支。
+
+  \item \textbf{自动微分（Automatic Differentiation, AD）}：它既不是数值近似，也不是整式符号展开，而是\textbf{沿着程序实际执行的初等算子序列，在具体数值点上按链式法则精确传递导数}。每一个初等算子（加、乘、$\exp$、$\tanh$、矩阵乘）的局部导数早已写成固定规则，中间变量被缓存复用，既彻底消除表达式膨胀，又达到机器浮点精度（无截断误差）。
+\end{enumerate}
+
+\begin{defBox}
+\begin{definition}[计算图（Computational DAG）]
+任何由初等可微算子复合而成的程序执行轨迹，都可以表示为一个\textbf{有向无环图（DAG）} $\mathcal{G} = (\mathcal{V}, \mathcal{E})$，其顶点按拓扑序编号为 $v_1, v_2, \dots, v_K$：
+\begin{itemize}
+  \item 源节点 $v_1, \dots, v_P$ 为输入变量（参数或数据）；
+  \item 每个中间节点 $v_k$ 由其直接前驱集合 $\mathrm{pa}(k) \subset \{1, \dots, k-1\}$ 经由一个初等可微算子 $\phi_k$ 算出：$v_k = \phi_k(v_{\mathrm{pa}(k)})$；
+  \item 汇节点 $v_K = \mathcal{L}$ 为最终输出（在训练中为标量损失）。
+\end{itemize}
+对任意有向边 $(i \to k) \in \mathcal{E}$，定义其\textbf{局部导数（局部雅可比）}为 $J_{k,i} = \frac{\partial \phi_k}{\partial v_i}$。
+\end{definition}
+\end{defBox}
+
+按拓扑序从 $v_1$ 计算到 $v_K$ 的过程称为\textbf{前向传播（Forward Pass）}。自动微分的全部奥秘在于：利用同一个计算图 $\mathcal{G}$，我们既可以顺着拓扑序传递导数（前向模式），也可以逆着拓扑序回传导数（反向模式）。
+
+\section{前向模式（JVP）与反向模式（VJP）的数学本质}
+\label{sec:jvp-vjp}
+
+设复合函数 $f = f_L \circ f_{L-1} \circ \cdots \circ f_1 : \R^{n_0} \to \R^{n_L}$，其中第 $l$ 步输出 $v_l = f_l(v_{l-1}) \in \R^{n_l}$，对应的局部雅可比矩阵为 $J_l = \frac{\partial v_l}{\partial v_{l-1}} \in \R^{n_l \times n_{l-1}}$。根据多元微积分链式法则，整体雅可比矩阵是各层局部雅可比的连乘：
+\begin{equation}
+  J_f = \frac{\partial v_L}{\partial v_0} = J_L J_{L-1} \cdots J_2 J_1 \in \R^{n_L \times n_0}.
+  \label{eq:chain-matrix}
+\end{equation}
+矩阵乘法满足结合律，但\textbf{不同的加括号顺序会带来天壤之别的计算复杂度}！
+
+\subsection{前向模式自动微分：雅可比-向量积（JVP）}
+
+若从右向左结合式~\eqref{eq:chain-matrix}，并给定一个输入扰动方向（切向量）$\dot{v}_0 \in \R^{n_0}$，定义每个节点的\textbf{切线值（tangent）}为 $\dot{v}_k = \frac{\partial v_k}{\partial v_0} \dot{v}_0$。在拓扑序遍历中，前向模式同步推进原值与切线值：
+\begin{equation}
+  \dot{v}_k = \sum_{i \in \mathrm{pa}(k)} \frac{\partial \phi_k}{\partial v_i}\,\dot{v}_i = \operatorname{JVP}_{\phi_k}(v_{\mathrm{pa}(k)}, \dot{v}_{\mathrm{pa}(k)}).
+  \label{eq:jvp}
+\end{equation}
+如果令 $\dot{v}_0 = e_j$（第 $j$ 个标准基向量），一次前向模式传播便算出整体雅可比矩阵 $J_f$ 的\textbf{第 $j$ 列} $\frac{\partial v_L}{\partial (v_0)_j} \in \R^{n_L}$。因此，要算齐 $J_f \in \R^{n_L \times n_0}$ 的全部列，前向模式需要运行 $n_0$ 次！在数学上，前向模式等价于用\textbf{对偶数（Dual Numbers）} $a + b\varepsilon$（满足 $\varepsilon^2 = 0$）重载算术运算，因为泰勒展开立刻给出 $f(a + b\varepsilon) = f(a) + f'(a)b\,\varepsilon$。
+
+\subsection{反向模式自动微分：向量-雅可比积（VJP）}
+
+现在改从左向右结合式~\eqref{eq:chain-matrix}。给定一个输出端余切向量（对标量损失 $\mathcal{L} \in \R$ 而言，它就是标量 $1$）$\bar{v}_L \in \R^{n_L}$，为计算图中的每个节点 $v_i$ 定义其\textbf{伴随量（adjoint）}：
+\[
+  \bar{v}_i := \left(\frac{\partial v_L}{\partial v_i}\right)^\top \bar{v}_L \in \R^{n_i}.
+\]
+当 $v_L = \mathcal{L} \in \R$ 且置 $\bar{v}_L = 1$ 时，$\bar{v}_i = \nabla_{v_i} \mathcal{L}$ 恰好就是损失函数对节点 $v_i$ 的完整梯度！
+
+如何逆着拓扑序算出所有节点的伴随量？由多元链式法则，节点 $v_i$ 对最终输出 $\mathcal{L}$ 的全部影响，必须流经它的所有直接后继节点 $\mathrm{ch}(i) = \{k : (i \to k) \in \mathcal{E}\}$：
+\begin{equation}
+  \bar{v}_i = \sum_{k \in \mathrm{ch}(i)} \left(\frac{\partial \phi_k}{\partial v_i}\right)^\top \bar{v}_k = \sum_{k \in \mathrm{ch}(i)} \operatorname{VJP}_{\phi_k}(v_{\mathrm{pa}(k)}, \bar{v}_k)_i.
+  \label{eq:vjp}
+\end{equation}
+式~\eqref{eq:vjp} 有一个至关重要的工程含义：\textbf{如果一个变量在计算图中被多处复用（出度 $\abs{\mathrm{ch}(i)} > 1$），来自各个分支的反向梯度必须累加（\texttt{+=}），绝不能覆盖（\texttt{=}）}！
+
+\begin{thmBox}
+\begin{theorem}[反向模式自动微分的复杂度优势（廉价梯度原理）]
+\label{thm:cheap-gradient}
+设标量损失函数 $\mathcal{L}: \R^P \to \R$ 由计算图 $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ 计算，前向求值耗时记为 $\operatorname{Cost}(\mathcal{L})$。假设每个初等算子 $\phi_k$ 最多有常数个输入，且单次局部 VJP 的算术代价不超过其前向代价的常数倍 $c$（对加、减、乘、除及常见初等函数，$c \le 3$）。则：
+\begin{enumerate}
+  \item \textbf{反向模式}仅需\textbf{一次前向传播 + 一次反向遍历}，即可同时精确求出全部 $P$ 个偏导数 $\nabla_\theta \mathcal{L} \in \R^P$，总算术代价满足
+  \[
+    \operatorname{Cost}\!\left(\mathcal{L}, \nabla_\theta \mathcal{L}\right) \le (1 + c)\,\operatorname{Cost}(\mathcal{L}) \le 4\,\operatorname{Cost}(\mathcal{L}),
+  \]
+  \textbf{与参数量 $P$ 完全无关}（这正是 Baur-Strassen 定理的现代自动微分表述）。
+  \item \textbf{前向模式}若要计算完整梯度 $\nabla_\theta \mathcal{L}$，需要分别以 $e_1, \dots, e_P$ 为切向量运行 $P$ 趟，总代价为 $\Theta(P \cdot \operatorname{Cost}(\mathcal{L}))$。
+\end{enumerate}
+一般地，对向量映射 $f: \R^{n_0} \to \R^{n_L}$，前向模式计算完整雅可比需 $n_0$ 趟，反向模式需 $n_L$ 趟。因此：当 $n_0 \gg n_L$（深度学习训练的常态：$P \sim 10^9, n_L = 1$）时，反向模式占压倒性优势；当 $n_0 \ll n_L$（如偏微分方程灵敏度分析或计算雅可比方向导数）时，前向模式反而更优。
+\end{theorem}
+\begin{proof}
+在反向模式中，前向传播按拓扑序访问每个节点 $v_k$ 一次，耗时 $\operatorname{Cost}(\mathcal{L})$，并将中间数值缓存于内存（称为\textbf{磁带 / tape}）。反向传播严格按逆拓扑序访问每个节点 $v_k$ 一次：访问 $v_k$ 时，其所有后继节点均已处理完毕，故 $\bar{v}_k$ 已经累加完整；随后只需为每个 $i \in \mathrm{pa}(k)$ 计算局部 VJP 项 $(\partial \phi_k / \partial v_i)^\top \bar{v}_k$ 并累加到 $\bar{v}_i$。每条边 $(i \to k)$ 在全过程中恰好被正向和反向各遍历一次。对基本算术算子，乘法 $u \cdot v$ 前向需 1 次乘法，反向需 2 次乘法与 2 次累加；加法前向 1 次加法，反向仅 2 次累加。综上，反向遍历总算术运算数不超过 $c \cdot \operatorname{Cost}(\mathcal{L})$（对标准算术图 $c \le 3$，总计 $\le 4\times$），且一次遍历结束时所有源节点 $v_1, \dots, v_P$ 的伴随量 $\bar{v}_1, \dots, \bar{v}_P$ 已全部就位。
+\end{proof}
+\end{thmBox}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}p{26mm}p{26mm}p{24mm}p{26mm}X@{}}
+\toprule
+\textbf{求导方式} & \textbf{算力代价（$\R^P \to \R$）} & \textbf{数值精度} & \textbf{显存需求} & \textbf{典型用途} \\
+\midrule
+数值有限差分 & $O(P) \times$ 前向 & 截断+舍入误差 & $O(1)$ & 单元测试梯度检验 \\
+符号微分 & 易指数膨胀 & 解析精确 & 表达式易爆炸 & 小型公式化简 \\
+前向模式（JVP） & $O(P) \times$ 前向 & 机器精度 & $O(1)$（无需存激活） & $n_0 \ll n_L$、Hessian-向量积 \\
+反向模式（VJP） & $\le 4 \times$ 前向 & 机器精度 & $O(\text{前向激活数})$ & \textbf{深度学习核心训练引擎} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{手算计算图与 60 行自动微分引擎}
+\label{sec:micrograd}
+
+\subsection{一个非线性计算图的逐节点手工推演}
+
+为了彻底消除对“反向传播”的神秘感，我们严格按照配套脚本 \texttt{code/vol5\_experiments.py} 中的精确数值，手算一个单神经元均方损失计算图的前向与反向过程：
+\[
+  y = \tanh(x_1 w_1 + x_2 w_2 + b), \qquad L = (y - 0.7)^2,
+\]
+取输入与参数为 $x_1 = 2.0,\; x_2 = -1.5,\; w_1 = -0.8,\; w_2 = 1.2,\; b = 0.5$。
+
+\textbf{第一步：按拓扑序执行前向传播}（保留 6 位小数）：
+\begin{align*}
+  u_1 &= x_1 w_1 = 2.0 \times (-0.8) = -1.600000, \\
+  u_2 &= x_2 w_2 = (-1.5) \times 1.2 = -1.800000, \\
+  s   &= u_1 + u_2 = -1.600000 + (-1.800000) = -3.400000, \\
+  z   &= s + b = -3.400000 + 0.500000 = -2.900000, \\
+  y   &= \tanh(-2.900000) = -0.993963, \\
+  r   &= y - 0.7 = -1.693963, \\
+  L   &= r \cdot r = (-1.693963)^2 = 2.869511.
+\end{align*}
+
+\textbf{第二步：按逆拓扑序回传伴随量 $\bar{v} = \partial L / \partial v$}：
+\begin{enumerate}
+  \item 终点初始化：$\bar{L} = 1.000000$。
+  \item 平方节点 $L = r \cdot r$（注意变量 $r$ 在乘法中出现两次，两条边梯度累加！）：
+  \[
+    \bar{r} = r \cdot \bar{L} + r \cdot \bar{L} = 2r \bar{L} = 2 \times (-1.693963) = -3.387926.
+  \]
+  \item 减常数节点 $r = y + (-0.7)$：$\bar{y} = 1 \cdot \bar{r} = -3.387926$。
+  \item 双曲正切节点 $y = \tanh(z)$，局部导数为 $\frac{dy}{dz} = 1 - y^2 = 1 - (-0.993963)^2 = 0.012037$：
+  \[
+    \bar{z} = (1 - y^2)\,\bar{y} = 0.012037 \times (-3.387926) = -0.040781.
+  \]
+  （顺便留意：由于 $z = -2.9$ 已落入 $\tanh$ 饱和区，$1-y^2 \approx 0.012$ 把上游梯度瞬间衰减了将近两个数量级——这正是第~\ref{ch:train-dynamics} 章讨论梯度消失的微型缩影！）
+  \item 加法节点 $z = s + b$ 与 $s = u_1 + u_2$（加法节点像“梯度分流器”，将上游伴随量原样复制给每个输入）：
+  \[
+    \bar{s} = \bar{b} = \bar{z} = -0.040781, \qquad \bar{u}_1 = \bar{u}_2 = \bar{s} = -0.040781.
+  \]
+  \item 乘法节点 $u_1 = x_1 w_1$ 与 $u_2 = x_2 w_2$（乘法节点像“交叉交换器”，将上游伴随量乘以\emph{另一个}操作数的前向值）：
+  \begin{align*}
+    \bar{w}_1 &= x_1 \bar{u}_1 = 2.0 \times (-0.040781) = -0.081562, &
+    \bar{x}_1 &= w_1 \bar{u}_1 = (-0.8) \times (-0.040781) = +0.032625, \\
+    \bar{w}_2 &= x_2 \bar{u}_2 = (-1.5) \times (-0.040781) = +0.061172, &
+    \bar{x}_2 &= w_2 \bar{u}_2 = 1.2 \times (-0.040781) = -0.048937.
+  \end{align*}
+\end{enumerate}
+
+图~\ref{fig:comp-graph} 完整绘制了该计算图的前向数据流（青色实线）与反向伴随流（赭色虚线）。读者只需沿着虚线箭头把每条边上的局部导数乘起来，便能直观看到链式法则如何在图上自动展开。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=10mm and 12mm,
+  var/.style={rectangle, rounded corners=1.5mm, draw=navy, thick, fill=navyLight,
+              minimum width=23mm, minimum height=11mm, align=center, font=\scriptsize, text=ink},
+  op/.style={rectangle, rounded corners=2mm, draw=teal, thick, fill=tealLight,
+             minimum width=24mm, minimum height=12mm, align=center, font=\scriptsize, text=ink},
+  loss/.style={rectangle, rounded corners=2mm, draw=ochre, very thick, fill=ochreLight,
+               minimum width=23mm, minimum height=12mm, align=center, font=\scriptsize, text=ink},
+  fwd/.style={-{Stealth[length=2.2mm]}, thick, teal},
+  bwd/.style={-{Stealth[length=2.2mm]}, thick, ochre, dashed}
+]
+  % Input leaf nodes
+  \node[var] (x1) {$x_1 = 2.0$\\[-1pt]\textcolor{ochre}{$\bar{x}_1 = +0.0326$}};
+  \node[var, below=4mm of x1] (w1) {$w_1 = -0.8$\\[-1pt]\textcolor{ochre}{$\bar{w}_1 = -0.0816$}};
+  \node[var, below=6mm of w1] (x2) {$x_2 = -1.5$\\[-1pt]\textcolor{ochre}{$\bar{x}_2 = -0.0489$}};
+  \node[var, below=4mm of x2] (w2) {$w_2 = 1.2$\\[-1pt]\textcolor{ochre}{$\bar{w}_2 = +0.0612$}};
+  \node[var, below=6mm of w2] (b)  {$b = 0.5$\\[-1pt]\textcolor{ochre}{$\bar{b} = -0.0408$}};
+
+  % Mul nodes
+  \node[op, right=21mm of $(x1)!0.5!(w1)$] (u1) {$u_1 = x_1 w_1$\\$=-1.6000$\\[-1pt]\textcolor{ochre}{$\bar{u}_1 = -0.0408$}};
+  \node[op, right=21mm of $(x2)!0.5!(w2)$] (u2) {$u_2 = x_2 w_2$\\$=-1.8000$\\[-1pt]\textcolor{ochre}{$\bar{u}_2 = -0.0408$}};
+
+  % Add s
+  \node[op, right=24mm of $(u1)!0.5!(u2)$] (s) {$s = u_1 + u_2$\\$=-3.4000$\\[-1pt]\textcolor{ochre}{$\bar{s} = -0.0408$}};
+
+  % Add z
+  \node[op, right=11mm of s] (z) {$z = s + b$\\$=-2.9000$\\[-1pt]\textcolor{ochre}{$\bar{z} = -0.0408$}};
+
+  % Tanh y
+  \node[op, right=11mm of z] (y) {$y = \tanh(z)$\\$=-0.9940$\\[-1pt]\textcolor{ochre}{$\bar{y} = -3.3879$}};
+
+  % Loss L
+  \node[loss, right=12mm of y] (L) {$L=(y-0.7)^2$\\$=2.8695$\\[-1pt]\textcolor{ochre}{$\bar{L} = 1.0000$}};
+
+  % Forward arrows
+  \draw[fwd] (x1.east) -- (u1.west);
+  \draw[fwd] (w1.east) -- (u1.west);
+  \draw[fwd] (x2.east) -- (u2.west);
+  \draw[fwd] (w2.east) -- (u2.west);
+  \draw[fwd] (u1.east) -- (s.west);
+  \draw[fwd] (u2.east) -- (s.west);
+  \draw[fwd] (s.east) -- (z.west);
+  \draw[fwd] (b.east) -| (z.south);
+  \draw[fwd] (z.east) -- (y.west);
+  \draw[fwd] (y.east) -- (L.west);
+
+  % Backward annotations along main spine (cleanly routed outside all boxes)
+  \draw[bwd] (L.north) to[bend right=26] node[above, font=\tiny, text=ochre] {$\times\,2(y-0.7)$} (y.north);
+  \draw[bwd] (y.north) to[bend right=26] node[above, font=\tiny, text=ochre] {$\times\,(1-y^2)=0.0120$} (z.north);
+  \draw[bwd] (z.north) to[bend right=26] node[above, font=\tiny, text=ochre] {$\times\,1$} (s.north);
+  \draw[bwd] (s.north) to[out=130, in=25] node[above right, font=\tiny, text=ochre, inner sep=1pt] {$\times\,1$} (u1.east);
+  \draw[bwd] (u1.south) to[out=-115, in=-25] node[below=2pt, font=\tiny, text=ochre, fill=white, inner sep=0.8pt] {$\times\,x_1=2.0$} (w1.south east);
+
+  % Legend
+  \node[anchor=south west, font=\scriptsize, text=slate] at ($(b.south east)+(16mm,-2mm)$)
+    {\textcolor{teal}{\textbf{—— 前向传播（按拓扑序求值并缓存）}} \qquad \textcolor{ochre}{\textbf{- - - 反向模式 VJP（逆拓扑序累加伴随量）}}};
+\end{tikzpicture}}
+\caption{标量计算图的前向求值与反向模式伴随量传播。每个节点上方为前向数值，下方赭色为精确梯度 $\bar{v} = \partial L/\partial v$。}
+\label{fig:comp-graph}
+\end{figure}
+
+\subsection{从零编写 60 行反向模式自动微分引擎}
+
+下面这段不足 60 行的纯 Python 代码（取自配套实验脚本 \texttt{vol5\_experiments.py} 中的标量自动微分实验 \texttt{exp1\_micrograd\_and\_mlp}）就是 PyTorch \texttt{autograd} 与 JAX \texttt{grad} 的极简原型。它通过运算符重载动态构建计算图（Define-by-Run），并在 \texttt{backward()} 中执行深度优先拓扑排序，再逆序调用每个节点注册的局部 VJP 闭包 \texttt{\_backward}：
+
+\begin{lstlisting}[caption={极简反向模式自动微分引擎 \texttt{Value} 与 PyTorch 精度互验}]
+import math, torch
+
+class Value:
+    def __init__(self, data, _children=()):
+        self.data = float(data)
+        self.grad = 0.0
+        self._backward = lambda: None
+        self._prev = set(_children)
+
+    def __add__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data + other.data, (self, other))
+        def _b():
+            self.grad += out.grad       # 多分支复用必须用 += 累加
+            other.grad += out.grad
+        out._backward = _b
+        return out
+
+    def __mul__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data * other.data, (self, other))
+        def _b():
+            self.grad += other.data * out.grad
+            other.grad += self.data * out.grad
+        out._backward = _b
+        return out
+
+    def tanh(self):
+        t = math.tanh(self.data)
+        out = Value(t, (self,))
+        def _b():
+            self.grad += (1.0 - t * t) * out.grad
+        out._backward = _b
+        return out
+
+    def backward(self):
+        topo, visited = [], set()
+        def build(v):
+            if v not in visited:
+                visited.add(v)
+                for child in v._prev:
+                    build(child)
+                topo.append(v)          # 后序压栈 => topo 为合法拓扑序
+        build(self)
+        self.grad = 1.0
+        for node in reversed(topo):     # 逆拓扑序调用局部 VJP
+            node._backward()
+\end{lstlisting}
+
+运行 \texttt{code/vol5\_experiments.py} 中的实测校验，将上述 \texttt{Value} 引擎与双精度 PyTorch \texttt{autograd} 对比，输出为：
+\begin{itemize}
+  \item $\partial L / \partial w_1 = -0.081562$，$\partial L / \partial w_2 = +0.061172$；
+  \item 所有叶节点梯度的最大绝对误差 \texttt{max\_grad\_diff = 0.00e+00}——与工业级框架 PyTorch 达到\textbf{比特级一致}！
+\end{itemize}
+留意代码第 43 行的精妙之处：在表达式 \texttt{(y + Value(-0.7)) * (y + Value(-0.7))} 中，同一个临时节点 \texttt{r} 作为左右两个孩子传入 \texttt{\_\_mul\_\_}，其 \texttt{self.grad +=} 与 \texttt{other.grad +=} 会对同一对象执行两次累加，自动得到 $2r\bar{L}$。这正是为什么式~\eqref{eq:vjp} 要求累加而非赋值。
+
+\section{矩阵与张量算子的 VJP 推导}
+\label{sec:tensor-vjp}
+
+标量级 \texttt{Value} 清晰揭示了原理，但现实中把百万次乘法拆成百万个 Python 对象会带来巨大的解释器开销。工业深度学习框架（PyTorch/JAX/Tinygrad）的计算图节点是\textbf{多维张量（Tensor）}，局部 VJP 直接调用底层 BLAS/CUDA 矩阵乘法。本节推导神经网络最核心的三大张量算子 VJP。
+
+\begin{recallBox}{矩阵微分的“同形伴随”原则}
+为避免四阶张量下标混乱，我们始终保持\textbf{梯度与原变量同形}：对任意矩阵 $A \in \R^{m \times n}$ 和标量损失 $\mathcal{L}$，定义 $\bar{A} := \frac{\partial \mathcal{L}}{\partial A} \in \R^{m \times n}$，其第 $(i,j)$ 元素为 $\frac{\partial \mathcal{L}}{\partial A_{ij}}$。利用 Frobenius 内积 $\inner{U}{V}_F = \tr(U^\top V) = \sum_{i,j} U_{ij} V_{ij}$，一阶全微分恒有
+\[
+  d\mathcal{L} = \inner{\bar{A}}{dA}_F = \tr(\bar{A}^\top dA).
+\]
+只要把 $d\mathcal{L} = \inner{\bar{Y}}{dY}_F$ 化为 $\inner{\text{某矩阵}}{dX}_F$，该矩阵就必为 $\bar{X}$——极其干净且绝不会转置出错！
+\end{recallBox}
+
+\subsection{批量仿射层（Linear Layer）：$Y = XW + \mathbf{1}_N b^\top$}
+
+设小批量输入 $X \in \R^{N \times d_{\text{in}}}$，权重 $W \in \R^{d_{\text{in}} \times d_{\text{out}}}$，偏置 $b \in \R^{d_{\text{out}}}$，输出 $Y = XW + \mathbf{1}_N b^\top \in \R^{N \times d_{\text{out}}}$（其中 $\mathbf{1}_N \in \R^N$ 为全 1 列向量，对应广播加法）。已知上游传入的梯度 $\bar{Y} \in \R^{N \times d_{\text{out}}}$。
+
+\begin{thmBox}
+\begin{proposition}[批量仿射层的张量 VJP]
+\label{prop:linear-vjp}
+对于 $Y = XW + \mathbf{1}_N b^\top$，关于 $X, W, b$ 的反向模式 VJP 为：
+\begin{equation}
+  \bar{X} = \bar{Y} W^\top \in \R^{N \times d_{\text{in}}}, \qquad
+  \bar{W} = X^\top \bar{Y} \in \R^{d_{\text{in}} \times d_{\text{out}}}, \qquad
+  \bar{b} = \bar{Y}^\top \mathbf{1}_N = \sum_{n=1}^{N} \bar{Y}_{n,:}^\top \in \R^{d_{\text{out}}}.
+  \label{eq:linear-vjp}
+\end{equation}
+\end{proposition}
+\begin{proof}
+对 $Y = XW + \mathbf{1}_N b^\top$ 取全微分得 $dY = (dX) W + X (dW) + \mathbf{1}_N (db)^\top$。代入 Frobenius 迹恒等式，并利用迹的循环不变性 $\tr(ABC) = \tr(CAB)$：
+\begin{align*}
+  d\mathcal{L} = \tr(\bar{Y}^\top dY)
+  &= \tr\!\left(\bar{Y}^\top (dX) W\right) + \tr\!\left(\bar{Y}^\top X (dW)\right) + \tr\!\left(\bar{Y}^\top \mathbf{1}_N (db)^\top\right) \\
+  &= \tr\!\left((W \bar{Y}^\top) dX\right) + \tr\!\left((\bar{Y}^\top X) dW\right) + \tr\!\left((\mathbf{1}_N^\top \bar{Y}) db\right) \\
+  &= \tr\!\left((\bar{Y} W^\top)^\top dX\right) + \tr\!\left((X^\top \bar{Y})^\top dW\right) + \inner{\bar{Y}^\top \mathbf{1}_N}{db}.
+\end{align*}
+逐项比对系数即得式~\eqref{eq:linear-vjp}。
+\end{proof}
+\end{thmBox}
+
+一个极实用的心算验证法是\textbf{维度匹配}：$\bar{X}$ 必须与 $X$ 同形（$N \times d_{\text{in}}$），由 $\bar{Y}$ ($N \times d_{\text{out}}$) 和 $W$ ($d_{\text{in}} \times d_{\text{out}}$) 拼出 $N \times d_{\text{in}}$ 的唯一合法乘积就是 $\bar{Y} W^\top$；同理拼出 $\bar{W}$ ($d_{\text{in}} \times d_{\text{out}}$) 的唯一乘积就是 $X^\top \bar{Y}$；而前向传播把 $b$ 沿批量维\emph{广播复制}了 $N$ 份，反向传播则必须沿批量维\textbf{求和归约}。
+
+\subsection{逐元素激活层：ReLU 的次梯度 VJP}
+
+对于 $H = \ReLU(Z) = \max(0, Z)$，由于算子逐元素独立作用，给定上游梯度 $\bar{H}$，有
+\begin{equation}
+  \bar{Z} = \bar{H} \had \mathbb{I}[Z > 0],
+  \label{eq:relu-vjp}
+\end{equation}
+其中 $\had$ 表示 Hadamard 逐元素乘积，$\mathbb{I}[Z > 0]$ 是与 $Z$ 同形的 $0/1$ 掩码矩阵。尽管 $\ReLU$ 在原点 $z = 0$ 处不可导，其 Clarke 次微分集合为 $[0, 1]$，实践中框架按约定取 $0$（在连续浮点分布下精确命中 $0$ 的概率几乎为零，且次梯度下降理论依然适用）。注意：为了在反向传播时计算式~\eqref{eq:relu-vjp}，前向传播必须缓存 $Z > 0$ 的布尔掩码（或缓存 $H$），这正是反向模式显存占用的直接来源。
+
+\subsection{数值稳定的融合 LogSumExp 与交叉熵 VJP}
+
+在多分类任务中，网络最后一层输出未归一化的逻辑得分（logits）$z \in \R^C$，经由 Softmax 变为概率分布 $p_k = \frac{e^{z_k}}{\sum_{j=1}^C e^{z_j}}$，再与独热标签 $y \in \{0, 1\}^C$（$\sum_k y_k = 1$）计算交叉熵损失 $\ell(z, y) = -\sum_{k=1}^C y_k \log p_k$。
+
+若天真地先算 \texttt{exp(z)} 再取 \texttt{log}，当 $z_k = 100$ 时，单精度浮点 \texttt{exp(100)} 直接上溢成 \texttt{inf}，导致 \texttt{inf / inf = NaN}。解决方法是利用平移不变性：令 $m = \max_j z_j$，则
+\begin{equation}
+  \log \sum_{j=1}^C e^{z_j} = m + \log \sum_{j=1}^C e^{z_j - m}.
+  \label{eq:lse-trick}
+\end{equation}
+由于 $z_j - m \le 0$，所有指数项严格落在 $(0, 1]$ 内，且至少有一项等于 $1$，彻底杜绝上溢与 $\log(0)$ 下溢！将 Softmax 与交叉熵\textbf{融合（Fuse）}后，单样本损失写为
+\[
+  \ell(z, y) = -\sum_{k=1}^C y_k \left(z_k - \log \sum_{j=1}^C e^{z_j}\right) = \log \sum_{j=1}^C e^{z_j} - \sum_{k=1}^C y_k z_k.
+\]
+
+\begin{thmBox}
+\begin{proposition}[融合 Softmax + 交叉熵的简洁 VJP]
+\label{prop:ce-vjp}
+对批量大小 $N$、样本 $n = 1, \dots, N$ 的平均交叉熵损失 $\mathcal{L} = \frac{1}{N}\sum_{n=1}^N \ell(z^{(n)}, y^{(n)})$，其关于 logits 矩阵 $Z \in \R^{N \times C}$ 的梯度为：
+\begin{equation}
+  \frac{\partial \mathcal{L}}{\partial Z} = \frac{1}{N}(P - Y), \qquad P_{n,k} = \softmax(z^{(n)})_k.
+  \label{eq:ce-vjp}
+\end{equation}
+\end{proposition}
+\begin{proof}
+对单个样本 $z \in \R^C$ 求第 $k$ 个分量的偏导：
+\[
+  \frac{\partial \ell}{\partial z_k} = \frac{\partial}{\partial z_k}\left(\log \sum_{j=1}^C e^{z_j}\right) - y_k = \frac{e^{z_k}}{\sum_{j=1}^C e^{z_j}} - y_k = p_k - y_k.
+\]
+对批量中 $N$ 个样本取算术平均，即得 $\bar{Z} = \frac{1}{N}(P - Y)$。二分类 Logistic 损失 $\ell(z, y) = \log(1 + e^z) - y z$ 是 $C=2$ 时的特例，其梯度同样是极其优雅的 $\frac{1}{N}(\sigma(z) - y)$。
+\end{proof}
+\end{thmBox}
+
+式~\eqref{eq:ce-vjp} 是深度学习中最赏心悦目的抵消之一：Softmax 的雅可比矩阵原本是复杂的 $C \times C$ 稠密矩阵 $\diag(p) - pp^\top$，交叉熵的导数带有危险的 $-y_k / p_k$ 除法（当 $p_k \to 0$ 时爆炸），两者分开求导既慢又不稳定；而将它们融合后，所有危险的除法在代数上精确抵消，只剩“预测概率减去真实标签”这一完全有界（落在 $[-1, 1]$）的误差信号！这就是 PyTorch 强烈推荐使用 \texttt{F.cross\_entropy(logits, target)} 而非手动串联 \texttt{F.softmax} 与 \texttt{torch.log} 的根本原因。
+
+\section{实测验证：纯 NumPy 手写 MLP 攻克双月流形}
+\label{sec:exp-moons}
+
+现在我们把式~\eqref{eq:linear-vjp}、\eqref{eq:relu-vjp} 与~\eqref{eq:ce-vjp} 拼装成一个\textbf{零框架依赖}的纯 NumPy 两层 ReLU MLP（结构 $2 \to 32 \to 1$），并在经典的二维双月数据集（$N = 240$ 个样本，噪声标准差 $\sigma = 0.10$，随机种子 $2026$）上与线性逻辑回归同台竞技。
+
+\begin{lstlisting}[caption={纯 NumPy 2 层 ReLU MLP 的前向与手动 VJP 反向传播（摘自 \texttt{vol5\_experiments.py}）}]
+# 前向传播：X (240, 2) -> W1 (2, 32) -> ReLU -> W2 (32, 1) -> sigmoid
+h_pre = X @ W1 + b1
+h = np.maximum(0.0, h_pre)
+zm = (h @ W2 + b2).ravel()
+pm = 1.0 / (1.0 + np.exp(-np.clip(zm, -30, 30)))
+mlp_loss = float(np.mean(np.logaddexp(0, zm) - y * zm))  # 数值稳定二元交叉熵
+
+# 反向传播：严格按式 (1.4)-(1.7) 逐层执行张量 VJP
+dzm = ((pm - y) / len(y))[:, None]      # (N, 1)，融合 Sigmoid + BCE 梯度
+dW2 = h.T @ dzm                         # (32, 1)
+db2 = np.sum(dzm, axis=0)               # (1,)
+dh = dzm @ W2.T                         # (N, 32)
+dh_pre = dh * (h_pre > 0)               # ReLU 门控掩码 VJP
+dW1 = X.T @ dh_pre                      # (2, 32)
+db1 = np.sum(dh_pre, axis=0)            # (32,)
+\end{lstlisting}
+
+图~\ref{fig:mlp-moons} 直接读取实测记录文件 \texttt{data/mlp\_moons.csv}，对比了 600 轮梯度下降中两者的损失与准确率演化轨迹：
+\begin{itemize}
+  \item \textbf{线性逻辑回归}（学习率 $\eta = 0.40$）：前 150 轮迅速找到最优分割直线后便撞上几何天花板；第 480 至 600 轮准确率彻底停滞于 \textbf{89.17\%}，交叉熵损失停在 \textbf{0.2305}（\texttt{0.23054}）。再增加迭代次数也无济于事——这正是欠拟合与表示能力不足的典型指纹。
+  \item \textbf{两层 ReLU MLP}（$2 \to 32 \to 1$，学习率 $\eta = 0.45$）：32 个隐藏神经元在平面上切出多段折线，逐渐将两个半月弯钩完整包裹分离；第 150 轮准确率已达 $95.00\%$，第 510 轮起稳定达到 \textbf{99.17\%}，最终第 600 轮损失降至 \textbf{0.0460}（\texttt{0.04603}），仅为线性基线的五分之一。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left panel: Loss
+  \begin{axis}[
+    name=lossplot,
+    width=0.47\linewidth, height=5.8cm,
+    xlabel={训练轮数（Epoch）},
+    ylabel={二元交叉熵损失},
+    xmin=-12, xmax=612, ymin=0, ymax=0.80,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    title={\small\sffamily\bfseries (a) 训练损失对比},
+    legend style={at={(0.97,0.96)}, anchor=north east, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, very thick, mark=square*, mark size=1.4pt, mark repeat=3]
+      table[x=epoch, y=lin_loss, col sep=comma]{data/mlp_moons.csv};
+    \addlegendentry{线性模型（终值 0.2305）}
+    \addplot[teal, very thick, mark=*, mark size=1.4pt, mark repeat=3]
+      table[x=epoch, y=mlp_loss, col sep=comma]{data/mlp_moons.csv};
+    \addlegendentry{ReLU MLP（终值 0.0460）}
+  \end{axis}
+
+  % Right panel: Accuracy
+  \begin{axis}[
+    at={(lossplot.east)}, anchor=west, xshift=1.4cm,
+    width=0.47\linewidth, height=5.8cm,
+    xlabel={训练轮数（Epoch）},
+    ylabel={分类准确率（\%）},
+    xmin=-12, xmax=612, ymin=48, ymax=103,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    title={\small\sffamily\bfseries (b) 分类准确率对比},
+    legend style={at={(0.97,0.05)}, anchor=south east, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, very thick, mark=square*, mark size=1.4pt, mark repeat=3]
+      table[x=epoch, y=lin_acc, col sep=comma]{data/mlp_moons.csv};
+    \addlegendentry{线性模型（停滞 89.17\%）}
+    \addplot[teal, very thick, mark=*, mark size=1.4pt, mark repeat=3]
+      table[x=epoch, y=mlp_acc, col sep=comma]{data/mlp_moons.csv};
+    \addlegendentry{ReLU MLP（达到 99.17\%）}
+    \draw[dashed, slate, thin] (axis cs:0, 89.17) -- (axis cs:600, 89.17);
+  \end{axis}
+\end{tikzpicture}
+\caption{双月数据集（$N=240$）上的实测训练曲线（读取自 \texttt{data/mlp\_moons.csv}）。线性分类器受限于单一超平面在 $89.17\%$ 处停滞，而 32 单元纯 NumPy ReLU MLP 凭借分段线性折叠达到 $99.17\%$。}
+\label{fig:mlp-moons}
+\end{figure}
+
+\begin{failBox}{自动微分与 MLP 实现中的三大经典踩坑}
+\begin{enumerate}
+  \item \textbf{死亡 ReLU（Dead ReLU）}：若某隐藏神经元因过大的学习率或负偏置，在全体训练样本上均满足 $w_j^\top x + b_j < 0$，则由式~\eqref{eq:relu-vjp} 知其梯度恒为 $0$，此后参数永远无法更新、该神经元永久“死亡”。缓解手段包括合理控制学习率、采用 Kaiming 初始化（第~\ref{ch:train-dynamics} 章），或在需要时改用 LeakyReLU（$\max(\alpha z, z)$）、GELU 或 SiLU/SwiGLU（第 4 章 Transformer 标配）。
+  \item \textbf{忘记调用 \texttt{optimizer.zero\_grad()}}：正如我们在 \texttt{Value} 引擎中看到的，为了正确处理多分支复用，PyTorch 默认将每次 \texttt{loss.backward()} 算出的梯度\textbf{累加}到 \texttt{param.grad} 中！如果在训练循环中忘记清空上一轮的梯度，参数更新方向就会变成历史所有小批量梯度的总和，导致训练发散或极度诡异的震荡。（反过来，刻意在 $K$ 个微批量后再清零，就是大模型显存受限时常用的\textbf{梯度累积（Gradient Accumulation）}技巧。）
+  \item \textbf{隐式广播形状陷阱与原地修改（In-place）破坏磁带}：在 NumPy/PyTorch 中，若把形状为 \texttt{(N, 1)} 的预测与形状为 \texttt{(N,)} 的标签相减，广播机制会静默生成一个 \texttt{(N, N)} 的巨大矩阵，损失看似在下降却早已算错全部样本配对！务必对中间张量加 \texttt{assert} 断言形状。此外，在 PyTorch 中对需要参与反向求导的激活值执行原地修改（如 \texttt{h += 1} 或 \texttt{relu\_} 覆盖了计算局部导数所需的旧值），会直接触发运行时版本计数器报错。
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{梯度检查点（Activation Checkpointing）：用算力换显存}
+由定理~\ref{thm:cheap-gradient} 可知，反向模式自动微分虽然在\textbf{时间}上仅耗 $\le 4\times$ 前向计算，却付出了沉重的\textbf{空间}代价：它必须把全部 $L$ 层的中间激活值留在 GPU 显存里，等待反向遍历时计算局部 VJP。对于一个 $L$ 层深度网络，激活显存随深度线性增长为 $O(L)$；在训练百亿参数大模型和超长上下文时，激活显存往往远超模型参数本身。
+
+Griewank 与 Walther（2000）以及 Chen 等人（2016）提出的\textbf{梯度检查点（Gradient Checkpointing / Activation Rematerialization）}优雅地打破了这一瓶颈：
+\begin{itemize}
+  \item \textbf{分段策略}：将 $L$ 层划分为 $\sqrt{L}$ 段，每段长度为 $\sqrt{L}$。前向传播时，仅在每段的边界保存检查点激活（共需 $O(\sqrt{L})$ 显存），丢弃段内所有中间激活。
+  \item \textbf{按需重算}：反向传播进入某一段时，从该段起点的检查点重新做一次局部前向传播，恢复该段内的 $\sqrt{L}$ 个中间激活，再完成该段反向 VJP 后立即释放。
+\end{itemize}
+这一策略将峰值激活显存从 $O(L)$ 压缩至 $O(\sqrt{L})$（对 $L=100$ 层足足节省 $10\times$ 显存！），代价仅仅是额外多做\textbf{一次}前向传播——总耗时仅增加约 $33\%$。这是现代大模型分布式训练标配技术之一，我们将在第 6 卷第 5 章（AI 系统与显存优化）中结合 FlashAttention 深入探讨。
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章确立了深度学习得以运转的两根支柱：在\textbf{表示侧}，ReLU MLP 通过多层分段线性折叠突破线性超平面的凸性牢笼，一维帽函数构造给出了万能逼近的直观证明；在\textbf{计算侧}，反向模式自动微分（VJP）沿着计算图逆拓扑序回传伴随量，以与参数量 $P$ 无关的 $O(1)$ 倍前向开销，精确求出全部梯度，并通过张量级 VJP（仿射、ReLU、融合交叉熵）无缝衔接硬件矩阵加速。
+
+然而，手握精确的自动微分引擎，是否意味着只要把 MLP 堆到 20 层、50 层就能无脑提升性能？恰恰相反——在下一章中我们会惊骇地发现，未经精心设计的 20 层 ReLU 网络在第一次前向传播结束时，信号就已经要么坍缩到 $10^{-10}$，要么爆炸到 $10^3$。打开深度训练大门的第二把钥匙，正是\textbf{深层网络的训练动力学}。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与手算热身}{巩固计算图前向/反向规则与分段线性几何直觉}
+
+\begin{enumerate}
+  \item[\textbf{5.1.1}] \textbf{三输入计算图手算}：考虑标量函数 $f(a, b, c) = \sigma(a b + c) \cdot a$，其中 $\sigma(z) = (1 + e^{-z})^{-1}$ 为 Sigmoid 函数。在点 $(a, b, c) = (2.0, -0.5, 1.0)$ 处：
+  \begin{enumerate}
+    \item 画出包含所有中间节点的计算 DAG，标出每条边的前向值；
+    \item 注意变量 $a$ 的出度为 $2$，请按逆拓扑序手算全部伴随量 $\bar{a}, \bar{b}, \bar{c}$。
+  \end{enumerate}
+  \exHint{利用 $\sigma'(z) = \sigma(z)(1-\sigma(z))$，并在计算 $\bar{a}$ 时将乘法分支与内部 $ab$ 分支的梯度相加。}
+
+  \item[\textbf{5.1.2}] \textbf{ReLU 折纸几何与 XOR 变体}：构造一个具有最少数目隐藏 ReLU 神经元的双层网络，在二维平面上精确表示“正方形指示器”的平滑近似：在正方形 $[-1, 1]^2$ 内部输出严格为正，在正方形 $[-2, 2]^2$ 外部输出严格为负。分析每个隐藏神经元对应的超平面位置。
+  \exHint{先用两个一维 ReLU 组合出区间 $[-1, 1]$ 上的梯形平台函数，再对 $x_1$ 与 $x_2$ 两个方向求和并减去阈值。}
+\end{enumerate}
+
+\exTier{B 层：定理推导与严谨证明}{掌握张量 VJP、复合算子求导与复杂度界}
+
+\begin{enumerate}
+  \item[\textbf{5.1.3}] \textbf{双线性形式与二次型的张量 VJP}：设 $x \in \R^d, A \in \R^{d \times d}$，标量函数为 $f(x, A) = x^\top A x$，另有批量矩阵乘法 $Z = X W_1 W_2$。使用 Frobenius 迹恒等式推导 $\bar{x}, \bar{A}$ 以及给定 $\bar{Z}$ 时的 $\bar{X}, \bar{W}_1, \bar{W}_2$。当 $A$ 并非对称矩阵时，$\nabla_x (x^\top A x)$ 是否仍等于 $2Ax$？
+  \exHint{展开 $d(x^\top A x) = (dx)^\top A x + x^\top (dA) x + x^\top A (dx)$，利用标量的转置等于自身将第一项改写为 $x^\top A^\top dx$。}
+
+  \item[\textbf{5.1.4}] \textbf{带标签平滑（Label Smoothing）的融合交叉熵 VJP}：现代视觉与语言模型常将独热标签 $y$ 替换为平滑目标 $\tilde{y} = (1-\varepsilon)y + \frac{\varepsilon}{C}\mathbf{1}_C$（$\varepsilon \in (0,1)$）。证明融合损失 $\ell_{\text{ls}}(z, y) = -\sum_{k=1}^C \tilde{y}_k \log \softmax(z)_k$ 关于 logits $z$ 的梯度仍为 $p - \tilde{y}$，并说明为何它等价于在原交叉熵上加了一个惩罚项 $\varepsilon \DKL(u \,\|\, p)$（$u$ 为均匀分布）。
+  \exHint{利用 $\sum_k \tilde{y}_k = 1$ 直接套用命题~\ref{prop:ce-vjp} 的证明步骤，再拆开 $-\sum_k u_k \log p_k$ 与 KL 散度比较。}
+\end{enumerate}
+
+\exTier{C 层：代码实现与数值实验}{扩展手写自动微分引擎并用数值差分检验梯度}
+
+\begin{enumerate}
+  \item[\textbf{5.1.5}] \textbf{为 \texttt{Value} 引擎补齐运算符并实现自动梯度检验}：扩展第~\ref{sec:micrograd} 节的 \texttt{Value} 类，支持幂运算 \texttt{\_\_pow\_\_}、指数 \texttt{exp()}、对数 \texttt{log()}、除法 \texttt{\_\_truediv\_\_} 与 \texttt{relu()}。编写通用函数 \texttt{grad\_check(f, xs, h=1e-6)}，用中心有限差分检验自定义 2 层标量 MLP 的所有梯度，验证相对误差小于 $10^{-8}$。
+  \exHint{除法可通过 $a / b = a \cdot b^{-1}$ 复用乘法与幂运算；注意处理相对误差分母接近 $0$ 时的平滑项 $\max(\abs{g_{\text{ad}}} + \abs{g_{\text{num}}}, 10^{-8})$。}
+
+  \item[\textbf{5.1.6}] \textbf{双月数据集上的深度 vs 宽度消融}：修改 \texttt{code/vol5\_experiments.py} 中的 \texttt{exp1\_micrograd\_and\_mlp}，在固定总参数量约 $100$ 个的条件下，比较单隐藏层（$2 \to 25 \to 1$）与双隐藏层（$2 \to 9 \to 8 \to 1$）在双月数据与同心圆数据上的收敛速度与决策边界形状。
+  \exHint{在二维网格 $[-1.5, 2.5] \times [-1.0, 1.5]$ 上评估模型输出概率并画等高线，可直观看到分段线性折痕。}
+\end{enumerate}
+
+\exTier{D 层：开放探究与前沿迁移}{连接高阶导数与计算图系统设计}
+
+\begin{enumerate}
+  \item[\textbf{5.1.7}] \textbf{Pearlmutter 技巧：免构造 Hessian 的 Hessian-向量积（HVP）}：对于拥有 $P = 10^7$ 个参数的神经网络，显式存储 $P \times P$ 的 Hessian 矩阵 $H = \nabla^2_\theta \mathcal{L}$ 需要数百 TB 内存。证明借助\textbf{一次反向模式 + 一次前向模式}（Forward-over-Reverse），可以在 $O(\operatorname{Cost}(\mathcal{L}))$ 时间与内存内精确计算任意方向 $v \in \R^P$ 上的 Hessian-向量积 $Hv = \nabla_\theta (\nabla_\theta \mathcal{L}(\theta)^\top v)$。为什么在反向-反向（Reverse-over-Reverse）模式下也能算出 $Hv$，二者常数开销有何差异？
+  \exHint{令 $g(\theta) = \nabla_\theta \mathcal{L}(\theta)$，则 $Hv$ 就是映射 $g: \R^P \to \R^P$ 沿方向 $v$ 的 JVP！也可对标量 $\phi(\theta) = g(\theta)^\top v$ 再执行一次 VJP。}
+
+  \item[\textbf{5.1.8}] \textbf{隐函数微分（Implicit Differentiation）与深度平衡模型}：假设某层的输出由不动点方程 $z^* = f_\theta(z^*, x)$ 隐式定义（如迭代求解到收敛），若直接对 100 步不动点迭代展开反向传播，需要缓存 100 份激活。利用隐函数定理证明：
+  \[
+    \frac{\partial z^*}{\partial \theta} = \left(I - \frac{\partial f_\theta(z^*, x)}{\partial z^*}\right)^{-1} \frac{\partial f_\theta(z^*, x)}{\partial \theta},
+  \]
+  并说明如何通过求解一个线性方程组，使该层反向传播的显存占用降为 $O(1)$（与前向迭代步数无关）。
+  \exHint{对等式 $z^*(\theta) = f_\theta(z^*(\theta), x)$ 两端关于 $\theta$ 求全导数并整理，再将左乘上游伴随量 $\bar{z}^*$ 转化为求解线性系统 $(I - J_z^\top) u = \bar{z}^*$。}
+\end{enumerate}

@@ -1,0 +1,126 @@
+% !TeX program = xelatex
+% Compile twice: xelatex -interaction=nonstopmode main.tex
+\documentclass[UTF8,10.5pt,a4paper,oneside,fontset=fandol,scheme=plain]{ctexbook}
+\input{preamble}
+
+\begin{document}
+\color{ink}
+
+% ==================== Cover Page (Gallery Art-Book Edition) ====================
+\frontmatter
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Architectural deep teal spine + burnished gold hairline + vertical monograph label
+  \fill[tealDark] (current page.north west) rectangle ([xshift=11mm]current page.south west);
+  \fill[gold] ([xshift=11mm]current page.north west) rectangle ([xshift=12.2mm]current page.south west);
+  \node[rotate=90, anchor=center, font=\sffamily\bfseries\scriptsize, color=tealMist, opacity=0.85]
+    at ([xshift=5.5mm]current page.west) {INTELLIGENCE FROM THE BOOK \quad $\cdot$ \quad VOLUME IV};
+
+  % Bespoke fine-art geometric SVM max-margin & convex contours motif (top-right)
+  \begin{scope}[shift={([xshift=-95mm, yshift=-20mm]current page.north east)}, scale=0.52, transform shape]
+    % Faint convex level sets
+    \begin{scope}[rotate=-18, opacity=0.11]
+      \draw[navy, line width=0.8pt] (0.2, 0.0) ellipse (2.5cm and 1.25cm);
+      \draw[navy, line width=0.7pt] (0.2, 0.0) ellipse (1.7cm and 0.85cm);
+      \draw[navy, line width=0.6pt] (0.2, 0.0) ellipse (0.95cm and 0.48cm);
+    \end{scope}
+    % Max-margin hyperplane & margin slab
+    \fill[teal, opacity=0.07] (-2.3,-1.2) -- (2.1, 1.0) -- (1.6, 1.7) -- (-2.8,-0.5) -- cycle;
+    \draw[gold, opacity=0.65, line width=1.4pt] (-2.55,-0.85) -- (1.85, 1.35);
+    \draw[teal, opacity=0.38, line width=0.85pt, dashed] (-2.3,-1.2) -- (2.1, 1.0);
+    \draw[teal, opacity=0.38, line width=0.85pt, dashed] (-2.8,-0.5) -- (1.6, 1.7);
+    % Support vectors (circled) & data points
+    \foreach \x/\y in {-1.2/-0.65, 0.6/0.25} {
+      \fill[ochre, opacity=0.55] (\x,\y) circle (2.6pt);
+      \draw[ochre, opacity=0.45, thick] (\x,\y) circle (5.2pt);
+    }
+    \foreach \x/\y in {-0.9/0.45, 0.9/1.35} {
+      \fill[teal, opacity=0.55] (\x,\y) circle (2.6pt);
+      \draw[teal, opacity=0.45, thick] (\x,\y) circle (5.2pt);
+    }
+    \foreach \x/\y in {-0.2/-1.05, 1.1/-0.45, 1.7/0.2, -1.7/-1.3} {
+      \fill[ochre, opacity=0.25] (\x,\y) circle (2.2pt);
+    }
+    \foreach \x/\y in {-1.8/0.75, -0.3/1.35, 0.2/1.65, -1.2/1.25} {
+      \fill[teal, opacity=0.25] (\x,\y) circle (2.2pt);
+    }
+  \end{scope}
+\end{tikzpicture}
+\vspace*{1mm}
+\noindent{\small\sffamily\bfseries\color{teal}天书中的智能 \;\textcolor{gold}{$\cdot$}\; 人工智能的七卷手记 \hfill 第 4 卷 \quad 2026 年 11 月版}
+\vspace{1.5mm}
+\noindent{\color{gold}\rule{30mm}{1.8pt}}{\color{tealLine}\rule{\dimexpr\linewidth-30mm\relax}{0.7pt}}
+\vspace{6.5mm}
+
+{\fontsize{25}{33}\selectfont\sffamily\bfseries\color{ink}凸优化与经典机器学习}\par
+\vspace{2.5mm}
+{\large\sffamily\color{teal}从凸分析、拉格朗日对偶与泛化理论，走向 SVM、集成树与 EM 算法}\par
+\vspace{4.5mm}
+{\small\color{slate}对标 Stanford CS229 / UC Berkeley CS189 \& EECS127 / CMU 07-380 / 南大《最优化方法》与《机器学习导论》}\par
+
+\vspace{5.5mm}
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=tealLight,
+  colframe=tealLine,
+  borderline west={2.6pt}{0pt}{tealDark},
+  arc=2mm,
+  boxrule=0.5pt,
+  left=4.5mm,right=4.5mm,top=3mm,bottom=3mm
+]
+\textbf{\sffamily\color{tealDark}本卷定位：建立统计学习思维与严格最优化功底}\par\vspace{1.2mm}
+\small
+经过前三卷的数理与智能体算法训练，本卷将正式攻克经典机器学习与最优化的核心理论——不仅知道怎么训练模型，更要从数学上回答“收敛有多快、为什么能泛化、如何突破线性边界以及怎样在无标签数据中发现隐藏结构”：
+\begin{itemize}
+  \item \textbf{凸优化与对偶理论}：严格证明 $L$-光滑下降引理、$O(1/T)$ 与强凸线性收敛率、弱对偶与 KKT 互补松弛条件，并用近端梯度（ISTA）亲手跑出 $L_1$ Lasso 稀疏路径。
+  \item \textbf{统计学习与泛化诊断}：严格推导偏差-方差-噪声分解、有限假设空间 PAC 泛化界，掌握学习曲线与 $K$ 折交叉验证诊断法。
+  \item \textbf{三大监督经典支柱}：最大间隔 SVM 与核技巧（RBF 非线性升维）、CART 决策树、随机森林（降方差证明）与梯度提升树 GBDT（函数空间负梯度降偏差）。
+  \item \textbf{无监督与隐变量推断}：从 K-Means 球形假设的失效出发，借第 2 卷 Jensen 与 KL 散度完整推导 GMM 与 EM 算法的 ELBO 单调上升定理，直通第 5 卷变分自编码器（VAE）。
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{4.5mm}
+
+\noindent\textbf{\sffamily\color{tealDark}第 4 卷章节导览}
+\vspace{1.5mm}
+
+{\footnotesize\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{@{}p{15mm}p{47mm}X@{}}
+\toprule
+\textbf{章节} & \textbf{标题} & \textbf{核心理论、完整证明与实测实验} \\
+\midrule
+序\quad 章 & 本卷坐标与八校考点覆盖对照 & 优化与 ML 如何耦合、八校对标表与本卷知识依赖 DAG \\
+第 1 章 & 凸分析与一阶优化收敛率理论 & 凸集/凸函数、$L$-光滑下降引理、PL 不等式、$O(1/T)$ 与线性收敛、动量加速实测 \\
+第 2 章 & 拉格朗日对偶、KKT 与近端梯度 & 弱/强对偶、Slater 条件、KKT 互补松弛、次梯度、软阈值 ISTA 与 Lasso 路径实测 \\
+第 3 章 & 统计学习：偏差-方差与泛化界 & 偏差-方差严格证明与实测拆解、$L_1/L_2$ 几何、$K$ 折交叉验证、PAC 界与 VC 维直觉 \\
+第 4 章 & 支持向量机（SVM）与核技巧 & 最大间隔、对偶 QP 与支持向量、软间隔合页损失、RBF 核升维与同心圆实测 \\
+第 5 章 & 决策树、随机森林与 GBDT & CART 切分（信息增益/Gini）、Bagging 降方差证明、GBDT 负梯度提升与三模型实测 \\
+第 6 章 & K-Means、高斯混合与 EM 算法 & K-Means++、GMM 软聚类、ELBO 分解与单调收敛证明、倾斜椭圆实测与第 5 卷衔接 \\
+附\quad 录 & 全卷 48 道分层习题完整精解 & 第 1--6 章 A/B/C/D 四层习题分步推导、反例验算与代码自检基准 \\
+\bottomrule
+\end{tabularx}}
+
+\vfill
+\noindent{\color{tealLine}\rule{\linewidth}{0.5pt}}
+{\footnotesize\color{slate}配套实验脚本 \texttt{code/vol4\_experiments.py} 与实测数据随本卷提供。上一卷：第 3 卷；下一卷：第 5 卷《深度学习、自动微分与现代架构》。}
+
+% ==================== Table of Contents ====================
+\clearpage
+\tableofcontents
+
+% ==================== Main Matter ====================
+\mainmatter
+\include{chapters/ch00_overview}
+\include{chapters/ch01_convex_rates}
+\include{chapters/ch02_duality_kkt_prox}
+\include{chapters/ch03_stat_learning_gen}
+\include{chapters/ch04_svm_kernels}
+\include{chapters/ch05_trees_ensembles}
+\include{chapters/ch06_kmeans_gmm_em}
+
+% ==================== Back Matter / Appendix ====================
+\appendix
+\include{chapters/app_solutions}
+
+\end{document}

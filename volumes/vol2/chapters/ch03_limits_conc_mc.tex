@@ -1,0 +1,699 @@
+\chapter[极限定理、浓度不等式与蒙特卡洛]{极限定理、浓度不等式与蒙特卡洛方法}
+\label{ch:ch3}
+
+\chapEpigraph{即便是最迟钝的人，凭某种自然本能也能明白：观察次数越多，偏离真实比例的危险就越小。}{雅各布·伯努利（Jacob Bernoulli），《猜度术》}
+
+\begin{chapIntro}{本章定位：从理想期望通往有限样本与可计算 AI 的三座桥梁}
+第 1--2 章教会了我们如何用随机变量、条件概率与多元高斯去描述“不确定性”。但在真实人工智能系统中，我们几乎永远碰不到“上帝视角”的真实期望 $\E[L(f(X), Y)]$——手头只有有限的 $n$ 条测试样本，或者一个维度高达成千上万、根本算不出解析积分的高维分布。
+
+本章正是为了回答三个直击 AI 工程命门的基础问题：
+\begin{enumerate}
+  \item \textbf{凸性与变分下界的起点}：为什么在概率建模里，\textbf{Jensen 不等式}仅凭“先映射再平均 $\ge$ 先平均再映射”一句话，就能一手催生出第 4 章的 KL 散度非负性与第 4--5 卷的 EM/VAE 证据下界（ELBO）？
+  \item \textbf{有限样本的可靠性}：只用 $n$ 条测试集算出的经验准确率 $\widehat{\mathrm{Acc}}_n$，凭什么能代表真实泛化准确率？到底需要多少测试样本，才能以 $95\%$ 的把握把误差锁死在 $\pm 3\%$ 以内？答案藏在\textbf{浓度不等式三阶梯（Markov $\to$ Chebyshev $\to$ Hoeffding）}里。
+  \item \textbf{高维期望的可计算性}：当期望积分维度 $d = 1000$、传统网格积分彻底遭遇维数灾难时，\textbf{中心极限定理（CLT）、蒙特卡洛采样与重要性采样}如何用随机性以 $O(1/\sqrt{M})$ 的维数无关速度破局？
+\end{enumerate}
+\end{chapIntro}
+
+% =========================================================================
+\section{Jensen 不等式：整个概率机器学习的凸性引擎}
+\label{sec:ch3-jensen}
+
+在展开大数定律和概率边界之前，我们先装配一把贯穿整套 AI 数学底座的“瑞士军刀”——\textbf{Jensen 不等式}。表面看它只是微积分里“凸函数图形位于切线上方”的一句概率翻译，实际上它几乎统治了信息论、统计学习与变分推断里所有最关键的不等式推导。
+
+\begin{recallBox}{一元凸函数的等价刻画（承接第 1 卷第 5 章）}
+设函数 $g: I \to \R$ 定义在区间 $I \subseteq \R$ 上。若对任意 $x_1, x_2 \in I$ 与任意权重 $\lambda \in [0, 1]$，均有
+\[
+  g\bigl(\lambda x_1 + (1-\lambda) x_2\bigr) \le \lambda g(x_1) + (1-\lambda) g(x_2),
+\]
+则称 $g$ 为\textbf{凸函数}（几何上：任意两点间的\textbf{割线位于函数曲线上方}）；若不等号对 $x_1 \neq x_2, \lambda \in (0,1)$ 严格成立，则称 $g$ 为\textbf{严格凸函数}。若 $-g$ 为凸函数，则称 $g$ 为\textbf{凹函数}。
+
+对于二阶可微函数，$g$ 为凸 $\iff g''(x) \ge 0$；且对任意内部点 $\mu \in I$，必存在过 $(\mu, g(\mu))$ 的\textbf{支撑切线}（可微时斜率 $m = g'(\mu)$，不可微时为次梯度 $m$），使得曲线处处位于切线上方：
+\begin{equation}
+  g(x) \ge g(\mu) + m(x - \mu), \qquad \forall x \in I. \label{eq:ch3-supporting-line}
+\end{equation}
+典型例子：$x^2,\; e^x,\; -\ln x,\; |x|,\; x\ln x$ 为凸函数；$\ln x,\; \sqrt{x}$ 为凹函数。
+\end{recallBox}
+
+\subsection{从两点掷币看懂“先映射再平均”与“先平均再映射”}
+
+先看一个无需任何符号负担的小例子。设随机变量 $X$ 以相等概率取值 $1$ 或 $3$：$\Prob(X=1) = \Prob(X=3) = \tfrac{1}{2}$，显然均值 $\E[X] = \tfrac{1+3}{2} = 2$。现在分别考察一个凸函数和一个凹函数：
+\begin{itemize}
+  \item 取凸函数 $g(x) = x^2$：“先平方再求平均”得 $\E[X^2] = \tfrac{1^2 + 3^2}{2} = 5$；“先求平均再平方”得 $(\E[X])^2 = 2^2 = 4$。前者更大：$5 > 4$。
+  \item 取凹函数 $h(x) = \ln x$：“先取对数再求平均”得 $\E[\ln X] = \tfrac{\ln 1 + \ln 3}{2} \approx 0.5493$；“先求平均再取对数”得 $\ln(\E[X]) = \ln 2 \approx 0.6931$。后者更大：$0.5493 < 0.6931$。
+\end{itemize}
+
+把两点随机变量 $(x_1, x_2)$ 的概率写成 $\lambda = \Prob(X = x_1)$、$1-\lambda = \Prob(X = x_2)$，你会立刻发现：凸函数的定义式 $\lambda g(x_1) + (1-\lambda) g(x_2) \ge g(\lambda x_1 + (1-\lambda) x_2)$ 根本就是\textbf{两点分布上的 Jensen 不等式} $\E[g(X)] \ge g(\E[X])$！图 \ref{fig:ch3-jensen} 把这一几何机制画得一清二楚：割线上的点高度是 $\E[g(X)]$，曲线上的点高度是 $g(\E[X])$，两者之间的垂直差值就是非负的 \textbf{Jensen 间隙（Jensen gap）}；而支撑切线则从下方托住整条曲线，提供了把两点推广到\textbf{任意离散或连续分布}的钥匙。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[scale=1.02]
+    % Axes
+    \draw[-{Stealth[length=2.3mm]}, slate, thick] (-0.3, 0) -- (6.8, 0) node[right, font=\small\sffamily, ink] {$x$};
+    \draw[-{Stealth[length=2.3mm]}, slate, thick] (0, -0.3) -- (0, 4.7) node[above, font=\small\sffamily, ink] {$y$};
+
+    % Convex curve g(x) = 0.24*(x - 1.4)^2 + 0.55
+    \draw[teal, line width=1.6pt, domain=0.25:5.75, samples=80]
+      plot (\x, {0.24*(\x - 1.4)*(\x - 1.4) + 0.55});
+    \node[tealDark, font=\small\sffamily\bfseries, anchor=west] at (5.35, 4.35) {凸函数 $y = g(x)$};
+
+    % Points x1 = 1.0, x2 = 5.2, weight p1 = 0.45, p2 = 0.55 => mu = 3.31
+    % g(1.0) = 0.24*0.16 + 0.55 = 0.5884
+    % g(5.2) = 0.24*14.44 + 0.55 = 4.0156
+    % mu = 3.31 -> g(mu) = 0.24*(1.91)^2 + 0.55 = 1.4255
+    % E[g(X)] = 0.45*0.5884 + 0.55*4.0156 = 2.4734
+    % Tangent at mu=3.31: slope m = 0.48*(3.31 - 1.4) = 0.9168
+    % y_tan(x) = 1.4255 + 0.9168*(x - 3.31)
+    \coordinate (P1) at (1.0, 0.5884);
+    \coordinate (P2) at (5.2, 4.0156);
+    \coordinate (Pmu) at (3.31, 1.4255);
+    \coordinate (Pchord) at (3.31, 2.4734);
+
+    % Supporting tangent line at mu
+    \draw[navy, line width=1.1pt, densely dashed, domain=1.55:5.65]
+      plot (\x, {1.4255 + 0.9168*(\x - 3.31)});
+    \node[navy, font=\footnotesize\sffamily, anchor=west] at (5.70, 3.38) {支撑切线 $g(\mu)+m(x-\mu)$};
+
+    % Chord connecting P1 and P2
+    \draw[ochre, line width=1.25pt] (P1) -- (P2);
+    \node[ochre, font=\footnotesize\sffamily, rotate=38, anchor=south] at (2.22, 1.72) {割线（两点凸组合）};
+
+    % Vertical projection lines
+    \draw[slate, dotted, thick] (1.0, 0) -- (P1);
+    \draw[slate, dotted, thick] (5.2, 0) -- (P2);
+    \draw[slate, densely dotted, thick] (3.31, 0) -- (Pchord);
+
+    % Horizontal guides to y-axis
+    \draw[teal!70, densely dotted] (0, 1.4255) -- (Pmu);
+    \draw[ochre!80, densely dotted] (0, 2.4734) -- (Pchord);
+
+    % Jensen gap brace
+    \draw[decorate, decoration={brace, amplitude=4.5pt, mirror}, ochre, thick]
+      (3.43, 1.44) -- (3.43, 2.45)
+      node[midway, right=6pt, xshift=21mm, yshift=-5mm, font=\footnotesize\sffamily, ochre, align=left]
+      {Jensen 间隙\\$\E[g(X)] - g(\E[X]) \ge 0$};
+
+    \draw[ochre, thin] (3.69,1.96) -- (4.32,1.42) -- (5.52,1.42);
+    % Dots
+    \fill[teal] (P1) circle (2.4pt);
+    \fill[teal] (P2) circle (2.4pt);
+    \fill[tealDark] (Pmu) circle (2.8pt);
+    \fill[ochre] (Pchord) circle (2.8pt);
+
+    % Axis ticks & labels
+    \node[below=2pt, font=\footnotesize, ink] at (1.0, 0) {$x_1$};
+    \node[below=2pt, font=\footnotesize\bfseries, tealDark] at (3.31, 0) {$\mu = \E[X]$};
+    \node[below=2pt, font=\footnotesize, ink] at (5.2, 0) {$x_2$};
+
+    \node[left=2pt, font=\footnotesize, tealDark] at (0, 1.4255) {$g(\E[X])$};
+    \node[left=2pt, font=\footnotesize, ochre] at (0, 2.4734) {$\E[g(X)]$};
+  \end{tikzpicture}
+  \caption{Jensen 不等式的几何本质：凸函数 $g(x)$ 处处位于支撑切线上方且位于任意割线下方，因此“先映射再平均”的高度 $\E[g(X)]$ 恒不低于“先平均再映射”的高度 $g(\E[X])$。}
+  \label{fig:ch3-jensen}
+\end{figure}
+
+\subsection{Jensen 不等式与支撑切线完整证明}
+
+\begin{thmBox}
+\begin{theorem}[Jensen 不等式]
+\label{thm:ch3-jensen}
+设 $g: I \to \R$ 是区间 $I$ 上的凸函数，随机变量 $X$ 取值于 $I$，且期望 $\E[X]$ 与 $\E[g(X)]$ 均有限。则必有
+\begin{equation}
+  \E[g(X)] \ge g(\E[X]). \label{eq:ch3-jensen}
+\end{equation}
+若 $g$ 为凹函数，则不等号反向：$\E[g(X)] \le g(\E[X])$。进一步地，当 $g$ 为\textbf{严格凸}（或严格凹）函数时，等号成立当且仅当 $X$ 几乎必然为常数，即 $\Prob(X = \E[X]) = 1$。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记 $\mu := \E[X]$。若 $X$ 几乎必然取 $I$ 的某个端点常数，则 $\E[g(X)] = g(\mu)$ 平凡成立。否则 $\mu$ 必落在 $I$ 的内部，由凸函数的支撑切线性质 \eqref{eq:ch3-supporting-line}，存在常数 $m \in \R$（当 $g$ 在 $\mu$ 处可微时即取 $m = g'(\mu)$），使得对一切 $x \in I$ 有
+\[
+  g(x) \ge g(\mu) + m(x - \mu).
+\]
+将上式中的确定变量 $x$ 替换为随机变量 $X$，得到逐样本点成立的随机变量不等式：
+\[
+  g(X) \ge g(\mu) + m(X - \mu).
+\]
+对不等式两边同时取期望，由第 1 章期望的单调性与线性性立即得到
+\[
+  \E[g(X)] \ge \E\bigl[g(\mu) + m(X - \mu)\bigr] = g(\mu) + m\bigl(\E[X] - \mu\bigr) = g(\mu) = g(\E[X]).
+\]
+若 $g$ 为凹函数，对凸函数 $-g$ 应用 \eqref{eq:ch3-jensen} 得 $\E[-g(X)] \ge -g(\E[X])$，两边同乘 $-1$ 即得 $\E[g(X)] \le g(\E[X])$。
+
+最后证明严格凸时的等号条件：令非负随机变量 $Z := g(X) - g(\mu) - m(X - \mu) \ge 0$。若 $\E[g(X)] = g(\mu)$，则 $\E[Z] = 0$。非负随机变量期望为零蕴含 $\Prob(Z = 0) = 1$。但 $g$ 严格凸意味着支撑切线仅在切点 $x = \mu$ 处与曲线相交，即对一切 $x \neq \mu$ 严格有 $g(x) > g(\mu) + m(x - \mu)$（$Z > 0$）。因此 $\Prob(Z = 0) = 1$ 当且仅当 $\Prob(X = \mu) = 1$。
+\end{proof}
+
+回味一下这个证明：一共只有四行核心代数，却对离散分布、连续分布、混合分布乃至任意维随机向量（只需将 $m(x-\mu)$ 换成内积 $\nabla g(\mu)^T(x-\mu)$）\textbf{无条件通吃}！这就是寻找正确几何视角（支撑切线）的威力。
+
+\begin{corollary}[Jensen 不等式的三大高频推论]
+\label{cor:ch3-jensen-cor}
+由定理 \ref{thm:ch3-jensen} 直接代入常用凸/凹函数，立得：
+\begin{enumerate}
+  \item \textbf{方差非负性}（取凸函数 $g(x)=x^2$）：$\E[X^2] \ge (\E[X])^2$，即 $\Var(X) = \E[X^2] - (\E[X])^2 \ge 0$；
+  \item \textbf{对数期望不等式}（取严格凹函数 $g(x)=\ln x$，$X > 0$）：
+  \begin{equation}
+    \E[\ln X] \le \ln \E[X], \label{eq:ch3-log-jensen}
+  \end{equation}
+  等号当且仅当 $X$ 几乎必然为正数常量时成立；
+  \item \textbf{倒数期望不等式}（取严格凸函数 $g(x)=1/x$，$X > 0$）：$\E[1/X] \ge 1/\E[X]$。
+\end{enumerate}
+\end{corollary}
+
+\begin{insightBox}{一根 Jensen 线串起信息论、EM 算法与 VAE}
+不要低估式 \eqref{eq:ch3-log-jensen} 的 $\E[\ln X] \le \ln \E[X]$——它是整个概率机器学习里“出场率第一”的推导引擎：
+\begin{itemize}
+  \item \textbf{本卷第 4 章（Gibbs 不等式）}：把 $X = Q/P$ 代入 $\E_P[-\ln X] \ge -\ln \E_P[X]$，3 行即证 KL 散度非负性 $\DKL(P\|Q) \ge 0$；
+  \item \textbf{第 4 卷（EM 算法）与第 5 卷（变分自编码器 VAE）}：面对含隐变量 $z$ 的难算对数似然 $\ln p_\theta(x) = \ln \int p_\theta(x,z)\,dz$，引入任意变分分布 $q(z\mid x)$ 做一次恒等改写再套用 \eqref{eq:ch3-log-jensen}：
+  \[
+    \ln p_\theta(x)
+    = \ln \E_{z\sim q}\!\left[\frac{p_\theta(x,z)}{q(z\mid x)}\right]
+    \ge \E_{z\sim q}\!\left[\ln \frac{p_\theta(x,z)}{q(z\mid x)}\right]
+    =: \mathrm{ELBO}(q, \theta).
+  \]
+  这就是大名鼎鼎的\textbf{证据下界（Evidence Lower Bound, ELBO）}的出生证明！
+\end{itemize}
+\end{insightBox}
+
+\begin{failBox}{把非线性运算“直接穿进期望”是新手头号暗坑}
+工程代码与公式推导中，极易在无意间写出 $\E[1/X] = 1/\E[X]$、$\E[\sqrt{X}] = \sqrt{\E[X]}$ 或 $\E[\ln \hat{p}] = \ln \E[\hat{p}]$ 之类的错误等式。例如，某模型在两条样本上预测正确类别的概率分别是 $0.01$ 与 $0.99$：
+\begin{itemize}
+  \item 先平均概率再取负对数：$-\ln\bigl(\tfrac{0.01+0.99}{2}\bigr) = -\ln 0.5 \approx 0.693$；
+  \item 真实的平均交叉熵（先取负对数再平均）：$\tfrac{-\ln 0.01 - \ln 0.99}{2} \approx 2.308$！
+\end{itemize}
+两者相差超过 $3$ 倍！由于 $-\ln x$ 是严格凸函数，真实交叉熵损失永远严格惩罚极端自信的错误预测，绝不能把样本概率先做平均再代进对数。
+\end{failBox}
+
+% =========================================================================
+\section{浓度不等式三阶梯：Markov、Chebyshev 与 Hoeffding}
+\label{sec:ch3-concentration}
+
+设独立同分布（i.i.d.）样本 $X_1, X_2, \dots, X_n$ 具有真实均值 $\mu = \E[X_1]$，我们计算经验样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$。在 AI 评测中，$X_i = \mathbf{1}\{\hat{y}_i = y_i\}$ 表示第 $i$ 条测试样本是否预测正确，那么 $\bar{X}_n$ 就是测试集准确率，而 $\mu$ 是模型在真实数据分布上的泛化准确率。
+
+我们最想控制的是\textbf{大偏差尾概率}：
+\[
+  \Prob\bigl(|\bar{X}_n - \mu| \ge \varepsilon\bigr) \le \text{?},
+\]
+即“经验均值偏离真实期望至少 $\varepsilon$ 的坏运气概率，最多能有多大？”下面我们沿着信息量递增的三级阶梯，一步步把尾概率上界从粗糙压到指数级锐利。
+
+\subsection{第一阶梯：Markov 不等式（只需非负与均值）}
+
+先看一个生活直觉：如果某推理服务所有请求的\textbf{平均延迟}是 $20\,\text{ms}$（延迟显然非负），那么延迟 $\ge 100\,\text{ms}$ 的慢请求占比绝对不可能超过 $20\%$——否则光这些慢请求就已经把全体平均值拉超过 $0.20 \times 100 = 20\,\text{ms}$ 了！把这段朴素算术翻译成概率语言，就是 Markov 不等式。
+
+\begin{thmBox}
+\begin{theorem}[Markov 不等式]
+\label{thm:ch3-markov}
+设非负随机变量 $X \ge 0$ 的期望 $\E[X] < \infty$，则对任意常数 $a > 0$，有
+\begin{equation}
+  \Prob(X \ge a) \le \frac{\E[X]}{a}. \label{eq:ch3-markov}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+构造指示随机变量 $\mathbf{1}_{\{X \ge a\}}$（当 $X \ge a$ 时取 $1$，否则取 $0$）。由于 $X \ge 0$，在任意样本点上都逐点满足
+\[
+  a \cdot \mathbf{1}_{\{X \ge a\}} \le X.
+\]
+（当 $X \ge a$ 时左边为 $a \le X$；当 $0 \le X < a$ 时左边为 $0 \le X$。）对两边取期望，利用 $\E[\mathbf{1}_{\{X \ge a\}}] = \Prob(X \ge a)$，即得
+\[
+  a \cdot \Prob(X \ge a) \le \E[X] \implies \Prob(X \ge a) \le \frac{\E[X]}{a}.
+\]
+\end{proof}
+
+Markov 不等式的优势在于条件极弱（不要求方差存在、不要求任何分布族假设），且上界本身是紧的（取两点分布 $\Prob(X=a)=p, \Prob(X=0)=1-p$ 即可取等号）。但正因为只用了“一阶矩（均值）”，它的衰减速率仅有 $O(1/a)$，面对样本均值集中问题远远不够尖锐。注意\textbf{非负前提 $X \ge 0$ 不可省略}：若允许 $X$ 取负值，即使 $\E[X] = 0$ 也完全可以有 $\Prob(X \ge 1) = \tfrac{1}{2} > 0$。
+
+\subsection{第二阶梯：Chebyshev 不等式与弱大数定律（WLLN）}
+
+如果我们额外知道随机变量的二阶矩（方差 $\sigma^2 = \Var(X)$），就能立刻把 Markov 不等式套在非负随机变量 $Y = (X - \mu)^2$ 上，得到第二级阶梯。
+
+\begin{thmBox}
+\begin{theorem}[Chebyshev 不等式]
+\label{thm:ch3-chebyshev}
+设随机变量 $X$ 具有有限均值 $\mu = \E[X]$ 与有限方差 $\sigma^2 = \Var(X)$，则对任意 $\varepsilon > 0$，有
+\begin{equation}
+  \Prob\bigl(|X - \mu| \ge \varepsilon\bigr) \le \frac{\Var(X)}{\varepsilon^2}. \label{eq:ch3-chebyshev}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+事件 $\{|X - \mu| \ge \varepsilon\}$ 与 $\{(X - \mu)^2 \ge \varepsilon^2\}$ 完全等价。由于 $(X - \mu)^2 \ge 0$，直接对其应用定理 \ref{thm:ch3-markov}（取 $a = \varepsilon^2$），立得
+\[
+  \Prob\bigl(|X - \mu| \ge \varepsilon\bigr)
+  = \Prob\bigl((X - \mu)^2 \ge \varepsilon^2\bigr)
+  \le \frac{\E[(X - \mu)^2]}{\varepsilon^2}
+  = \frac{\Var(X)}{\varepsilon^2}.
+\]
+\end{proof}
+
+把 Chebyshev 不等式立刻应用到 i.i.d. 样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$ 上，我们三行就能收获概率论的基石之一——\textbf{弱大数定律}！
+
+\begin{thmBox}
+\begin{theorem}[弱大数定律, Weak Law of Large Numbers, WLLN]
+\label{thm:ch3-wlln}
+设 $X_1, X_2, \dots, X_n$ 独立同分布，具有有限均值 $\mu$ 与有限方差 $\sigma^2$。则样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$ 依概率收敛于 $\mu$（记作 $\bar{X}_n \xrightarrow{p} \mu$）：对任意 $\varepsilon > 0$，
+\begin{equation}
+  \Prob\bigl(|\bar{X}_n - \mu| \ge \varepsilon\bigr) \le \frac{\sigma^2}{n \varepsilon^2} \xrightarrow{n \to \infty} 0. \label{eq:ch3-wlln}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由第 1 章期望线性性与独立变量方差可加性，有
+\[
+  \E[\bar{X}_n] = \frac{1}{n}\sum_{i=1}^n \E[X_i] = \mu,
+  \qquad
+  \Var(\bar{X}_n) = \frac{1}{n^2}\sum_{i=1}^n \Var(X_i) = \frac{\sigma^2}{n}.
+\]
+将 $\bar{X}_n$ 代入 Chebyshev 不等式 \eqref{eq:ch3-chebyshev} 即得 $\Prob(|\bar{X}_n - \mu| \ge \varepsilon) \le \frac{\sigma^2}{n\varepsilon^2}$。令 $n \to \infty$，右端趋于 $0$，证毕。
+\end{proof}
+
+\textbf{停下来算一笔现实账}：WLLN 虽然保证了“样本越多越准”，但 Chebyshev 给出的衰减速率只有多项式级 $O(1/n)$。假设 $X_i \sim \mathrm{Bernoulli}(p)$（方差 $p(1-p) \le \tfrac{1}{4}$），如果我们希望误差 $\varepsilon = 0.03$ 的失败概率不超过 $\delta = 0.05$（$95\%$ 置信度），Chebyshev 要求
+\[
+  \frac{0.25}{n \times 0.03^2} \le 0.05 \implies n \ge 5556.
+\]
+更糟的是，若要求工业高可靠场景的 $99.9\%$ 置信度（$\delta = 0.001$），Chebyshev 因为对 $\delta$ 呈 $1/\delta$ 依赖，竟然要求高达 $n \ge 277{,}778$ 条测试样本！为什么 Chebyshev 这么保守？因为它只利用了二阶矩，不得不为“极端长尾分布”买单。而在 AI 中，准确率指示器 $X_i \in [0, 1]$、截断损失 $L_i \in [0, B]$ 都是\textbf{严格有界}的！能否用有界性换取\textbf{指数级衰减}？
+
+\subsection{第三阶梯：Hoeffding 不等式（有界独立变量的指数级集中）}
+
+把平方函数 $(X-\mu)^2$ 换成指数函数 $e^{s(\bar{X}_n - \mu)}$（其中待定参数 $s > 0$），再套用 Markov 不等式，就能触发所谓的 \textbf{Chernoff 指数技巧}——指数函数会把独立变量的\textbf{和}瞬间变成期望的\textbf{乘积}！
+
+\begin{thmBox}
+\begin{theorem}[Hoeffding 不等式]
+\label{thm:ch3-hoeffding}
+设 $X_1, X_2, \dots, X_n$ 是相互独立的随机变量，且每个变量几乎必然落在有界闭区间内：$a_i \le X_i \le b_i$（$i=1,\dots,n$）。记样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$ 与其期望 $\mu = \E[\bar{X}_n]$。则对任意 $\varepsilon > 0$，单侧与双侧尾概率分别满足：
+\begin{align}
+  \Prob\bigl(\bar{X}_n - \mu \ge \varepsilon\bigr) &\le \exp\!\left(-\frac{2 n^2 \varepsilon^2}{\sum_{i=1}^n (b_i - a_i)^2}\right), \label{eq:ch3-hoeffding-1}\\
+  \Prob\bigl(|\bar{X}_n - \mu| \ge \varepsilon\bigr) &\le 2\exp\!\left(-\frac{2 n^2 \varepsilon^2}{\sum_{i=1}^n (b_i - a_i)^2}\right). \label{eq:ch3-hoeffding-2}
+\end{align}
+特别地，当所有 $X_i \in [0, 1]$（如二元准确率、归一化损失）时，上式化简为极易心算的黄金公式：
+\begin{equation}
+  \Prob\bigl(|\bar{X}_n - \mu| \ge \varepsilon\bigr) \le 2 e^{-2 n \varepsilon^2}. \label{eq:ch3-hoeffding-01}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}[主线证明（Chernoff 技巧 + Hoeffding 引理）]
+记 $Z_i := X_i - \E[X_i]$，则 $\E[Z_i] = 0$，且 $Z_i$ 落在长度为 $b_i - a_i$ 的区间内。对任意待优化的常数 $s > 0$，利用指数函数严格单调递增与 Markov 不等式（定理 \ref{thm:ch3-markov}）：
+\[
+  \Prob(\bar{X}_n - \mu \ge \varepsilon)
+  = \Prob\!\left(\sum_{i=1}^n Z_i \ge n\varepsilon\right)
+  = \Prob\!\left(e^{s \sum_{i=1}^n Z_i} \ge e^{s n \varepsilon}\right)
+  \le e^{-s n \varepsilon}\, \E\!\left[\prod_{i=1}^n e^{s Z_i}\right].
+\]
+由 $Z_1, \dots, Z_n$ 相互独立，乘积的期望等于期望的乘积：
+\[
+  \Prob(\bar{X}_n - \mu \ge \varepsilon)
+  \le e^{-s n \varepsilon} \prod_{i=1}^n \E\bigl[e^{s Z_i}\bigr].
+\]
+引用下方选读框中的 \textbf{Hoeffding 引理}：对任意零均值且取值于长度 $b_i - a_i$ 区间内的随机变量 $Z_i$，均有 $\E[e^{s Z_i}] \le \exp\!\bigl(\frac{s^2 (b_i - a_i)^2}{8}\bigr)$。代入得
+\[
+  \Prob(\bar{X}_n - \mu \ge \varepsilon)
+  \le \exp\!\left(-s n \varepsilon + \frac{s^2}{8}\sum_{i=1}^n (b_i - a_i)^2\right).
+\]
+指数括号里是关于 $s$ 的开口向上二次函数！求导令零即得最优参数 $s^* = \frac{4 n \varepsilon}{\sum_{i=1}^n (b_i - a_i)^2} > 0$，代回立得单侧界 \eqref{eq:ch3-hoeffding-1}。将 $X_i$ 替换为 $-X_i \in [-b_i, -a_i]$ 得到完全相同的下尾界 $\Prob(\bar{X}_n - \mu \le -\varepsilon) \le \exp\bigl(-\frac{2n^2\varepsilon^2}{\sum (b_i-a_i)^2}\bigr)$，由并集界 $\Prob(A \cup B) \le \Prob(A) + \Prob(B)$ 将两式相加即得双侧界 \eqref{eq:ch3-hoeffding-2}。
+\end{proof}
+
+\begin{extBox}{Hoeffding 引理的完整零跳步证明（对数矩母函数 + Taylor 展开）}
+\textbf{引理}：设随机变量 $Z$ 满足 $\E[Z] = 0$ 且几乎必然落在区间 $[c, d]$ 中（其中 $d - c = b - a$），则对任意 $s \in \R$ 有
+\[
+  \E\bigl[e^{s Z}\bigr] \le \exp\!\left(\frac{s^2 (b-a)^2}{8}\right).
+\]
+\textbf{证明}：定义对数矩母函数 $\psi(s) := \ln \E[e^{s Z}]$。易见 $\psi(0) = \ln 1 = 0$。对 $s$ 求一阶与二阶导数：
+\[
+  \psi'(s) = \frac{\E[Z e^{sZ}]}{\E[e^{sZ}]},
+  \qquad
+  \psi''(s) = \frac{\E[Z^2 e^{sZ}]}{\E[e^{sZ}]} - \left(\frac{\E[Z e^{sZ}]}{\E[e^{sZ}]}\right)^2.
+\]
+代入 $s = 0$ 得 $\psi'(0) = \E[Z] = 0$。奇妙的是，若定义一个新的“指数倾斜”概率分布 $Q_s$（密度或质量正比于 $e^{sz} p(z)$），则上式恰好就是随机变量 $Z$ 在新分布 $Q_s$ 下的方差：
+\[
+  \psi''(s) = \Var_{Q_s}(Z).
+\]
+而对\textbf{任何}取值在 $[c, d]$ 内的随机变量 $Y$，以区间中点 $m_0 = \frac{c+d}{2}$ 为参照恒有 $|Y - m_0| \le \frac{d-c}{2} = \frac{b-a}{2}$，从而
+\[
+  \Var_{Q_s}(Z) = \E_{Q_s}\!\bigl[(Z - \E_{Q_s}[Z])^2\bigr] \le \E_{Q_s}\!\bigl[(Z - m_0)^2\bigr] \le \frac{(b-a)^2}{4}.
+\]
+（第一步利用了“均值使均方误差最小”，即 $\E[(Z-c_0)^2] = \Var(Z) + (\E[Z]-c_0)^2 \ge \Var(Z)$。）最后对 $\psi(s)$ 在 $0$ 处做带拉格朗日余项的二阶 Taylor 展开：存在 $\xi \in [0, s]$ 使得
+\[
+  \psi(s) = \psi(0) + \psi'(0)s + \frac{1}{2}\psi''(\xi) s^2 \le 0 + 0 + \frac{1}{2}\cdot\frac{(b-a)^2}{4} s^2 = \frac{s^2 (b-a)^2}{8}.
+\]
+两边取指数即得 $\E[e^{sZ}] \le \exp\!\bigl(\frac{s^2(b-a)^2}{8}\bigr)$。证毕！
+\end{extBox}
+
+\subsection{AI 实战算账与本机实测：测试集到底需要多少样本？}
+
+现在我们用 Hoeffding 黄金公式 \eqref{eq:ch3-hoeffding-01} 亲手做一次 AI 评测样本量设计。
+
+\begin{example}[分类模型测试集样本量计算]
+\label{ex:ch3-test-size}
+某二分类模型在独立测试集 $\{(x_i, y_i)\}_{i=1}^n$ 上评测，记指示器 $X_i = \mathbf{1}\{\hat{y}_i = y_i\} \in [0, 1]$，经验准确率 $\widehat{\mathrm{Acc}}_n = \bar{X}_n$，真实泛化准确率 $\mathrm{Acc}^* = \E[X_i]$。我们希望以至少 $1 - \delta$ 的概率保证 $|\widehat{\mathrm{Acc}}_n - \mathrm{Acc}^*| < \varepsilon$。由 \eqref{eq:ch3-hoeffding-01}，令
+\[
+  2 e^{-2 n \varepsilon^2} \le \delta
+  \iff 2 n \varepsilon^2 \ge \ln\!\left(\frac{2}{\delta}\right)
+  \iff n \ge \frac{1}{2\varepsilon^2}\ln\!\left(\frac{2}{\delta}\right).
+\]
+代入典型需求 $\varepsilon = 0.03$（误差不超过 $3$ 个百分点）、$\delta = 0.05$（$95\%$ 置信度）：
+\[
+  n \ge \frac{\ln 40}{2 \times 0.03^2} = \frac{3.6889}{0.0018} \approx 2049.4 \implies n \ge 2050.
+\]
+如果把置信度一口气拉高到 $99.9\%$（$\delta = 0.001$），由于对数 $\ln(2/\delta)$ 增长极慢，Hoeffding 只需要
+\[
+  n \ge \frac{\ln 2000}{0.0018} \approx 4222.7 \implies n \ge 4223,
+\]
+相比刚才 Chebyshev 索要的 $277{,}778$ 条样本，直接节省了超过 \textbf{65 倍} 的标注成本！
+\end{example}
+
+表 \ref{tab:ch3-conc-compare} 系统对比了浓度不等式三阶梯的假设、形式与样本量代价；图 \ref{fig:ch3-hoeffding} 则直接读取本卷配套实验脚本 \texttt{code/vol2\_experiments.py} 生成的实测数据 \texttt{data/hoeffding\_tail.csv}（$X_i \stackrel{\text{i.i.d.}}{\sim} \mathrm{Bernoulli}(0.5)$，偏差阈值 $\varepsilon = 0.1$，$20{,}000$ 次重复蒙特卡洛试验），在半对数坐标下直观展示 Chebyshev 与 Hoeffding 的鸿沟。
+
+\begin{table}[htbp]
+  \centering
+  \caption{浓度不等式三阶梯核心对比（针对 $X_i \in [0,1]$ 的独立样本均值 $\bar{X}_n$）}
+  \label{tab:ch3-conc-compare}
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{22mm}p{30mm}p{31mm}p{27mm}X@{}}
+    \toprule
+    \textbf{阶梯} & \textbf{所需假设} & \textbf{尾概率上界} & \textbf{样本量 $n(\varepsilon,\delta)$} & \textbf{典型用途与局限} \\
+    \midrule
+    Markov & 非负 + 有限均值 & $\E[\bar{X}_n] / a$ & —— & 仅控单侧绝对大小，最通用也最松 \\
+    Chebyshev & 有限方差 $\sigma^2$ & $\sigma^2 / (n \varepsilon^2)$ & $O\bigl(\tfrac{1}{\varepsilon^2 \delta}\bigr)$ & 3 行证 WLLN；对 $\delta$ 呈 $1/\delta$ 依赖过慢 \\
+    Hoeffding & 独立 + 有界 $[a_i,b_i]$ & $2\exp(-2n\varepsilon^2)$ & $O\bigl(\tfrac{1}{\varepsilon^2}\ln\tfrac{2}{\delta}\bigr)$ & 指数级衰减；测试集规模与泛化界主力 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.88\linewidth,
+      height=6.6cm,
+      ymode=log,
+      xlabel={样本量 $n$},
+      ylabel={尾概率 $\Prob(|\bar{X}_n - 0.5| \ge 0.1)$（对数刻度）},
+      xmin=0, xmax=315,
+      ymin=2e-4, ymax=2.2,
+      grid=both,
+      major grid style={slate!22},
+      minor grid style={slate!10},
+      legend pos=south west,
+      legend style={font=\footnotesize\sffamily, fill=white, fill opacity=0.9, draw=codeborder},
+      label style={font=\small\sffamily, ink},
+      tick label style={font=\footnotesize, slate}
+    ]
+      % Horizontal reference line at probability = 1
+      \addplot[slate!65, dotted, thick, domain=0:315, forget plot] {1.0};
+      \node[slate, font=\scriptsize\sffamily, anchor=south east] at (axis cs:308, 1.05) {平凡概率上界 $1$};
+
+      % Chebyshev bound
+      \addplot[navy, thick, dashed, mark=square*, mark size=1.8pt]
+        table[x=n, y=chebyshev, col sep=comma] {data/hoeffding_tail.csv};
+      \addlegendentry{Chebyshev 上界 $\frac{0.25}{n\varepsilon^2}$（多项式 $O(1/n)$）}
+
+      % Hoeffding bound
+      \addplot[teal, very thick, mark=*, mark size=1.9pt]
+        table[x=n, y=hoeffding, col sep=comma] {data/hoeffding_tail.csv};
+      \addlegendentry{Hoeffding 上界 $2e^{-2n\varepsilon^2}$（指数衰减）}
+
+      % Empirical tail
+      \addplot[ochre, very thick, mark=triangle*, mark size=2.3pt]
+        table[x=n, y=emp_tail, col sep=comma] {data/hoeffding_tail.csv};
+      \addlegendentry{本机 20{,}000 次蒙特卡洛实测尾概率}
+
+      % Callout annotations at n=300
+      \node[navy, font=\scriptsize\sffamily, anchor=south east] at (axis cs:296, 0.105) {$0.0833$};
+      \node[tealDark, font=\scriptsize\sffamily, anchor=south east] at (axis cs:296, 0.011) {$0.00496$};
+      \node[ochre, font=\scriptsize\sffamily, anchor=south east] at (axis cs:296, 0.00088) {$0.00040$};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{本机实测（\texttt{data/hoeffding\_tail.csv}）：对 $\mathrm{Bernoulli}(0.5)$ 与 $\varepsilon = 0.1$，Chebyshev 上界在半对数图上越走越平缓（$n=300$ 时仍高达 $0.0833$），而 Hoeffding 上界呈笔直向下的指数衰减（$n=300$ 时降至 $0.00496$，比 Chebyshev 紧 $16.8$ 倍），真实经验尾概率则已低至 $0.00040$。注：$n < 35$ 时未经截断的 $2e^{-2n\varepsilon^2} > 1$，此时自然以 $1$ 截断。}
+  \label{fig:ch3-hoeffding}
+\end{figure}
+
+\begin{insightBox}{一步通向第 4 卷 PAC 泛化理论（Hoeffding + 并集界）}
+如果手里不是只有 $1$ 个固定模型，而是要在包含 $M = |\mathcal{H}|$ 个候选模型的假设空间 $\mathcal{H}$ 里挑训练误差最小的模型，怎么防止“挑花了眼（过拟合）”？只需对每个模型 $h \in \mathcal{H}$ 套用 Hoeffding 不等式，再用 1 行并集界把 $M$ 个坏事件的概率相加：
+\[
+  \Prob\!\left(\exists h \in \mathcal{H}:\; |\widehat{R}_n(h) - R(h)| \ge \varepsilon\right) \le 2 M e^{-2 n \varepsilon^2} \le \delta
+  \implies
+  |\widehat{R}_n(h) - R(h)| \le \sqrt{\frac{\ln(2M / \delta)}{2n}}.
+\]
+你看，整个统计学习理论（PAC 泛化界）的骨架就是\textbf{今天学的 Hoeffding 不等式 + 并集界}：模型复杂度只以 $\sqrt{\ln M}$ 的温和速度增长，这就是第 4 卷机器学习泛化理论的真正起点！
+\end{insightBox}
+
+% =========================================================================
+\section{中心极限定理（CLT）、蒙特卡洛估计与重要性采样}
+\label{sec:ch3-clt-mc}
+
+Hoeffding 不等式强在“对任意有限样本 $n$ 严格成立、不假设任何分布形状”，但它为了守住最坏情况，有时会偏保守（比如图 \ref{fig:ch3-hoeffding} 中 $n=300$ 时 Hoeffding 为 $0.00496$，而实测只有 $0.00040$）。如果我们既想知道样本均值“有多集中”，又想知道它的\textbf{精确渐近分布形状}，就需要请出概率论的另一座丰碑——中心极限定理。
+
+\subsection{中心极限定理（CLT）与渐近置信区间}
+
+\begin{thmBox}
+\begin{theorem}[中心极限定理, Central Limit Theorem, CLT]
+\label{thm:ch3-clt}
+设 $X_1, X_2, \dots, X_n$ 独立同分布，具有有限均值 $\mu = \E[X_1]$ 与有限正方差 $0 < \sigma^2 = \Var(X_1) < \infty$。记样本均值 $\bar{X}_n = \frac{1}{n}\sum_{i=1}^n X_i$，则当 $n \to \infty$ 时，标准化后的随机变量依分布收敛于标准正态分布：
+\begin{equation}
+  Z_n := \frac{\sqrt{n}(\bar{X}_n - \mu)}{\sigma} \xrightarrow{d} \mathcal{N}(0, 1). \label{eq:ch3-clt}
+\end{equation}
+等价地，对任意实数 $z \in \R$，$\lim_{n\to\infty} \Prob(Z_n \le z) = \Phi(z) = \int_{-\infty}^z \frac{1}{\sqrt{2\pi}}e^{-t^2/2}\,dt$。
+\end{theorem}
+\end{thmBox}
+
+CLT 令人着迷的魔力在于\textbf{普适性}：无论单条样本 $X_i$ 服从离散的 Bernoulli 分布、严重右偏的指数分布，还是某个未知形态的神经网络单样本交叉熵损失，只要 $X_i$ 独立同分布且方差有限，把大量样本求平均后，$\bar{X}_n$ 的涨落分布就会自动被“磨平”成钟形正态分布 $\mathcal{N}\bigl(\mu,\, \sigma^2/n\bigr)$！
+
+由此立即可构造工程里最常用的\textbf{大样本 $95\%$ 渐近置信区间}：由于标准正态分布满足 $\Prob(|Z| \le 1.96) \approx 0.95$，用样本标准差 $\hat{\sigma}$ 替代未知 $\sigma$，即得
+\begin{equation}
+  \bar{X}_n \pm 1.96\,\frac{\hat{\sigma}}{\sqrt{n}}. \label{eq:ch3-clt-ci}
+\end{equation}
+拿例 \ref{ex:ch3-test-size} 的 $n = 2050$ 做个对照：若测得模型准确率 $\widehat{\mathrm{Acc}} = 0.85$，样本标准差 $\hat{\sigma} = \sqrt{0.85 \times 0.15} \approx 0.3571$，则 CLT 给出的 $95\%$ 置信区间半宽仅为
+\[
+  1.96 \times \frac{0.3571}{\sqrt{2050}} \approx 0.0155,
+\]
+差不多只有 Hoeffding 最坏情况界（$0.0300$）的一半！原因一目了然：Hoeffding 用的是区间宽度 $b-a=1$ 对应的最坏方差上界 $0.25$ 且承诺对\textbf{每一个有限 $n$} 绝对成立；而 CLT 既利用了实际更小的方差 $0.85\times 0.15 = 0.1275$，又用上了正态分布的精确尾面积（代价是依赖大样本近似，样本太小时可能失准；第 5 章我们将用 \textbf{Bootstrap} 在无需正态近似时直接重采样估计置信区间）。
+
+\begin{failBox}{CLT 不是免死金牌：方差无穷与样本相关时的彻底失效}
+套用 $\bar{X}_n \pm 1.96\hat{\sigma}/\sqrt{n}$ 前，务必核对两条红线：
+\begin{enumerate}
+  \item \textbf{重尾导致方差无穷}：例如标准\textbf{柯西分布（Cauchy）} $p(x) = \frac{1}{\pi(1+x^2)}$，它的期望与方差都不存在。可以证明，$n$ 个独立柯西变量的样本均值 $\bar{X}_n$ 与单个 $X_1$ 服从\textbf{完全相同的柯西分布}——无论取一万还是十亿个样本，均值都永远不会集中，也不会变成高斯！
+  \item \textbf{样本不独立}：在时间序列预测、股票收益或同一用户多次出现的推荐日志里，样本间存在强正相关性，真实方差 $\Var(\bar{X}_n)$ 可能远大于 $\sigma^2/n$，盲用 CLT 公式会严重低估不确定性（给出虚假的窄置信区间）。
+\end{enumerate}
+\end{failBox}
+
+\subsection{蒙特卡洛估计：用随机性打破维数灾难}
+
+在现代 AI 里，大量核心计算都可以写成某个高维期望积分：
+\[
+  I = \E_{x \sim p}[f(x)] = \int_{\R^d} f(x) p(x)\,dx.
+\]
+例如：计算复杂后验分布的均值、评估策略网络在随机环境中的期望回报、估计生成模型的归一化常数。如果按传统微积分做\textbf{确定性网格数值积分}（每条坐标轴切 $k$ 个格子），总计算点数高达 $M = k^d$，换算成关于预算 $M$ 的误差阶为 $O(k^{-1}) = O(M^{-1/d})$。一旦维度 $d = 50$，哪怕每轴只切可怜的 $k = 2$ 个点，也需要 $2^{50} \approx 1.1 \times 10^{15}$ 次计算——这就是令人绝望的\textbf{维数灾难（Curse of Dimensionality）}。
+
+\textbf{蒙特卡洛方法（Monte Carlo Estimation）}反其道而行之：放弃规则网格，直接从分布 $p(x)$ 中独立抽取 $M$ 个随机样本 $x_1, \dots, x_M \stackrel{\text{i.i.d.}}{\sim} p$，用样本均值去估计期望。
+
+\begin{defBox}
+\begin{definition}[蒙特卡洛估计量]
+\label{def:ch3-mc}
+给定目标分布 $p$ 与可积函数 $f$，独立抽取 $x_1, \dots, x_M \stackrel{\text{i.i.d.}}{\sim} p$，定义\textbf{蒙特卡洛估计量}为
+\begin{equation}
+  \hat{I}_M := \frac{1}{M}\sum_{m=1}^M f(x_m). \label{eq:ch3-mc}
+\end{equation}
+\end{definition}
+\end{defBox}
+
+\begin{proposition}[蒙特卡洛估计的无偏性与维数无关收敛速度]
+\label{prop:ch3-mc}
+设 $I = \E_{x\sim p}[f(x)]$ 与 $\sigma_f^2 = \Var_{x\sim p}(f(x))$ 均有限，则蒙特卡洛估计量 $\hat{I}_M$ 满足：
+\begin{enumerate}
+  \item \textbf{严格无偏}：$\E[\hat{I}_M] = \frac{1}{M}\sum_{m=1}^M \E[f(x_m)] = I$；
+  \item \textbf{标准误与维度 $d$ 完全无关}：
+  \begin{equation}
+    \Var(\hat{I}_M) = \frac{\sigma_f^2}{M},
+    \qquad
+    \mathrm{SE}(\hat{I}_M) := \sqrt{\Var(\hat{I}_M)} = \frac{\sigma_f}{\sqrt{M}} = O\!\left(M^{-1/2}\right). \label{eq:ch3-mc-se}
+  \end{equation}
+  \item \textbf{相合性与渐近正态}：由 WLLN（定理 \ref{thm:ch3-wlln}）与 CLT（定理 \ref{thm:ch3-clt}），$\hat{I}_M \xrightarrow{p} I$ 且大样本下近似服从 $\mathcal{N}(I, \sigma_f^2/M)$。
+\end{enumerate}
+\end{proposition}
+
+仔细品味 \eqref{eq:ch3-mc-se}：无论变量 $x$ 是 1 维、100 维还是 100 万维，蒙特卡洛的均方根误差阶永远是 $O(1/\sqrt{M})$，彻底摆脱了对维度 $d$ 的指数诅咒！不过它也有一把双刃剑：想把误差缩小到原来的 $1/10$，采样数 $M$ 必须暴涨 $100$ 倍。这就引出了降低方差、解决难采样问题的核心武器——\textbf{重要性采样}。
+
+\subsection{重要性采样（Importance Sampling）与 PPO 比率前瞻}
+
+设想两个常见困境：(a) 目标分布 $p(x)$ 过于复杂，无法直接从中采样（比如复杂策略或后验分布）；(b) 即使能从 $p(x)$ 采样，我们关心的区域 $\{f(x) \neq 0\}$ 在 $p$ 下是\textbf{极小概率的罕见事件}！
+
+举个震撼的例子：用标准正态 $Z \sim \mathcal{N}(0, 1)$ 估计罕见尾概率 $I = \Prob(Z > 4) \approx 3.167 \times 10^{-5}$。若直接用朴素蒙特卡洛抽 $M = 10{,}000$ 个样本，期望命中次数只有 $10000 \times 3.167\times 10^{-5} \approx 0.32$ 次——大概率一次都抽不到，直接输出 $\hat{I}_{\mathrm{MC}} = 0$（相对误差 $100\%$）！
+
+解决思路极其巧妙：找一个容易采样、且在“关键区域”落点密集的\textbf{提议分布（Proposal Distribution）} $q(x)$，从 $q$ 中采样，再乘上一个修正权重把分布“搬回” $p$。
+
+\begin{thmBox}
+\begin{proposition}[重要性采样无偏恒等式]
+\label{prop:ch3-is}
+设提议分布 $q(x)$ 满足\textbf{支集覆盖条件}：对所有 $x$，只要 $p(x)f(x) \neq 0$，必有 $q(x) > 0$。定义\textbf{重要性权重（Importance Weight）} $w(x) := \frac{p(x)}{q(x)}$，则
+\begin{equation}
+  \E_{x \sim p}[f(x)]
+  = \int f(x) p(x)\,dx
+  = \int f(x)\,\frac{p(x)}{q(x)}\,q(x)\,dx
+  = \E_{x \sim q}\bigl[f(x)\, w(x)\bigr]. \label{eq:ch3-is}
+\end{equation}
+相应地，抽取 $x_1, \dots, x_M \stackrel{\text{i.i.d.}}{\sim} q$ 构造的\textbf{重要性采样估计量}
+\[
+  \hat{I}_{\mathrm{IS}} := \frac{1}{M}\sum_{m=1}^M f(x_m)\,\frac{p(x_m)}{q(x_m)}
+\]
+是 $I = \E_p[f(x)]$ 的严格无偏估计量。
+\end{proposition}
+\end{thmBox}
+
+回到刚才的罕见尾概率 $\Prob(Z > 4)$！我们把提议分布中心直接平移到悬崖边缘，取 $q = \mathcal{N}(4, 1)$。此时约有一半样本（约 $5{,}000$ 个）精准落在 $Z > 4$ 区域内，且每个样本的权重解析极简：
+\[
+  w(z) = \frac{\frac{1}{\sqrt{2\pi}}e^{-z^2/2}}{\frac{1}{\sqrt{2\pi}}e^{-(z-4)^2/2}} = \exp(-4z + 8).
+\]
+在下方实测代码中，同样只用 $M = 10{,}000$ 个样本，朴素 MC 颗粒无收（估计为 $0$），而重要性采样一步给出 $3.004 \times 10^{-5} \pm 0.126 \times 10^{-5}$，与精确值 $3.167 \times 10^{-5}$ 高度吻合！
+
+\begin{failBox}{重要性采样的头号杀手：提议尾巴过瘦与权重塌缩}
+虽然只要满足支集覆盖条件，$\hat{I}_{\mathrm{IS}}$ 就永远\textbf{无偏}，但它的方差
+\[
+  \Var_q\bigl(f(X)w(X)\bigr) = \E_q\!\left[f(X)^2\frac{p(X)^2}{q(X)^2}\right] - I^2
+\]
+可能彻底爆炸！最经典的翻车场景是\textbf{提议分布 $q$ 的尾部比目标分布 $p$ 衰减得更快}：例如 $p = \mathcal{N}(0, 2^2)$ 而 $q = \mathcal{N}(0, 1)$，权重 $w(x) \propto \exp(\tfrac{3}{8}x^2)$ 在尾部呈超指数爆炸，直接导致 $\E_q[w(X)^2] = +\infty$（方差无穷大，详见习题 3.2）！
+
+在高维问题中，即使方差有限，如果 $q$ 与 $p$ 稍有错位，也极易出现“$9999$ 个样本权重接近 $0$，仅 $1$ 个幸运样本独占几乎全部权重”的\textbf{权重塌缩（Weight Collapse）}现象。工程中常用\textbf{有效样本量（Effective Sample Size, ESS）}来实时体检：
+\[
+  \mathrm{ESS} := \frac{\left(\sum_{m=1}^M w_m\right)^2}{\sum_{m=1}^M w_m^2} \in [1, M].
+\]
+所有权重相等时 $\mathrm{ESS} = M$（完美利用）；若某单一样本权重独大，则 $\mathrm{ESS} \approx 1$，提示提议分布 $q$ 必须重新设计。
+\end{failBox}
+
+\begin{insightBox}{直通第 6 卷强化学习王牌算法 PPO 的截断重要性比率}
+在深度强化学习与大模型 RLHF 对齐（第 6 卷）中，采样环境交互轨迹极其昂贵，因此我们只能用\textbf{旧策略 $\pi_{\text{old}}(a\mid s)$} 采集一批轨迹，却想用这批数据连续多步更新\textbf{新策略 $\pi_\theta(a\mid s)$}。这正是标准的重要性采样场景——用比率
+\[
+  r_t(\theta) := \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\text{old}}(a_t \mid s_t)}
+\]
+对优势函数 $A_t$ 重加权，把旧策略下的期望搬运到新策略上！一旦 $\pi_\theta$ 走得离 $\pi_{\text{old}}$ 太远，比率 $r_t(\theta)$ 就会发生上面警告过的\textbf{方差爆炸}。OpenAI 提出的 \textbf{PPO（Proximal Policy Optimization）} 的神来之笔，就是把 $r_t(\theta)$ 强行截断在 $[1-\epsilon, 1+\epsilon]$ 区间内（典型 $\epsilon = 0.2$），用一行 \texttt{clip} 稳住了大模型训练的半壁江山！
+\end{insightBox}
+
+\subsection{纯 NumPy 实战：蒙特卡洛积分、CLT 收敛与稀尾重要性采样}
+
+下面给出一段零外部依赖、本机可直接运行的 NumPy 验证脚本，一次打通本节三大实验：(1) 蒙特卡洛投针法估 $\pi$ 并核验 $O(1/\sqrt{M})$ 标度律；(2) 用严重右偏的指数分布 $\mathrm{Exp}(1)$ 验证中心极限定理的 $95\%$ 覆盖率；(3) 对比朴素 MC 与平移正态重要性采样在罕见尾事件 $\Prob(Z > 4)$ 上的天壤之别。
+
+\begin{lstlisting}[caption={蒙特卡洛估 $\pi$、指数分布 CLT 验证与 $\Prob(Z>4)$ 重要性采样（纯 NumPy）},label={lst:ch3-mc-is}]
+import math
+import numpy as np
+
+rng = np.random.default_rng(2026)
+
+# 1. Monte Carlo estimation of pi: verify O(1 / sqrt(M)) standard error
+for M in [1_000, 10_000, 100_000]:
+    xy = rng.uniform(-1.0, 1.0, size=(M, 2))
+    inside = (xy[:, 0]**2 + xy[:, 1]**2 <= 1.0).astype(float)
+    pi_hat = 4.0 * inside.mean()
+    se = 4.0 * inside.std(ddof=1) / np.sqrt(M)
+    print(f"MC pi (M={M:6d}): {pi_hat:.5f} +/- {1.96*se:.5f}")
+# Verified output:
+# MC pi (M=  1000): 3.20000 +/- 0.09922
+# MC pi (M= 10000): 3.15480 +/- 0.03201  (SE shrinks ~3.1x per 10x M)
+# MC pi (M=100000): 3.14792 +/- 0.01015
+
+# 2. CLT check on skewed Exponential(1) (mean=1, std=1), n=50, 20000 trials
+n_clt, trials = 50, 20_000
+means_exp = rng.exponential(scale=1.0, size=(trials, n_clt)).mean(axis=1)
+z_scores = np.sqrt(n_clt) * (means_exp - 1.0) / 1.0
+cov95 = np.mean(np.abs(z_scores) <= 1.96)
+print(f"CLT Exp(1): mean={z_scores.mean():.4f}, std={z_scores.std():.4f}, P(|Z|<=1.96)={cov95:.4f}")
+# Verified output: mean=-0.0061, std=0.9987, P(|Z|<=1.96)=0.9513
+
+# 3. Rare event P(Z > 4) for Z ~ N(0, 1): Naive MC vs Importance Sampling q = N(4, 1)
+true_p = 0.5 * math.erfc(4.0 / math.sqrt(2.0))   # 3.167124e-05
+M_rare = 10_000
+p_mc = np.mean(rng.normal(0.0, 1.0, size=M_rare) > 4.0)
+
+z_is = rng.normal(4.0, 1.0, size=M_rare)
+w = np.exp(-4.0 * z_is + 8.0)                    # p(z) / q(z)
+vals_is = (z_is > 4.0).astype(float) * w
+p_is = vals_is.mean()
+se_is = vals_is.std(ddof=1) / np.sqrt(M_rare)
+print(f"True={true_p:.6e} | Naive MC={p_mc:.6e} | IS={p_is:.6e} +/- {1.96*se_is:.6e}")
+# Verified output: True=3.167124e-05 | Naive MC=0.000000e+00 | IS=3.004483e-05 +/- 1.264907e-06
+\end{lstlisting}
+
+% =========================================================================
+\section{本章习题}
+\label{sec:ch3-exercises}
+
+\exTier{A. 概念辨析与反例查错}{严守不等式前提条件，识破方差爆炸与 CLT 失效陷阱}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em]
+  \item \textbf{（极限、浓度不等式与采样核心概念辨析）} 判断以下四个命题正误；对错误命题给出反例，对正确命题简述理由：
+  \begin{enumerate}[label=(\alph*), leftmargin=1.8em]
+    \item 对任意实值随机变量 $X$（不必非负）和任意 $a > 0$，只要 $\E[X] > 0$，Markov 不等式 $\Prob(X \ge a) \le \E[X]/a$ 就必然成立；
+    \item 若随机变量 $X > 0$ 且不几乎必然为常数，则严格有 $\E[\ln X] < \ln \E[X]$ 且 $\E[1/X] > 1/\E[X]$；
+    \item 只要 $X_1,\dots,X_n$ 相互独立同分布，样本均值 $\bar{X}_n$ 在 $n \to \infty$ 时就必然渐近服从正态分布；
+    \item 在重要性采样中，若提议分布 $q(x)$ 在目标区域 $\{x: p(x)f(x) \neq 0\}$ 的某个正概率子集上取值为 $0$，那么即使采样数 $M \to \infty$，重要性采样估计量一般也会收敛到错误的值（存在系统性偏差）。
+  \end{enumerate}
+
+  \item \textbf{（重要性采样“无偏但方差无穷”反例）} 设目标分布为 $p = \mathcal{N}(0, 2^2)$，提议分布误选为尾部更瘦的标准正态 $q = \mathcal{N}(0, 1)$，权重为 $w(x) = p(x)/q(x)$。
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 写出 $w(x)$ 的显式表达式，直接积分验证 $\E_{X\sim q}[w(X)] = 1$（说明估计常数函数 $f(x)=1$ 时严格无偏）；
+    \item 计算二阶矩 $\E_{X\sim q}[w(X)^2] = \int_{-\infty}^{+\infty} \frac{p(x)^2}{q(x)}\,dx$，证明该积分发散到 $+\infty$，从而 $\Var_q(w(X)) = +\infty$；
+    \item 据此总结选择提议分布 $q$ 时的尾部设计原则：为什么工程上要求 $q$ 的尾部“至少与 $p$ 一样厚”？
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{B. 小例手算与数值直觉}{亲手对比三阶梯上界松紧，算清真实测试集样本量}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（三阶梯浓度不等式正面交锋）} 抛掷 $n = 100$ 次均匀硬币，$X_i \stackrel{\text{i.i.d.}}{\sim} \mathrm{Bernoulli}(0.5)$，记正面比例 $\bar{X}_{100} = \frac{1}{100}\sum_{i=1}^{100} X_i$（均值 $\mu = 0.5$，方差 $\Var(\bar{X}_{100}) = 0.25/100 = 0.0025$）。请分别手算以下四个上界（保留四位小数）并比较松紧程度：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 用 \textbf{Markov 不等式} 给出单侧概率 $\Prob(\bar{X}_{100} \ge 0.65)$ 的上界；
+    \item 用 \textbf{Chebyshev 不等式} 给出双侧概率 $\Prob(|\bar{X}_{100} - 0.5| \ge 0.15)$ 的上界；
+    \item 用 \textbf{Hoeffding 不等式} 分别给出单侧 $\Prob(\bar{X}_{100} \ge 0.65)$ 与双侧 $\Prob(|\bar{X}_{100} - 0.5| \ge 0.15)$ 的上界。
+  \end{enumerate}
+
+  \item \textbf{（AI 评测测试集规模设计：Hoeffding vs CLT）} 某视觉分类模型准备上线，团队希望测试集经验准确率 $\widehat{\mathrm{Acc}}_n$ 与真实准确率 $\mathrm{Acc}^*$ 的偏差不超过 $\varepsilon = 0.02$（$2$ 个百分点）。
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 使用 Hoeffding 不等式，分别计算 $95\%$ 置信度（$\delta = 0.05$）和 $99\%$ 置信度（$\delta = 0.01$）所需的最小测试集样本量 $n$；
+    \item 若已知模型真实准确率大约在 $\mathrm{Acc}^* \approx 0.90$ 附近，改用 CLT 渐近 $95\%$ 置信条件 $1.96\sqrt{p(1-p)/n}$ $\le 0.02$，重新估算所需最小样本量 $n_{\mathrm{CLT}}$；
+    \item 从“方差信息”与“有限样本保证 vs 渐近近似”两个角度，解释为何 $n_{\mathrm{CLT}}$ 远小于 Hoeffding 样本量。
+  \end{enumerate}
+\end{enumerate}
+
+\exTier{C. 实用推导与性质证明}{用 Jensen 拿下 Softplus 与 AM--GM，推导零方差最优提议分布}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（Softplus 凸性与加权算术-几何平均不等式）} 结合 Jensen 不等式（定理 \ref{thm:ch3-jensen}）完成以下两项证明：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 证明神经网络与逻辑回归中高频出现的 Softplus 函数 $f(x) = \ln(1 + e^x)$ 在 $\R$ 上严格凸，从而对任意具有有限期望的随机变量 $X$ 恒有 $\E[\ln(1 + e^X)] \ge \ln(1 + e^{\E[X]})$；
+    \item 对任意正实数 $a_1, \dots, a_k > 0$ 与非负权重 $w_1, \dots, w_k \ge 0$（满足 $\sum_{i=1}^k w_i = 1$），构造一个离散随机变量 $X$ 并对严格凹函数 $\ln x$ 应用 Jensen 不等式，一步证明\textbf{加权算术-几何平均不等式（AM--GM）}：
+    \[
+      \prod_{i=1}^k a_i^{w_i} \le \sum_{i=1}^k w_i a_i,
+    \]
+    并说明等号成立的充要条件。
+  \end{enumerate}
+  \exHint{第 (1) 问计算 $f'(x) = \sigma(x) = \frac{1}{1+e^{-x}}$ 与 $f''(x) = \sigma(x)(1-\sigma(x)) > 0$；第 (2) 问令 $\Prob(X = a_i) = w_i$。}
+
+  \item \textbf{（重要性采样的理论最优提议分布与“零方差悖论”）} 设 $f(x) > 0$ 恒正，我们希望用重要性采样估计 $I = \E_{x\sim p}[f(x)] > 0$。
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 证明单样本重要性估计量 $Y = f(X)\frac{p(X)}{q(X)}$（$X \sim q$）的方差为 $\Var_q(Y) = \E_q\!\bigl[\frac{f(X)^2 p(X)^2}{q(X)^2}\bigr] - I^2$；
+    \item 对任意合法提议分布 $q$，用 Jensen 不等式证明 $\E_q\!\bigl[\bigl(f(X)\frac{p(X)}{q(X)}\bigr)^2\bigr] \ge I^2$，并直接验证当且仅当选取
+    \[
+      q^*(x) = \frac{f(x) p(x)}{I} = \frac{f(x) p(x)}{\int f(t) p(t)\,dt}
+    \]
+    时，方差达到绝对下界 $\Var_{q^*}(Y) = 0$（只需 $M = 1$ 个样本就能零误差命中真值！）；
+    \item 解释为什么 $q^*(x)$ 无法在真实计算中直接拿来采样，它又给工程设计提议分布 $q$ 带来了怎样的指导原则？
+  \end{enumerate}
+  \exHint{第 (2) 问中直接将 $q^*(x)$ 代入 $f(x)p(x)/q^*(x)$ 会发现结果恒等于常数 $I$；对一般 $q$ 直接应用 $\E_q[Y^2] \ge (\E_q[Y])^2 = I^2$。}
+\end{enumerate}
+
+\exTier{D. 编程实战与可自检实验}{用 NumPy 复现浓度衰减曲线、CLT 形态演化与权重塌缩诊断}
+
+\begin{enumerate}[label=\textbf{3.\arabic*}, leftmargin=2.4em, resume]
+  \item \textbf{（浓度不等式实测对比与右偏分布 CLT 演化实验）} 编写纯 NumPy 脚本（固定随机种子 \texttt{2026}）完成以下两项实验：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 对 $n \in \{20, 60, 100, 200, 300\}$，各做 $20{,}000$ 次独立重复试验计算 $\mathrm{Bernoulli}(0.5)$ 样本均值 $\bar{X}_n$，打印每个 $n$ 下的实测尾概率 $\Prob(|\bar{X}_n - 0.5| \ge 0.1)$、Chebyshev 上界与 Hoeffding 上界，验证实测值恒不超过两者且 Hoeffding 最终显著紧于 Chebyshev；
+    \item 对严重右偏的指数分布 $X_i \sim \mathrm{Exp}(1)$，分别取 $n \in \{1, 5, 30, 100\}$，各做 $20{,}000$ 次试验计算标准化统计量 $Z_n = \sqrt{n}(\bar{X}_n - 1)$，统计并输出每个 $n$ 下的样本偏度 $\frac{1}{T}\sum Z_n^3$ 与落入 $[-1.96, 1.96]$ 的经验覆盖率。
+  \end{enumerate}
+  {\rightskip=0pt plus 1em\relax \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,第 (1) 问在 $n=300$ 时，Chebyshev 上界须为 $0.08333$、Hoeffding 上界为 $0.00496$、实测尾概率应落在 $[0.0001, 0.0010]$ 之间；第 (2) 问随 $n$ 从 $1$ 增至 $100$，偏度应从约 $2.0$ 单调降至约 $0.20$（理论值 $2/\sqrt{n}$），$[-1.96, 1.96]$ 覆盖率应从约 $0.948$ 稳定收敛至 $0.950 \pm 0.005$。}\par}
+
+  \item \textbf{（罕见尾事件重要性采样与权重塌缩 ESS 诊断）} 编写纯 NumPy 脚本完成以下两项实验：
+  \begin{enumerate}[label=(\arabic*), leftmargin=1.8em]
+    \item 以精确值 $p_{\mathrm{true}} = \Prob_{Z\sim\mathcal{N}(0,1)}(Z > 4) \approx 3.1671 \times 10^{-5}$ 为基准，在 $M = 20{,}000$ 采样预算下，重复 $50$ 次独立试验对比朴素蒙特卡洛与平移正态提议 $q = \mathcal{N}(4, 1)$ 重要性采样的均值、标准差与平均相对误差；
+    \item 目标估计 $I = \E_{X\sim\mathcal{N}(0, 2^2)}[X^2] = 4.0$。取 $M = 10{,}000$ 重复 $50$ 次试验，分别使用“瘦尾提议” $q_1 = \mathcal{N}(0, 1)$ 与“厚尾提议” $q_2 = \mathcal{N}(0, 3^2)$ 计算重要性采样估计值、$50$ 次重复的经验标准差，以及平均相对有效样本量 $\mathrm{ESS}/M$。
+  \end{enumerate}
+  \par\smallskip\noindent{\footnotesize\sffamily\color{tealDark}\textbf{【自检标准】}\,第 (1) 问中，朴素 MC 约有一半轮次输出 $0$（标准差与真值同量级、超过 $3\times 10^{-5}$），而 $q=\mathcal{N}(4,1)$ 重要性采样在 $50$ 轮中的均值应在 $(3.167 \pm 0.05)\times 10^{-5}$ 内且单轮标准差 $< 7\times 10^{-7}$（平均相对误差 $< 2\%$）；第 (2) 问中，厚尾提议 $q_2 = \mathcal{N}(0, 3^2)$ 须稳定估计 $4.00 \pm 0.05$、经验标准差 $< 0.05$ 且 $\mathrm{ESS}/M > 0.75$，而瘦尾提议 $q_1 = \mathcal{N}(0, 1)$ 会出现剧烈波动（经验标准差 $> 0.5$、$\mathrm{ESS}/M < 0.25$），直观印证习题 3.2 的无穷方差陷阱。}
+\end{enumerate}

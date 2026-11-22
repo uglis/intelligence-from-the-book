@@ -1,0 +1,787 @@
+\chapter[AI 硬件、Roofline 模型与 FlashAttention]{AI 计算硬件、GPU 内存墙与算子优化（Roofline 与 FlashAttention）}
+\label{ch:hardware-roofline-flash}
+
+\chapEpigraph{过早优化是万恶之源，然而我们也不该放过关键 3\% 代码中的优化机会。}{Donald E. Knuth（高德纳，1974）}
+
+\begin{chapIntro}{本章导读：当算法复杂度撞上硅片上的“内存墙”}
+在前面四章中，我们从时序差分、策略梯度一路走到 PPO、GRPO 与 DPO，在数学纸面上自由地写下矩阵乘法、Softmax 归一化与整句对数概率梯度。然而，当你真正试图在一台拥有 80\,GB 显存的 GPU 服务器上训练或部署一个百亿参数的大语言模型时，一个残酷的物理现实会立刻迎面撞来：\textbf{在现代 AI 计算中，算术运算本身几乎是“免费的”，真正昂贵的是把数据从显存搬运到计算核心的字节数。}
+
+如果只用教科书上的大 $O$ 算术复杂度去衡量模型，你会陷入无数反直觉的工程迷局：为什么单请求逐词生成（Decode）时，每秒可算近千万亿次的旗舰 GPU 利用率却不足 $0.4\%$？为什么一个 70 亿参数的半精度模型本身仅占 14\,GB 权重，训练时却连一张 80\,GB 显卡都装不下？为什么 FlashAttention 明明在反向传播中多做了重计算（总 FLOPs 反而略增），实际运行速度却比标准注意力快 $2\text{--}4\times$、显存更是从平方级骤降至线性级？
+
+本章将把计算机组成原理、操作系统存储层次与现代 GPU 微架构无缝贯通，为读者建立四块坚实的 AI 系统基石：
+\begin{enumerate}
+  \item \textbf{现代 GPU 硬件与内存墙}：从 CPU 的低延迟设计切入 GPU 的高吞吐 SIMT 架构，定量对比片上 SRAM（$\sim 20\,\mathrm{MB}$、$\sim 19\,\mathrm{TB/s}$）与片外 HBM（$\sim 80\,\mathrm{GB}$、$\sim 3.35\,\mathrm{TB/s}$）之间的数量级鸿沟。
+  \item \textbf{Roofline 性能模型与 Prefill/Decode 分化定理}：以算术强度 $\mathrm{AI} = \mathrm{FLOPs}/\mathrm{Bytes}$ 与拐点 $I^* = P_{\mathrm{peak}}/B_{\mathrm{HBM}}$ 为尺，严格证明为何 Prefill 处于计算受限区而单词元 Decode 深陷访存受限区，并基于 \texttt{data/roofline.csv} 完整复现实测曲线。
+  \item \textbf{大模型训练显存账本（$16\Phi$ 法则与 $\sqrt{L}$ 检查点定理）}：逐字节核算混合精度 AdamW 训练的静态显存与动态激活显存，并利用均值不等式证明最优 $\sqrt{L}$ 激活重计算如何以约 $33\%$ 的额外算力换取从 $O(L)$ 到 $O(\sqrt{L})$ 的显存骤降。
+  \item \textbf{FlashAttention 数学核心与在线 Softmax 分块证明}：用数学归纳法严格证明分块在线 Softmax 递推与全局标准注意力逐元素恒等，且仅需 $O(B_r B_c)$ 片上 SRAM 瓦片；最后用纯 NumPy 实验验证误差低至 $3.89\times 10^{-16}$ 的双精度机器零。
+\end{enumerate}
+\end{chapIntro}
+
+\section{从计算机组成到现代 GPU：计算力与“内存墙”}
+\label{sec:gpu-arch-memory-wall}
+
+\begin{recallBox}{408 计算机组成与操作系统速忆：存储层次金字塔}
+在经典计算机组成原理中，冯·诺依曼体系的存储系统遵循一条铁律：\textbf{速度越快的存储介质单位造价越高、容量越小}。从 CPU 内部的通用寄存器（$<1\,\mathrm{ns}$）、片上 L1/L2/L3 SRAM 高速缓存（数纳秒），到片外主存 DRAM（数十至上百纳秒）与固态硬盘，构成了经典的存储层次金字塔。程序之所以能高速运行，依赖于\textbf{时间局部性}（刚访问过的数据很快再次使用）与\textbf{空间局部性}（相邻地址的数据会被连续读取）。现代 GPU 并没有推翻这座金字塔，而是把它的带宽剪刀差放大到了极致。
+\end{recallBox}
+
+\subsection{延迟导向（CPU）与吞吐导向（GPU）的芯片面积博弈}
+
+在同一块面积有限的硅片上，芯片架构师必须在\textbf{控制逻辑、大容量缓存}与\textbf{算术逻辑单元（ALU）}之间做取舍。这直接造就了 CPU 与 GPU 截然不同的设计哲学：
+\begin{itemize}
+  \item \textbf{CPU（低延迟导向，Latency-Oriented）}：面对操作系统调度、数据库索引与复杂分支程序，CPU 必须让\emph{单条线程}尽可能快地跑完。因此它把大片晶体管投入到深分支预测器、乱序执行（Out-of-Order Execution）窗口、寄存器重命名以及动辄数十兆字节的 L3 缓存上，留给纯算术核心的硅片面积反而占比较小。
+  \item \textbf{GPU（高吞吐导向，Throughput-Oriented）}：深度学习的核心载荷是高度规则的稠密矩阵乘加与张量逐元素变换，几乎没有复杂数据依赖分支。GPU 大幅削减单个核心的控制复杂度，把绝大多数硅片面积铺满数以万计的精简算术单元与专用矩阵引擎（Tensor Core），追求的不是单个线程的最低延迟，而是\textbf{整张芯片每秒能吞吐多少万亿次浮点运算}。
+\end{itemize}
+
+现代 NVIDIA 数据中心 GPU（以 Hopper 架构 H100 SXM 为代表）的核心硬件层次由四个关键词串联：
+\begin{enumerate}
+  \item \textbf{流多处理器（Streaming Multiprocessor, SM）}：GPU 的基本并行执行岛屿。一张 H100 SXM 芯片集成高达 132 个 SM，每个 SM 内置指令调度器、大容量寄存器文件、片上共享内存（Shared Memory / L1 Cache，本质是高速片上 SRAM）以及标量 CUDA Core 与矩阵引擎 Tensor Core。
+  \item \textbf{单指令多线程（SIMT）与线程束（Warp）}：GPU 并不逐个线程单独发射指令，而是将每 32 个相邻线程编为一个\textbf{线程束（Warp）}，在锁步（Lockstep）模式下共享同一条指令译码流。当某个 Warp 因等待片外显存返回数据而停顿时，SM 内的硬件 Warp 调度器可以在\textbf{零时钟周期开销}内立刻切换到另一个已就绪的 Warp 执行——这就是 GPU 用海量并发线程隐藏访存延迟的底层秘密（对比 408 操作系统中 CPU 进程上下文切换动辄微秒级保存/恢复栈帧的昂贵开销，GPU 把所有活跃 Warp 的上下文直接常驻在庞大的寄存器文件中！）。
+  \item \textbf{张量核心（Tensor Core）}：传统标量 ALU 每周期仅完成 1 次乘加（FMA，即 2 FLOPs）；而 Tensor Core 是专为深度学习打造的硬件矩阵乘加（MMA）阵列，单条指令即可在极短周期内吞下 $16\times 8\times 16$ 乃至更大尺寸的小矩阵乘加 $D = A B + C$，将 BF16 稠密峰值算力推升至近 $1000\,\mathrm{TFLOP/s}$！
+  \item \textbf{存储层级断崖（On-Chip SRAM vs Off-Chip HBM）}：如图~\ref{fig:gpu-memory-hierarchy} 所示，GPU 内部存在一道惊人的带宽与容量断崖：
+  \begin{itemize}
+    \item \textbf{片外高带宽显存（HBM3）}：容量大（$80\,\mathrm{GB}$），用来存放整座大模型的权重、梯度、优化器状态与 KV 缓存；尽管 HBM3 通过硅中介层与 3D 堆叠已将带宽推到惊人的 $3.35\,\mathrm{TB/s}$（远超普通服务器 DDR5 内存），但面对近 $1000\,\mathrm{TFLOP/s}$ 的胃口依然杯水车薪。
+    \item \textbf{片上 SRAM（Shared Memory / 寄存器）}：分布在各个 SM 内部，总容量仅约 $20\text{--}50\,\mathrm{MB}$（每 SM 约 $256\,\mathrm{KB}$ 可配置共享内存 + 寄存器文件），比 HBM 小了足足三个数量级；但聚合片上读写带宽高达 $\sim 19\,\mathrm{TB/s}$（寄存器带宽更高达数百 $\mathrm{TB/s}$），比 HBM 快一个数量级以上！
+  \end{itemize}
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={rectangle, rounded corners=1.4mm, draw=#1, thick, fill=#1!10, align=center, text=ink, inner sep=3.5pt},
+  arr/.style={-{Stealth[length=2.1mm]}, thick, slate}
+]
+  % Left side: CPU vs GPU die layout
+  \node[font=\sffamily\small\bfseries, color=navy] at (-4.3, 3.65) {硅片面积分配哲学对比};
+
+  % CPU Die
+  \draw[navy, thick, rounded corners=1.5mm, fill=navyLight] (-6.9, 1.55) rectangle (-1.7, 3.32);
+  \node[anchor=west, font=\sffamily\scriptsize\bfseries, color=navy] at (-6.75, 3.07) {CPU（低延迟导向）};
+  \fill[ochre!25, draw=ochre, rounded corners=0.8mm] (-6.7, 2.35) rectangle (-4.4, 2.82);
+  \node[font=\scriptsize] at (-5.55, 2.58) {复杂控制 / 分支预测};
+  \fill[teal!22, draw=teal, rounded corners=0.8mm] (-4.25, 2.35) rectangle (-1.9, 2.82);
+  \node[font=\scriptsize] at (-3.07, 2.58) {重型 ALU 核心};
+  \fill[slate!20, draw=slate, rounded corners=0.8mm] (-6.7, 1.72) rectangle (-1.9, 2.24);
+  \node[font=\scriptsize] at (-4.3, 1.98) {超大容量片上 L2 / L3 缓存};
+
+  % GPU Die
+  \draw[tealDark, thick, rounded corners=1.5mm, fill=tealLight] (-6.9, -1.62) rectangle (-1.7, 1.32);
+  \node[anchor=west, font=\sffamily\scriptsize\bfseries, color=tealDark] at (-6.75, 1.06) {GPU（高吞吐 SIMT 导向）};
+  \foreach \r in {0,1,2,3} {
+    \fill[ochre!25, draw=ochre, rounded corners=0.5mm] (-6.7, 0.42-\r*0.56) rectangle (-5.55, 0.80-\r*0.56);
+    \node[font=\tiny] at (-6.125, 0.61-\r*0.56) {Warp 调度};
+    \fill[slate!18, draw=slate, rounded corners=0.5mm] (-5.45, 0.42-\r*0.56) rectangle (-4.65, 0.80-\r*0.56);
+    \node[font=\tiny] at (-5.05, 0.61-\r*0.56) {SRAM};
+    \foreach \c in {0,1,2,3,4,5} {
+      \fill[teal!35, draw=tealDark, rounded corners=0.4mm] (-4.53+\c*0.44, 0.42-\r*0.56) rectangle (-4.17+\c*0.44, 0.80-\r*0.56);
+    }
+  }
+  \node[font=\tiny\bfseries, color=tealDark] at (-4.30, -1.44) {密集排布的 SM 标量核与 Tensor Core 矩阵阵列};
+
+  % Right side: GPU Memory Hierarchy Pyramid (H100 SXM)
+  \node[font=\sffamily\small\bfseries, color=tealDark] at (3.55, 3.65) {旗舰 GPU 存储层次与带宽断崖（H100 SXM 量级）};
+
+  % Level 1: Tensor Cores + Registers
+  \node[box=gold, minimum width=44mm, minimum height=10.5mm] (reg) at (3.55, 2.75) {
+    \textbf{Tensor Core \& 寄存器文件}\\
+    {\scriptsize BF16 稠密峰值 \textbf{989 TFLOP/s}}
+  };
+
+  % Level 2: On-chip SRAM
+  \node[box=teal, minimum width=62mm, minimum height=11.5mm] (sram) at (3.55, 1.25) {
+    \textbf{片上 SRAM（Shared Memory / L1）}\\
+    {\scriptsize 容量 $\sim 20\,\mathrm{MB}$ \quad $\cdot$ \quad 聚合带宽 \textbf{$\sim 19\,\mathrm{TB/s}$}}
+  };
+
+  % Level 3: L2 Cache
+  \node[box=navy, minimum width=76mm, minimum height=10.0mm] (l2) at (3.55, -0.15) {
+    \textbf{共享片上 L2 缓存}\\
+    {\scriptsize 容量 $50\,\mathrm{MB}$ \quad $\cdot$ \quad 带宽 $\sim 12\,\mathrm{TB/s}$}
+  };
+
+  % Level 4: Off-chip HBM3
+  \node[box=ochre, minimum width=90mm, minimum height=12.0mm] (hbm) at (3.55, -1.65) {
+    \textbf{片外高带宽显存（HBM3）—— 内存墙主战场}\\
+    {\scriptsize 容量 \textbf{80\,GB} \quad $\cdot$ \quad 带宽 \textbf{3.35\,TB/s}（比 SRAM 慢约 $6\times$）}
+  };
+
+  \draw[arr, <->, tealDark] (reg.south) -- (sram.north);
+  \draw[arr, <->, navy] (sram.south) -- (l2.north);
+  \draw[arr, <->, ochre] (l2.south) -- (hbm.north);
+
+  % Side annotations
+  \draw[-{Stealth[length=2mm]}, thick, teal] (-1.05, -1.7) -- (-1.05, 2.9)
+    node[midway, sloped, above, font=\scriptsize\bfseries, color=tealDark] {带宽骤升、延迟骤降};
+  \draw[{Stealth[length=2mm]}-, thick, ochre] (8.35, -1.7) -- (8.35, 2.9)
+    node[midway, sloped, below, font=\scriptsize\bfseries, color=ochre] {容量暴涨 $4000\times$};
+\end{tikzpicture}%
+}
+\caption{左侧对比 CPU（重控制与大缓存）与 GPU（重密集矩阵算力与零开销 Warp 切换）的硅片面积分配哲学；右侧刻画 H100 SXM 级 GPU 从片外 HBM3 到片上 SRAM 与 Tensor Core 的存储金字塔，揭示 AI 系统优化的核心矛盾——片上 SRAM 虽快却极小，片外 HBM 虽大却受带宽制约。}
+\label{fig:gpu-memory-hierarchy}
+\end{figure}
+
+\subsection{什么是“内存墙”？为什么 FLOPs 不再等于运行时间？}
+
+过去十年间，受限于芯片封装引脚密度与物理能耗，GPU 的浮点算力增速远远甩开了显存带宽增速：从 2016 年的 P100 到 2023 年的 H100，半精度矩阵算力暴涨了近 $50\times$，而 HBM 显存带宽仅增长了约 $4.6\times$。这意味着现代 GPU 就像一位每秒能切 1000 盘菜的超级主厨（Tensor Core），却配了一条每秒只能端来 3 盘原料的狭窄传送带（HBM 总线）。如果菜谱设计不当，主厨有 $99\%$ 的时间都只能呆站在灶台前等原料！
+
+这正是系统结构领域著名的\textbf{内存墙（Memory Wall）}现象。要科学诊断一个神经网络算子究竟是“主厨切不过来”（计算受限），还是“传送带太慢”（访存受限），我们需要一把精确的定量标尺——\textbf{Roofline 性能模型}。
+
+\section{Roofline 性能模型：Prefill 计算受限与 Decode 访存受限}
+\label{sec:roofline-model}
+
+\subsection{算术强度、硬件上限与拐点（Ridge Point）}
+
+2009 年，加州大学伯克利分校的 Samuel Williams、Andrew Waterman 与 David Patterson 提出了简洁而极具威力的 \textbf{Roofline（屋顶线）性能模型}，用仅仅两个硬件参数与一个算法指标，就能给出任意计算核函数在特定硬件上的理论性能上界。
+
+\begin{defBox}
+\begin{definition}[算术强度、Roofline 上界与硬件拐点]
+\label{def:roofline-ai}
+考虑一个在峰值计算吞吐率为 $P_{\mathrm{peak}}$（单位：$\mathrm{FLOP/s}$）、片外显存带宽为 $B_{\mathrm{HBM}}$（单位：$\mathrm{Byte/s}$）的加速器上运行的算子。设该算子共需执行 $F$ 次浮点运算，且必须在片外显存与计算单元之间搬运至少 $Q$ 字节数据。
+\begin{enumerate}
+  \item \textbf{算术强度（Arithmetic Intensity, AI）}定义为平均每搬运 1 字节显存数据所完成的浮点运算次数：
+  \begin{equation}
+    \mathrm{AI} \;\triangleq\; \frac{F}{Q} \qquad \big(\text{单位：}\mathrm{FLOP/Byte}\big).
+    \label{eq:ai-def}
+  \end{equation}
+  \item \textbf{Roofline 可达性能上界}由计算屋顶与访存斜坡二者中的瓶颈决定：
+  \begin{equation}
+    P(\mathrm{AI}) \;=\; \min\!\Big(P_{\mathrm{peak}},\; \mathrm{AI} \cdot B_{\mathrm{HBM}}\Big).
+    \label{eq:roofline-perf}
+  \end{equation}
+  \item \textbf{硬件拐点（Ridge Point，亦称脊点）} $I^*$ 定义为访存斜坡与计算屋顶的交点：
+  \begin{equation}
+    I^* \;\triangleq\; \frac{P_{\mathrm{peak}}}{B_{\mathrm{HBM}}} \qquad \big(\text{单位：}\mathrm{FLOP/Byte}\big).
+    \label{eq:ridge-point}
+  \end{equation}
+\end{enumerate}
+当 $\mathrm{AI} < I^*$ 时，算子处于\textbf{访存受限区（Memory-Bandwidth Bound）}，运行时间几乎完全由字节搬运量 $Q / B_{\mathrm{HBM}}$ 决定，增加硬件算力无济于事；当 $\mathrm{AI} \ge I^*$ 时，算子进入\textbf{计算受限区（Compute Bound）}，计算单元能够吃饱跑满，运行时间由 $F / P_{\mathrm{peak}}$ 主导。
+\end{definition}
+\end{defBox}
+
+让我们立即代入 H100 SXM（BF16 稠密张量核）的真实硬件参数算一笔账：
+\[
+  P_{\mathrm{peak}} = 989\,\mathrm{TFLOP/s}, \qquad
+  B_{\mathrm{HBM}} = 3.35\,\mathrm{TB/s}
+  \quad\Longrightarrow\quad
+  I^* = \frac{989 \times 10^{12}}{3.35 \times 10^{12}} \approx 295.2\,\mathrm{FLOP/B}.
+\]
+这个数字 $295\,\mathrm{FLOP/B}$ 极其震撼：它意味着\textbf{你从 HBM 里每辛苦搬运 1 字节数据（哪怕是半个 BF16 浮点数），至少要在片上复用并完成近 300 次浮点运算，才配得上让 H100 的 Tensor Core 满负荷运转！}对于一个 BF16 元素（2 字节），则必须平均参与约 $590$ 次浮点运算。
+
+\subsection{核心定理：为什么 Prefill 吃满算力，而 Decode 却惨遭腰斩？}
+
+大语言模型的自回归推理清晰地分为两个物理截然不同的阶段：
+\begin{itemize}
+  \item \textbf{预填充阶段（Prefill）}：将用户输入的整段提示词（长度为 $S_{\mathrm{prompt}}$，例如 512 或 4096 个词元）一次性并行送入 Transformer，计算全部提示词的隐藏状态并填满 KV 缓存；
+  \item \textbf{逐词解码阶段（Decode）}：自回归循环每次仅将上一步刚生成的\textbf{单个新词元}（若批量大小为 $B$，则总共只有 $T = B$ 个新词元）送入模型，逐层做线性投影并与历史 KV 缓存交互。
+\end{itemize}
+下面这条定理以零含糊的精确代数，揭示了两个阶段为何在硬件上呈现天壤之别。
+
+\begin{thmBox}
+\begin{theorem}[Transformer 线性投影的 Prefill 计算受限与 Decode 访存受限分化]
+\label{thm:prefill-vs-decode}
+考虑大模型中一个典型的 BF16（每元素占 2 字节）全连接线性层 $Y = X W$，其中权重矩阵 $W \in \R^{d \times d}$，当前步同时处理的词元隐状态矩阵 $X \in \R^{T \times d}$（单请求 Prefill 时 $T = S_{\mathrm{prompt}}$，批大小为 $B$ 的 Decode 时 $T = B$）。假设忽略偏置项与缓存溢出，从 HBM 读入 $X, W$ 并将结果 $Y \in \R^{T \times d}$ 写回 HBM，则：
+\begin{enumerate}
+  \item 该线性层的精确浮点运算量与 HBM 总字节读写量分别为
+  \begin{equation}
+    F(T, d) = 2 T d^2, \qquad
+    Q(T, d) = 2\!\left(d^2 + 2 T d\right)\,\text{Bytes}.
+    \label{eq:gemm-flops-bytes}
+  \end{equation}
+  \item 其精确算术强度为关于有效词元数 $T$ 的严格单调递增函数：
+  \begin{equation}
+    \mathrm{AI}(T) \;=\; \frac{T d}{d + 2 T} \;=\; \frac{1}{\frac{1}{T} + \frac{2}{d}} \qquad \big(\mathrm{FLOP/B}\big).
+    \label{eq:gemm-ai}
+  \end{equation}
+  \item 算子跨过硬件拐点 $I^*$ 进入计算受限区，当且仅当 $d > 2 I^*$ 且词元数满足
+  \begin{equation}
+    T \;\ge\; T^* \;=\; \frac{d\, I^*}{d - 2 I^*}.
+    \label{eq:critical-tokens}
+  \end{equation}
+\end{enumerate}
+特别地，在典型宽度 $d = 4096$ 与 H100 规格（$P_{\mathrm{peak}} = 989\,\mathrm{TFLOP/s}$，$B_{\mathrm{HBM}} = 3.35\,\mathrm{TB/s}$，$I^* \approx 295.2\,\mathrm{FLOP/B}$）下：
+\begin{itemize}
+  \item 当 $T = 1$（单请求 Decode，矩阵—向量乘 GEMV）时，$\mathrm{AI}(1) = \frac{4096}{4098} \approx 1.00\,\mathrm{FLOP/B}$，可达算力仅为 $3.35\,\mathrm{TFLOP/s}$，GPU 计算利用率低至 $\mathbf{0.34\%}$（严重访存受限）；
+  \item 跨入计算受限区需要 $T^* \approx 345$ 个词元；当 $T = 512$（Prefill 或大批量 Decode，矩阵—矩阵乘 GEMM）时，$\mathrm{AI}(512) = 409.60\,\mathrm{FLOP/B} > I^*$，可达算力打满 $\mathbf{989.00\,\mathrm{TFLOP/s}}$，利用率达到 $\mathbf{100\%}$！
+\end{itemize}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+（1）矩阵乘法 $Y_{i,j} = \sum_{k=1}^{d} X_{i,k} W_{k,j}$ 共有 $T \times d$ 个输出元素，每个输出元素需做 $d$ 次乘法和 $d - 1$ 次加法（在工程惯例中记为 $d$ 次乘加操作 FMA，每次 FMA 计 $2$ FLOPs），因此总浮点运算量为 $F(T, d) = 2 T d^2$。
+
+在 HBM 字节搬运上，BF16 每个数值占 $2$ 字节：读入权重 $W$ 占 $2 d^2$ 字节，读入输入激活 $X$ 占 $2 T d$ 字节，写出输出激活 $Y$ 占 $2 T d$ 字节，故最小总访存字节数为 $Q(T, d) = 2(d^2 + 2 T d)$。
+
+（2）将式~\eqref{eq:gemm-flops-bytes} 代入定义~\ref{def:roofline-ai}，分子分母同除以 $2d$ 立即得到：
+\[
+  \mathrm{AI}(T) = \frac{2 T d^2}{2(d^2 + 2 T d)} = \frac{T d}{d + 2 T} = \frac{1}{\frac{1}{T} + \frac{2}{d}}.
+\]
+显然随 $T$ 增大，$\frac{1}{T}$ 严格递减，故 $\mathrm{AI}(T)$ 严格递增，且当 $T \to \infty$ 时趋于上界 $d / 2$（此时访存由激活 $X, Y$ 主导而非权重 $W$）。
+
+（3）令 $\mathrm{AI}(T) \ge I^*$，整理不等式 $T d \ge I^*(d + 2 T)$ 得 $T(d - 2 I^*) \ge d I^*$。因此当且仅当隐藏维度满足 $d > 2 I^*$ 且 $T \ge \frac{d I^*}{d - 2 I^*}$ 时，算子才能进入计算受限区。代入 $d = 4096, I^* = 989/3.35 \approx 295.224$：
+\begin{itemize}
+  \item $T = 1$：$\mathrm{AI}(1) = \frac{4096}{4098} \approx 0.9995 \approx 1.00\,\mathrm{FLOP/B}$，$P(1) = 0.9995 \times 3.35 \approx 3.35\,\mathrm{TFLOP/s}$，利用率 $3.35 / 989 \approx 0.34\%$；
+  \item 临界词元数：$T^* = \frac{4096 \times 295.224}{4096 - 590.448} \approx 345.0$；
+  \item $T = 512$：$\mathrm{AI}(512) = \frac{512 \times 4096}{4096 + 1024} = \frac{2048}{5} = 409.60\,\mathrm{FLOP/B} > 295.22$，从而 $P(512) = \min(989,\, 409.60 \times 3.35) = 989.00\,\mathrm{TFLOP/s}$，利用率 $100.00\%$。
+\end{itemize}
+证毕。
+\end{proof}
+
+\begin{insightBox}{一条公式统领整本 AI 推理优化教科书}
+请反复凝视式~\eqref{eq:gemm-ai} 的结构：在单请求 Decode（$T=1$）时，权重矩阵 $W$ 足足有 $2d^2 = 32\,\mathrm{MB}$，你辛辛苦苦把它从 HBM 搬进片上，却只让它乘了区区 1 个向量 $X$（$8\,\mathrm{KB}$）就扔掉了！\textbf{整个现代大模型推理系统的核心优化，几乎都在对着式~\eqref{eq:gemm-ai} 的分子分母做文章}：
+\begin{itemize}
+  \item \textbf{把分子 $T$ 变大（提高权重复用率）}：动态连续批处理（Continuous Batching，将几十上百个用户的 Decode 请求拼成大批量 $T = B$）与投机解码（Speculative Decoding，单请求一次并行验证 $\gamma + 1$ 个草稿词元），将在第~\ref{ch:dist-quant-serving} 章详述；
+  \item \textbf{把分母 $Q$ 变小（压缩搬运字节数）}：将权重从 BF16（2 字节）量化到 INT8（1 字节）甚至 INT4（0.5 字节），分母权重项立刻缩小 $2\text{--}4\times$，Decode 速度近乎线性翻倍！
+\end{itemize}
+\end{insightBox}
+
+\subsection{实测验证：H100 级 BF16 线性层的 Roofline 曲线与利用率攀升}
+
+配套脚本 \texttt{code/vol6\_experiments.py} 中的实验 5（\texttt{exp5\_flash\_online}）精确扫描了 $T \in \{1, 2, 4, \dots, 1024\}$ 下 $4096 \times 4096$ BF16 线性层在 H100 规格上的算术强度、可达算力与利用率，结果保存在 \texttt{data/roofline.csv} 中。表~\ref{tab:roofline-data} 与图~\ref{fig:roofline-exp} 直接展示了这一从 $0.34\%$ 到 $100\%$ 的悬殊跨越。
+
+\begin{table}[htbp]
+\centering
+\caption{H100 规格下 $4096 \times 4096$ BF16 线性层的 Roofline 实测数据节选（来源：\texttt{data/roofline.csv}）。}
+\label{tab:roofline-data}
+\footnotesize
+\setlength{\tabcolsep}{4.2pt}
+\begin{tabular}{@{}rrrrcl@{}}
+\toprule
+\textbf{词元数 $T$} & \textbf{算术强度 (FLOP/B)} & \textbf{可达算力 (TFLOP/s)} & \textbf{利用率} & \textbf{性能区域} & \textbf{典型推理场景} \\
+\midrule
+$1$ & $1.00$ & $3.35$ & $0.34\%$ & 访存受限 & 单请求逐词 Decode（GEMV） \\
+$8$ & $7.97$ & $26.70$ & $2.70\%$ & 访存受限 & 小批量 Decode / 投机解码 \\
+$64$ & $62.06$ & $207.90$ & $21.02\%$ & 访存受限 & 中批量在线服务 Decode \\
+$128$ & $120.47$ & $403.58$ & $40.81\%$ & 访存受限 & 短提示 Prefill / 大批量 Decode \\
+$256$ & $227.56$ & $762.31$ & $77.08\%$ & 临近拐点 & 逼近 $T^* \approx 345$ 临界线 \\
+$512$ & $409.60$ & $989.00$ & $100.00\%$ & 计算受限 & 常规 Prefill（完全吃满算力） \\
+$1024$ & $682.67$ & $989.00$ & $100.00\%$ & 计算受限 & 长提示 Prefill / 预训练前向 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left panel: Classic Log-Log Roofline
+  \begin{axis}[
+    name=leftplot,
+    width=0.49\linewidth,
+    height=6.2cm,
+    xmode=log,
+    ymode=log,
+    xmin=0.7, xmax=1400,
+    ymin=2, ymax=2800,
+    xlabel={算术强度 $\mathrm{AI}$ (FLOP/Byte)},
+    ylabel={可达性能 $P$ (TFLOP/s)},
+    title={\sffamily\bfseries\small (a) H100 BF16 对数 Roofline 模型},
+    grid=both,
+    grid style={line width=0.25pt, draw=slate!20},
+    major grid style={line width=0.4pt, draw=slate!35},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily},
+    legend style={at={(0.03,0.96)}, anchor=north west, font=\scriptsize\sffamily, fill=white, fill opacity=0.88, draw=tealLine}
+  ]
+    % Theoretical Roofline envelope
+    \addplot[navy, very thick, domain=0.7:295.22, samples=20] {3.35*x};
+    \addlegendentry{访存斜坡 ($3.35\,\mathrm{TB/s}$)}
+    \addplot[ochre, very thick, domain=295.22:1400, samples=10] {989};
+    \addlegendentry{计算屋顶 ($989\,\mathrm{TFLOP/s}$)}
+    % Ridge point dashed line (excluded from legend)
+    \addplot[gold, dashed, thick, forget plot] coordinates {(295.22, 2) (295.22, 989)};
+    \node[font=\tiny\sffamily\bfseries, color=gold, anchor=north east] at (axis cs:270, 12) {拐点 $I^* \approx 295$};
+    % Real CSV points
+    \addplot[teal, only marks, mark=*, mark size=2.1pt, mark options={fill=tealLight, draw=tealDark, thick}]
+      table[col sep=comma, x=ai, y=achieved_tflops] {data/roofline.csv};
+    \addlegendentry{实测点 (\texttt{roofline.csv})}
+    % Annotations
+    \node[font=\tiny\sffamily, color=ochre, anchor=west] at (axis cs:1.35, 3.4) {$T=1$ ($0.34\%$)};
+    \node[font=\tiny\sffamily, color=tealDark, anchor=south] at (axis cs:520, 1250) {$T=512$ ($100\%$)};
+  \end{axis}
+
+  % Right panel: Utilization vs Token count
+  \begin{axis}[
+    at={($(leftplot.east)+(1.35cm,0)$)},
+    anchor=west,
+    width=0.46\linewidth,
+    height=6.2cm,
+    xmode=log,
+    log basis x=2,
+    xmin=0.8, xmax=1400,
+    ymin=0, ymax=112,
+    xlabel={批处理词元总数 $T$},
+    ylabel={GPU 算力利用率 (\%)},
+    title={\sffamily\bfseries\small (b) 利用率随词元数 $T$ 的相变曲线},
+    grid=both,
+    grid style={line width=0.25pt, draw=slate!20},
+    major grid style={line width=0.4pt, draw=slate!35},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily},
+    xtick={1,4,16,64,256,1024},
+    xticklabels={1,4,16,64,256,1024}
+  ]
+    \addplot[teal, very thick, mark=square*, mark size=2pt, mark options={fill=tealLight, draw=tealDark}]
+      table[col sep=comma, x=tokens, y=util_pct] {data/roofline.csv};
+    \addplot[ochre, dashed, thick] coordinates {(345, 0) (345, 100)};
+    \node[font=\tiny\sffamily\bfseries, color=ochre, anchor=east] at (axis cs:310, 86) {$T^* \approx 345$};
+    \node[font=\tiny\sffamily, color=slate, anchor=south west] at (axis cs:2.5, 48) {访存墙区};
+    \node[font=\tiny\sffamily, color=tealDark, anchor=north east] at (axis cs:1250, 94) {饱和区};
+  \end{axis}
+\end{tikzpicture}
+\caption{基于 \texttt{data/roofline.csv} 实测数据绘制的 $4096\times 4096$ BF16 线性层性能画像。(a) 对数 Roofline 图清楚区分了斜率为 1 的 HBM 带宽斜坡与水平算力屋顶；(b) GPU 利用率在 $T \le 32$ 时长期徘徊在 $10\%$ 以下，直至 $T^* \approx 345$ 后方才真正触顶。}
+\label{fig:roofline-exp}
+\end{figure}
+
+\section{大模型训练的精确显存账本：$16\Phi$ 法则与激活重计算}
+\label{sec:memory-accounting}
+
+弄清了“跑得快不快”（Roofline）之后，我们立刻面临第二个同样致命的系统问题：\textbf{“装得下装不下”}（显存容量限制）。训练一个参数量为 $\Phi$ 的大语言模型时，HBM 中的显存消耗严格划分为两大板块：\textbf{静态模型状态显存}（与批量大小和序列长度无关）与\textbf{动态激活显存}（随批量、层数和序列长度剧烈膨胀）。
+
+\subsection{静态模型状态的精确账本：$16\Phi$ 法则}
+
+现代大模型训练几乎清一色采用\textbf{混合精度训练（Mixed-Precision Training）}配合 \textbf{AdamW 优化器}。初学者常以为“BF16 权重每参数只占 2 字节，7B 模型训练岂不是只需 14\,GB 显存？”现实却要贵上整整 8 倍！原因在于反向传播与优化器更新需要保留四份独立的张量副本：
+\begin{enumerate}
+  \item \textbf{BF16 模型权重（$2\Phi$ 字节）}：用于高速 Tensor Core 前向与反向矩阵乘；
+  \item \textbf{BF16 梯度张量（$2\Phi$ 字节）}：反向传播累加得到的各层参数梯度（部分框架为了高稳定性也会在 FP32 中累加梯度，占 $4\Phi$ 字节，此处按标准低显存 ZeRO 基准计为 $2\Phi$）；
+  \item \textbf{FP32 主权重副本（Master Weights，$4\Phi$ 字节）}：为什么不能直接把梯度加到 BF16 权重上？BF16 仅有 7 位尾数（机器精度 $\epsilon_{\mathrm{BF16}} = 2^{-7} \approx 7.8\times 10^{-3}$）。当权重 $w \approx 1.0$ 而单步更新量 $\eta \Delta w \approx 10^{-4}$ 时，在 BF16 中计算 $1.0 + 10^{-4}$ 会因舍入误差直接吞噬更新量（结果依然等于 $1.0$！）。因此必须在 FP32（23 位尾数）中保存一份主权重，每步先在 FP32 中完成精密更新，再向下舍入回 BF16 权重供下一步前向使用；
+  \item \textbf{FP32 AdamW 一阶矩 $m_t$ 与二阶矩 $v_t$（$4\Phi + 4\Phi = 8\Phi$ 字节）}：AdamW 必须为每一个参数维护指数移动平均梯度 $m_t$ 与平方梯度 $v_t$；因为二阶矩 $v_t$ 量级极小（常在 $10^{-10}$ 以下），必须在 FP32 中存储以免下溢归零。
+\end{enumerate}
+
+将以上四项相加，我们得到大模型系统工程中最著名的\textbf{静态显存 $16\Phi$ 法则}：
+\begin{equation}
+  M_{\mathrm{static}} \;=\; \underbrace{2\Phi}_{\text{BF16 权重}} \;+\; \underbrace{2\Phi}_{\text{BF16 梯度}} \;+\; \underbrace{4\Phi}_{\text{FP32 主权重}} \;+\; \underbrace{8\Phi}_{\text{FP32 AdamW } m,v} \;=\; \mathbf{16}\,\Phi\;\text{Bytes}.
+  \label{eq:16phi-rule}
+\end{equation}
+表~\ref{tab:16phi-ledger} 直观列出了不同参数规模模型的静态显存账单。即便在\textbf{尚未计入任何输入数据、激活值与框架碎片}的前提下，仅仅把一个 7B 模型的静态训练状态放进显存就需要 $112\,\mathrm{GB}$——已经彻底撑爆单张 $80\,\mathrm{GB}$ 的 H100！而 70B 模型更需要超过 $1.1\,\mathrm{TB}$ 的纯静态显存，这正是第~\ref{ch:dist-quant-serving} 章引入 ZeRO/FSDP 切分与 LoRA 低秩微调的直接动因。
+
+\begin{table}[htbp]
+\centering
+\caption{混合精度（BF16 + FP32 AdamW）训练的静态显存 $16\Phi$ 账本（以 $1\,\mathrm{GB} = 10^9\,\mathrm{Bytes}$ 计）。}
+\label{tab:16phi-ledger}
+\footnotesize
+\setlength{\tabcolsep}{4.0pt}
+\begin{tabular}{@{}lrrrrrc@{}}
+\toprule
+\textbf{模型规模 $\Phi$} & \textbf{BF16 权重} & \textbf{BF16 梯度} & \textbf{FP32 主权重} & \textbf{FP32 AdamW} & \textbf{静态总计 ($16\Phi$)} & \textbf{推理 ($2\Phi$)} \\
+\midrule
+$1\mathrm{B}\;(10^9)$ & $2\,\mathrm{GB}$ & $2\,\mathrm{GB}$ & $4\,\mathrm{GB}$ & $8\,\mathrm{GB}$ & $\mathbf{16\,\mathrm{GB}}$ & $2\,\mathrm{GB}$ \\
+$7\mathrm{B}\;(7\times 10^9)$ & $14\,\mathrm{GB}$ & $14\,\mathrm{GB}$ & $28\,\mathrm{GB}$ & $56\,\mathrm{GB}$ & $\mathbf{112\,\mathrm{GB}}$ & $14\,\mathrm{GB}$ \\
+$70\mathrm{B}\;(7\times 10^{10})$ & $140\,\mathrm{GB}$ & $140\,\mathrm{GB}$ & $280\,\mathrm{GB}$ & $560\,\mathrm{GB}$ & $\mathbf{1120\,\mathrm{GB}}$ & $140\,\mathrm{GB}$ \\
+$405\mathrm{B}\;(4.05\times 10^{11})$ & $810\,\mathrm{GB}$ & $810\,\mathrm{GB}$ & $1620\,\mathrm{GB}$ & $3240\,\mathrm{GB}$ & $\mathbf{6480\,\mathrm{GB}}$ & $810\,\mathrm{GB}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{动态激活显存与激活检查点（$\sqrt{L}$ 最优定理）}
+
+相比固定不变的 $16\Phi$ 静态显存，\textbf{激活显存（Activation Memory）}是随着微批大小 $B$、序列长度 $S$、网络层数 $L$ 与隐藏维度 $d$ 急剧膨胀的“隐形巨兽”。在反向传播中，为了计算线性层 $Y = XW$ 对权重的梯度 $\nabla_W \mathcal{L} = X^\top (\nabla_Y \mathcal{L})$，前向传播时的中间输入张量 $X$ 必须一直驻留在 HBM 中，直到反向梯度传回该层后才能释放！
+
+按照 Megatron-LM 论文对标准 Transformer 层（含多头自注意力、4 倍宽 MLP、LayerNorm 与 Dropout）的逐算子精确核算，若使用常规实现（显式物化 $h \times S \times S$ 注意力权重矩阵），单层 BF16 激活显存约为：
+\begin{equation}
+  M_{\mathrm{act,1}} \;\approx\; B S d \left(34 + \frac{5 h S}{d}\right)\,\text{Bytes},
+  \label{eq:act-memory-layer}
+\end{equation}
+其中 $h$ 为注意力头数。请注意括号内的两项截然不同的增长律：
+\begin{itemize}
+  \item \textbf{第一项 $34 B S d$}：来自 QKV/Output 投影、MLP 升维/降维与归一化层的输入激活，随序列长度 $S$ 呈\textbf{线性增长}，且总激活显存随层数 $L$ 线性叠加为 $O(L B S d)$；
+  \item \textbf{第二项 $5 B h S^2$}：来自标准注意力显式保存的 $S\times S$ 注意力分数、Softmax 概率与 Dropout 掩码，随序列长度 $S$ 呈\textbf{平方爆炸}！当上下文扩展到 $S = 32768$ 时，这一项本身就会吞噬数百 GB 显存（我们将在下一节用 FlashAttention 将其连根拔除）。
+\end{itemize}
+
+即便用 FlashAttention 消去了 $O(S^2)$ 项，线性项 $34 L B S d$ 在深层大模型（例如 $L = 80, d = 8192, B = 4, S = 4096$）下依然高达 $\sim 366\,\mathrm{GB}$！面对线性累积的 $O(L)$ 深度激活显存，\textbf{激活检查点（Activation Checkpointing，亦称梯度检查点 / 重计算）}提出了一个优雅的“以算力换显存”策略：前向传播时不再保存每一层的全部中间激活，而是每隔 $k$ 层仅保存一个边界输入（检查点）；反向传播退回到某一段时，再从该段起点的检查点出发，临时重算这一段 $k$ 层的局部前向激活，用完即刻释放。
+
+\begin{thmBox}
+\begin{theorem}[激活检查点的 $\sqrt{L}$ 最优分块权衡定理]
+\label{thm:activation-checkpointing}
+考虑一个包含 $L$ 个同构串行层的深度神经网络，单层前向激活显存为 $M_1$、单层前向耗时为 $t_F$、单层反向耗时为 $t_B \approx 2 t_F$。若将 $L$ 层均匀划分为 $L / k$ 个连续段（每段含 $k$ 层，$1 \le k \le L$），前向仅保存每段起点的边界激活（称为检查点），反向在每个段内按需重算局部前向激活，则：
+\begin{enumerate}
+  \item 整个训练步的峰值激活显存上界为
+  \begin{equation}
+    M_{\mathrm{peak}}(k) \;=\; \left(\frac{L}{k} + k\right) M_1.
+    \label{eq:ckpt-mem}
+  \end{equation}
+  \item 当且仅当分段长度取 $k^* = \sqrt{L}$ 时，峰值激活显存取得全局最小值：
+  \begin{equation}
+    M_{\mathrm{peak}}^* \;=\; 2\sqrt{L}\, M_1,
+    \label{eq:ckpt-opt}
+  \end{equation}
+  将激活显存复杂度从 $O(L)$ 压缩至 $O(\sqrt{L})$。
+  \item 该策略在每个训练步中最多增加一次完整前向传播的计算开销，总步耗时的相对增量上界仅为
+  \begin{equation}
+    \frac{\Delta T}{T_0} \;=\; \frac{(L - L/k)\, t_F}{L(t_F + t_B)} \;\le\; \frac{t_F}{t_F + 2 t_F} \;=\; \frac{1}{3} \;\approx\; 33.3\%.
+    \label{eq:ckpt-overhead}
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+（1）在前向传播结束并进入某一段（如最后一段）的反向传播时，HBM 中必须同时驻留两部分激活：第一部分是跨全网保存的 $L / k$ 个段首检查点，总计占 $(L / k) M_1$；第二部分是为了对该段执行反向传播而从段首临时重算出的该段全部 $k$ 层中间激活，占 $k M_1$。当该段反向完成后，这 $k$ 层临时激活即被立刻释放并复用于前一段。因此全过程的峰值激活显存满足 $M_{\mathrm{peak}}(k) = (\frac{L}{k} + k) M_1$。
+
+（2）由算术—几何平均不等式（AM-GM）：
+\[
+  \frac{L}{k} + k \;\ge\; 2\sqrt{\frac{L}{k} \cdot k} \;=\; 2\sqrt{L},
+\]
+等号成立当且仅当 $\frac{L}{k} = k$，即 $k^* = \sqrt{L}$，此时最小峰值显存为 $2\sqrt{L}\,M_1$。
+
+（3）原始无检查点训练一步需执行 $L$ 层前向与 $L$ 层反向，耗时 $T_0 = L(t_F + t_B)$。启用检查点后，每个非段首层在反向经过时仅需重算一次前向（共计 $L - L/k$ 层额外前向，严格小于 $L$ 层）。由于对线性层 $Y = XW$，前向做 1 次矩阵乘 $XW$，反向需分别计算对输入梯度 $(\nabla_Y \mathcal{L}) W^\top$ 与对权重梯度 $X^\top (\nabla_Y \mathcal{L})$ 共 2 次同尺寸矩阵乘，故精确有 $t_B \approx 2 t_F$。代入即得额外时间开销上界为 $\frac{L t_F}{3 L t_F} = \frac{1}{3} \approx 33.3\%$。证毕。
+\end{proof}
+
+例如对于一座 $L = 64$ 层的大模型，取 $k^* = 8$ 即可将激活显存压缩至原来的 $\frac{2\sqrt{64}}{64} = \frac{1}{4}$，从而允许你把微批大小 $B$ 扩大数倍；根据定理~\ref{thm:prefill-vs-decode}，更大的微批不仅摊薄了通信成本，甚至常常让实际端到端吞吐率\textbf{不降反升}！实践中，工业框架还会采用\textbf{选择性重计算（Selective Checkpointing）}：只丢弃算力开销极小却极占显存的算子（如 Dropout、GeLU、LayerNorm 与注意力分数），而保留计算昂贵的 GEMM 输出，从而以不到 $10\%$ 的算力开销砍掉 $70\%$ 以上的激活显存。
+
+\section{FlashAttention 数学核心：在线 Softmax 分块与 IO 感知优化}
+\label{sec:flash-attention}
+
+现在我们迎来本章最具数学美感的高潮——Tri Dao 等人（2022）提出的 \textbf{FlashAttention}。它不是任何形式的稀疏近似或低秩妥协，而是\textbf{在数学上与标准全注意力逐比特等价的精确算法}，却一举把注意力层的显存占用从 $O(N^2)$ 压到 $O(N)$，并在长序列上收获了 $2\text{--}4\times$ 的真实加速。它的秘密既不在减少 FLOPs，也不在奇技淫巧，而在于一条简洁的数学恒等式：\textbf{在线 Softmax 分块递推（Online Softmax Tiling）}。
+
+\subsection{标准注意力为何狠狠撞上 HBM 内存墙？}
+
+给定单个注意力头的查询、键、值矩阵 $Q, K, V \in \R^{N \times d}$（序列长度 $N$，头维度 $d$，通常 $d \in \{64, 128\}$），标准缩放点积注意力按如下三步顺序执行：
+\begin{equation}
+  S = \frac{Q K^\top}{\sqrt{d}} \in \R^{N \times N}, \qquad
+  P = \softmax(S) \in \R^{N \times N}, \qquad
+  O = P V \in \R^{N \times d}.
+  \label{eq:std-attn}
+\end{equation}
+在未融合的标准框架实现中，这三个算子分别对应三次独立的 GPU 核函数调用：
+\begin{enumerate}
+  \item \textbf{GEMM 核函数}：从 HBM 读入 $Q, K$（$2Nd$ 元素），算出巨大的 $S \in \R^{N\times N}$ 并\textbf{写回 HBM}（$N^2$ 元素）；
+  \item \textbf{Softmax 核函数}：从 HBM 重新读出整个 $S$（$N^2$ 元素），逐行做指数归一化，再把 $P \in \R^{N\times N}$ \textbf{写回 HBM}（$N^2$ 元素）；
+  \item \textbf{GEMM 核函数}：从 HBM 读出 $P$ 与 $V$（$N^2 + Nd$ 元素），算完输出 $O$ 后写回 HBM（$Nd$ 元素）。
+\end{enumerate}
+统计一下 HBM 总访存量：高达 $\Theta(Nd + N^2)$！由于现代长上下文模型中 $N \gg d$（例如 $N = 8192, d = 128$ 时，$N^2 = 6.7\times 10^7$ 远远大于 $Nd = 1.0\times 10^6$），绝大部分时间并没有花在矩阵乘法上，而是浪费在了\textbf{把庞大的中间矩阵 $S$ 和 $P$ 反复搬出、搬进缓慢的 HBM}！尤其对于中间的 Softmax 核函数，每个元素只做寥寥数次加减乘除指数运算，算术强度不足 $5\,\mathrm{FLOP/B}$，是一头彻头彻尾的访存受限怪兽。
+
+既然如此，我们能否把“算 $S$、算 Softmax、乘 $V$”融合进\textbf{同一个核函数}里，让 $S$ 和 $P$ 的小瓦片永远只停留在高速的片上 SRAM 中，算完即毁，永远不落地到 HBM？
+
+\subsection{从安全 Softmax 到在线 Softmax 分块：完整数学证明}
+
+看似有一道天然的数学障碍挡在前面：\textbf{Softmax 的归一化分母} $\sum_{t=1}^{N} e^{s_t - m}$ \textbf{以及防溢出的行最大值} $m = \max_{1 \le t \le N} s_t$，\textbf{都依赖于一整行的全部 $N$ 个元素！}如果片上 SRAM 太小，根本装不下一整行（特别是 $N = 131072$ 时），我们在只看到前半段键块 $K_1$ 时算出的局部最大值 $m_1$ 和局部归一化分母 $\ell_1$，岂不是在读入后半段键块 $K_2$ 后全部作废了？
+
+答案是：\textbf{非但不会作废，而且只需乘上一个极其简洁的指数重标定因子 $\alpha = e^{m_{\mathrm{old}} - m_{\mathrm{new}}}$，就能把历史统计量与历史输出累加器精确无损地修正到新的全局基准上！}下面我们以完整的数学归纳法给出这条天书级定理的严格证明。
+
+\begin{thmBox}
+\begin{theorem}[FlashAttention 在线 Softmax 分块递推的精确恒等性]
+\label{thm:online-softmax-tiling}
+设 $Q, K, V \in \R^{N \times d}$，尺度系数 $\tau = 1/\sqrt{d}$。选定块大小 $B_r, B_c$（使单个瓦片适配片上 SRAM 容量 $M_{\mathrm{SRAM}}$），将 $Q$ 按行划分为 $T_r = \lceil N / B_r \rceil$ 块 $\{Q_i\}_{i=1}^{T_r}$（$Q_i \in \R^{B_r \times d}$），将 $K, V$ 按行同步划分为 $T_c = \lceil N / B_c \rceil$ 块 $\{K_j, V_j\}_{j=1}^{T_c}$（$K_j, V_j \in \R^{B_c \times d}$）。
+
+对任意固定查询块 $Q_i$，在片上 SRAM 中初始化行统计量与输出累加器：
+\[
+  m_i^{(0)} = (-\infty, \dots, -\infty)^\top \in \R^{B_r \times 1}, \qquad
+  \ell_i^{(0)} = \mathbf{0} \in \R^{B_r \times 1}, \qquad
+  O_i^{(0)} = \mathbf{0} \in \R^{B_r \times d}.
+\]
+沿键值块索引 $j = 1, 2, \dots, T_c$ 依次流式执行如下片上递推（所有列向量与矩阵的乘除法均按行广播，即等价于左乘对角阵）：
+\begin{align}
+  S_{ij} &= \tau\, Q_i K_j^\top \in \R^{B_r \times B_c}, \label{eq:flash-sij}\\
+  m_{ij} &= \operatorname{rowmax}(S_{ij}) \in \R^{B_r \times 1}, \qquad
+  m_i^{(j)} = \max\!\Big(m_i^{(j-1)},\; m_{ij}\Big), \label{eq:flash-m}\\
+  \alpha_i^{(j)} &= \exp\!\Big(m_i^{(j-1)} - m_i^{(j)}\Big), \qquad
+  \tilde{P}_{ij} = \exp\!\Big(S_{ij} - m_i^{(j)}\Big), \label{eq:flash-p}\\
+  \ell_i^{(j)} &= \alpha_i^{(j)} \ell_i^{(j-1)} + \operatorname{rowsum}\!\big(\tilde{P}_{ij}\big), \label{eq:flash-l}\\
+  O_i^{(j)} &= \frac{\Big(\alpha_i^{(j)} \ell_i^{(j-1)}\Big) O_i^{(j-1)} + \tilde{P}_{ij} V_j}{\ell_i^{(j)}}. \label{eq:flash-o}
+\end{align}
+则当 $j = T_c$ 结束时，所得输出块 $O_i^{(T_c)}$ 在实数域上与完整全局注意力精确恒等：
+\begin{equation}
+  O_i^{(T_c)} \;=\; \softmax\!\Big(\tau\, Q_i K^\top\Big)\, V.
+  \label{eq:flash-exact}
+\end{equation}
+此外，整个算法从未在 HBM 中物化 $N \times N$ 矩阵，片上仅占用 $O(B_r d + B_c d + B_r B_c)$ SRAM；在令 $B_c = \Theta(M_{\mathrm{SRAM}} / d)$、$B_r = \min(\Theta(M_{\mathrm{SRAM}} / d), d)$ 时，HBM 总访存量从 $\Theta(Nd + N^2)$ 降至
+\begin{equation}
+  Q_{\mathrm{Flash}} \;=\; \Theta\!\left(\frac{N^2 d^2}{M_{\mathrm{SRAM}}}\right).
+  \label{eq:flash-io}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+由于递推式~\eqref{eq:flash-sij}--\eqref{eq:flash-o} 对查询块 $Q_i$ 的各行彼此独立，不妨固定其中任意一行 $q \in \R^{1 \times d}$，记全序列的注意力分数行向量为 $s = \tau q K^\top \in \R^{1 \times N}$，并按块切分为 $s = [s_1, s_2, \dots, s_{T_c}]$，其中 $s_j \in \R^{1 \times B_c}$。记前 $j$ 个块所覆盖的词元索引集合为 $\mathcal{I}_j = \{1, 2, \dots, j B_c\}$（最后一块截断至 $N$）。
+
+我们对块索引 $j \in \{1, 2, \dots, T_c\}$ 使用\textbf{数学归纳法}，证明以下三条循环不变量同时成立：
+\begin{align*}
+  \text{(I)}\quad & m^{(j)} = \max_{t \in \mathcal{I}_j} s_t, \\
+  \text{(II)}\quad & \ell^{(j)} = \sum_{t \in \mathcal{I}_j} \exp\!\big(s_t - m^{(j)}\big), \\
+  \text{(III)}\quad & \ell^{(j)}\, o^{(j)} = \sum_{t \in \mathcal{I}_j} \exp\!\big(s_t - m^{(j)}\big)\, v_t,
+\end{align*}
+其中 $v_t \in \R^{1 \times d}$ 为矩阵 $V$ 的第 $t$ 行向量。
+
+\textbf{奠基步（$j = 1$）}：由于 $m^{(0)} = -\infty$，有 $m^{(1)} = \max(-\infty, \max_{t \in \mathcal{I}_1} s_t) = \max_{t \in \mathcal{I}_1} s_t$，不变量 (I) 成立。同时 $\alpha^{(1)} = e^{-\infty - m^{(1)}} = 0$（约定 $0 \cdot 0 = 0$），代入式~\eqref{eq:flash-l} 与~\eqref{eq:flash-o} 得：
+\[
+  \ell^{(1)} = 0 + \sum_{t \in \mathcal{I}_1} e^{s_t - m^{(1)}}, \qquad
+  \ell^{(1)} o^{(1)} = \mathbf{0} + \sum_{t \in \mathcal{I}_1} e^{s_t - m^{(1)}} v_t,
+\]
+故不变量 (II)、(III) 在 $j = 1$ 时精确成立。
+
+\textbf{归纳步（假设 $j - 1$ 成立，证 $j$ 成立）}：记第 $j$ 块的索引集合为 $\mathcal{J}_j = \mathcal{I}_j \setminus \mathcal{I}_{j-1}$。
+首先，由式~\eqref{eq:flash-m} 和归纳假设 (I)：
+\[
+  m^{(j)} = \max\!\Big(\max_{t \in \mathcal{I}_{j-1}} s_t,\; \max_{t \in \mathcal{J}_j} s_t\Big) = \max_{t \in \mathcal{I}_j} s_t,
+\]
+不变量 (I) 得以保持。
+
+其次，观察指数乘法恒等式：对任意 $t \in \mathcal{I}_{j-1}$，都有
+\[
+  \alpha^{(j)} \cdot \exp\!\big(s_t - m^{(j-1)}\big)
+  \;=\; \exp\!\big(m^{(j-1)} - m^{(j)}\big) \cdot \exp\!\big(s_t - m^{(j-1)}\big)
+  \;=\; \exp\!\big(s_t - m^{(j)}\big)!
+\]
+将这一恒等式与归纳假设 (II) 代入式~\eqref{eq:flash-l}：
+\[
+  \ell^{(j)}
+  = \alpha^{(j)} \sum_{t \in \mathcal{I}_{j-1}} e^{s_t - m^{(j-1)}} + \sum_{t \in \mathcal{J}_j} e^{s_t - m^{(j)}}
+  = \sum_{t \in \mathcal{I}_{j-1}} e^{s_t - m^{(j)}} + \sum_{t \in \mathcal{J}_j} e^{s_t - m^{(j)}}
+  = \sum_{t \in \mathcal{I}_j} e^{s_t - m^{(j)}},
+\]
+不变量 (II) 严格成立。
+
+最后，将式~\eqref{eq:flash-o} 两边同乘以 $\ell^{(j)} > 0$，并代入归纳假设 (III) 与同一指数恒等式：
+\begin{align*}
+  \ell^{(j)} o^{(j)}
+  &= \alpha^{(j)} \Big(\ell^{(j-1)} o^{(j-1)}\Big) + \sum_{t \in \mathcal{J}_j} e^{s_t - m^{(j)}} v_t \\
+  &= \alpha^{(j)} \sum_{t \in \mathcal{I}_{j-1}} e^{s_t - m^{(j-1)}} v_t + \sum_{t \in \mathcal{J}_j} e^{s_t - m^{(j)}} v_t \\
+  &= \sum_{t \in \mathcal{I}_{j-1}} e^{s_t - m^{(j)}} v_t + \sum_{t \in \mathcal{J}_j} e^{s_t - m^{(j)}} v_t
+  \;=\; \sum_{t \in \mathcal{I}_j} e^{s_t - m^{(j)}} v_t,
+\end{align*}
+不变量 (III) 亦严格成立！
+
+\textbf{终止结论与 IO 复杂度}：当 $j = T_c$ 时，$\mathcal{I}_{T_c} = \{1, \dots, N\}$，于是
+\[
+  o^{(T_c)} \;=\; \frac{\sum_{t=1}^{N} e^{s_t - m^{(T_c)}} v_t}{\sum_{t=1}^{N} e^{s_t - m^{(T_c)}}}
+  \;=\; \sum_{t=1}^{N} \frac{e^{s_t}}{\sum_{u=1}^{N} e^{s_u}}\, v_t
+  \;=\; \big[\softmax(s)\, V\big],
+\]
+与全局标准注意力逐元素完全恒等！并且由于全程恒有 $m^{(j-1)} - m^{(j)} \le 0$ 且 $S_{ij} - m^{(j)} \le 0$，所有 $\exp(\cdot)$ 的自变量均 $\le 0$，彻底杜绝了浮点指数上溢（Overflow）！
+
+最后核算 HBM 访存量（原论文初版以外循环遍历 $K_j, V_j$、内循环遍历 $Q_i$；而 FlashAttention-2 改为外循环遍历 $Q_i$、内循环遍历 $K_j, V_j$，正是式~\eqref{eq:flash-sij}--\eqref{eq:flash-o} 的更优顺序！）：对每个外层查询块 $Q_i$（共 $T_r = N / B_r$ 块），仅从 HBM 读入 $Q_i$ 一次、最终写出 $O_i$ 一次（总计 $2Nd$）；而在内循环中需扫描全部 $K, V$ 一次（每次扫过 $2Nd$）。因此总 HBM 访存元素数为
+\[
+  Q_{\mathrm{Flash}} = 2 N d + T_r \cdot 2 N d = 2 N d + \frac{2 N^2 d}{B_r}.
+\]
+片上 SRAM 需同时容纳 $Q_i$（$B_r d$）、$K_j, V_j$（$2 B_c d$）、$O_i$（$B_r d$）与临时分数块 $S_{ij}$（$B_r B_c$）。取 $B_r, B_c = \Theta(M_{\mathrm{SRAM}} / d)$（同时受限于 $B_r B_c \le O(M_{\mathrm{SRAM}})$），代入即得 $Q_{\mathrm{Flash}} = \Theta\!\left(\frac{N^2 d^2}{M_{\mathrm{SRAM}}}\right)$。以典型参数 $d = 64$、$M_{\mathrm{SRAM}} \approx 10^5$ 元素为例，$\frac{d^2}{M_{\mathrm{SRAM}}} \approx 0.04$，HBM 读写量直接暴跌一个数量级以上！证毕。
+\end{proof}
+
+\begin{remark}[反向传播如何同样避免保存 $O(N^2)$ 矩阵？]
+细心的读者一定会追问：前向没把 $P \in \R^{N\times N}$ 存到 HBM，那反向传播求 $\nabla_Q, \nabla_K, \nabla_V$ 时怎么办？FlashAttention 再次祭出了“以算力换显存带宽”的法宝：前向传播时，对每一行 $i$ 仅在 HBM 中额外存下\textbf{一个标量对数配分函数} $L_i = m_i^{(T_c)} + \ln \ell_i^{(T_c)} \in \R$（全序列仅占 $O(N)$ 显存，微不足道！）。反向传播分块扫描时，在片上 SRAM 中临时重算 $S_{ij} = \tau Q_i K_j^\top$，随即用单条公式 $P_{ij} = \exp(S_{ij} - L_i)$ 毫秒级重构出精确注意力概率块！尽管多做了一次 $Q_i K_j^\top$ 重计算，但因为彻底免去了读写巨型 $N\times N$ 矩阵的 HBM 延迟，反向传播的实际墙钟耗时反而\textbf{大幅缩短}！
+\end{remark}
+
+图~\ref{fig:flash-vs-standard} 从物理数据流视角并排对比了标准注意力与 FlashAttention 在 HBM 与片上 SRAM 之间的字节搬运差异。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  hbmbox/.style={rectangle, rounded corners=1.2mm, draw=ochre, thick, fill=ochreLight, align=center, text=ink, inner sep=3.5pt},
+  srambox/.style={rectangle, rounded corners=1.2mm, draw=teal, thick, fill=tealLight, align=center, text=ink, inner sep=3.5pt},
+  arrO/.style={-{Stealth[length=2mm]}, very thick, ochre},
+  arrT/.style={-{Stealth[length=2mm]}, very thick, tealDark}
+]
+  % Left panel: Standard Attention
+  \draw[slate!40, dashed, rounded corners=2mm, fill=codebg!50] (-7.3, -2.55) rectangle (-0.35, 3.25);
+  \node[font=\sffamily\small\bfseries, color=ochre] at (-3.82, 2.92) {(a) 标准注意力：反复往返 HBM（$\Theta(N^2)$ IO）};
+
+  \node[hbmbox, minimum width=62mm, minimum height=11mm] (std_hbm) at (-3.82, 1.80) {
+    \textbf{片外 HBM（3.35\,TB/s）}\\
+    {\scriptsize 存放 $Q, K, V, O$ 以及巨型 \textbf{$S, P \in \R^{N\times N}$}}
+  };
+
+  \node[srambox, minimum width=18mm, minimum height=13mm] (k1) at (-5.95, -0.95) {\textbf{核 1}\\$S = QK^\top$};
+  \node[srambox, minimum width=19mm, minimum height=13mm] (k2) at (-3.82, -0.95) {\textbf{核 2}\\$P = \mathrm{softmax}(S)$};
+  \node[srambox, minimum width=18mm, minimum height=13mm] (k3) at (-1.70, -0.95) {\textbf{核 3}\\$O = PV$};
+
+  % Heavy arrows between HBM and kernels (staggered vertically: up=top, down=bottom)
+  \draw[arrO] (-6.40, 1.25) -- node[pos=0.50, left, font=\tiny, color=ochre] {$Q,K$} (-6.40, -0.30);
+  \draw[arrO] (-5.50, -0.30) -- node[pos=0.74, right, font=\tiny\bfseries, color=ochre] {写 $S$} (-5.50, 1.25);
+  \draw[arrO] (-4.25, 1.25) -- node[pos=0.74, left, font=\tiny\bfseries, color=ochre] {读 $S$} (-4.25, -0.30);
+  \draw[arrO] (-3.38, -0.30) -- node[pos=0.74, right, font=\tiny\bfseries, color=ochre] {写 $P$} (-3.38, 1.25);
+  \draw[arrO] (-2.12, 1.25) -- node[pos=0.74, left, font=\tiny\bfseries, color=ochre] {读 $P,V$} (-2.12, -0.30);
+  \draw[arrO] (-1.22, -0.30) -- node[pos=0.50, right, font=\tiny, color=ochre] {写 $O$} (-1.22, 1.25);
+
+  \node[font=\scriptsize, color=ochre, align=center] at (-3.82, -2.12) {三次核启动；巨型矩阵 $S, P$（各 $N^2$）四次穿透 HBM 带宽墙};
+
+  % Right panel: FlashAttention
+  \draw[tealLine, thick, rounded corners=2mm, fill=tealLight!45] (0.35, -2.55) rectangle (7.55, 3.25);
+  \node[font=\sffamily\small\bfseries, color=tealDark] at (3.95, 2.92) {(b) FlashAttention：片上融合分块（无 $N^2$ 落地）};
+
+  \node[hbmbox, minimum width=64mm, minimum height=10.5mm] (fl_hbm) at (3.95, 1.80) {
+    \textbf{片外 HBM（仅存输入输出）}\\
+    {\scriptsize $Q, K, V, O \in \R^{N\times d}$ 及行标量 $L \in \R^N$（\textbf{无 $S, P$！}）}
+  };
+
+  % Single Fused SRAM Kernel
+  \node[srambox, minimum width=67mm, minimum height=22mm] (fl_sram) at (3.95, -0.78) {};
+  \node[font=\sffamily\scriptsize\bfseries, color=tealDark] at (3.95, 0.05) {单一融合核函数（片上 SRAM，$\sim 19\,\mathrm{TB/s}$）};
+
+  \node[rectangle, rounded corners=1mm, draw=navy, fill=navyLight, font=\tiny, align=center, inner sep=2.2pt] (tile1) at (1.62, -0.82) {瓦片乘加\\$S_{ij} = \tau Q_i K_j^\top$\\($B_r \times B_c$)};
+  \node[rectangle, rounded corners=1mm, draw=gold, fill=ochreLight, font=\tiny, align=center, inner sep=2.2pt] (tile2) at (3.78, -0.82) {在线 Softmax\\更新 $m_i, \ell_i, \alpha_i$\\重标定 $\tilde{P}_{ij}$};
+  \node[rectangle, rounded corners=1mm, draw=teal, fill=white, font=\tiny, align=center, inner sep=2.2pt] (tile3) at (6.12, -0.82) {累加输出\\$O_i \!\leftarrow\! \frac{\alpha\ell O_i + \tilde{P}_{ij}V_j}{\ell_{\mathrm{new}}}$};
+
+  \draw[-{Stealth[length=1.7mm]}, thick, navy] (tile1.east) -- (tile2.west);
+  \draw[-{Stealth[length=1.7mm]}, thick, gold] (tile2.east) -- (tile3.west);
+  \draw[-{Stealth[length=1.6mm]}, dashed, tealDark] (tile3.south) -- ++(0, -0.25) -| node[pos=0.25, below, font=\tiny\bfseries, color=tealDark] {循环下一键值块 $j \leftarrow j+1$（全程驻留片上）} (tile1.south);
+
+  \draw[arrT] (2.15, 1.25) -- node[left, font=\tiny\bfseries, color=tealDark] {载入小块 $Q_i, K_j, V_j$} (2.15, 0.34);
+  \draw[arrT] (5.75, 0.34) -- node[right, font=\tiny\bfseries, color=tealDark] {终态写出 $O_i, L_i$} (5.75, 1.25);
+
+  \node[font=\scriptsize, color=tealDark, align=center] at (3.95, -2.22) {峰值瓦片仅占 $B_r B_c / N^2$，算子从访存受限跃迁至计算受限！};
+\end{tikzpicture}%
+}
+\caption{标准注意力与 FlashAttention 的硬件数据流对比。FlashAttention 通过分块在线 Softmax 将三次核函数融合为单次片上流式流水线，使庞大的 $S, P$ 矩阵永远不触碰片外 HBM。}
+\label{fig:flash-vs-standard}
+\end{figure}
+
+\subsection{实测验证：纯 NumPy 分块在线 Softmax 与标准注意力的机器精度比对}
+
+为了亲眼验证定理~\ref{thm:online-softmax-tiling} 绝非纸上空谈，代码~\ref{lst:flash-online} 给出了与配套脚本 \texttt{code/vol6\_experiments.py} 中实验 5 完全一致的纯 NumPy 实现（$N = 256, d = 64, B_r = B_c = 32$）。
+
+\begin{lstlisting}[caption={纯 NumPy 实现 FlashAttention 在线 Softmax 分块递推并与标准注意力做精度核对。},label={lst:flash-online}]
+import math
+import numpy as np
+
+rng = np.random.default_rng(2026)
+N, d = 256, 64
+Q = rng.normal(size=(N, d))
+K = rng.normal(size=(N, d))
+V = rng.normal(size=(N, d))
+scale = 1.0 / math.sqrt(d)
+
+# 1. 标准注意力（显式物化完整 N x N 分数与概率矩阵）
+S = (Q @ K.T) * scale
+S_shift = S - np.max(S, axis=-1, keepdims=True)
+P = np.exp(S_shift)
+P /= np.sum(P, axis=-1, keepdims=True)
+O_std = P @ V
+
+# 2. FlashAttention 核心：分块在线 Softmax（全程仅保留 Br x Bc 小瓦片）
+Br, Bc = 32, 32
+O_flash = np.zeros_like(Q)
+for i in range(0, N, Br):
+    Qi = Q[i:i+Br]
+    mi = np.full((Br, 1), -np.inf)
+    li = np.zeros((Br, 1))
+    Oi = np.zeros((Br, d))
+    for j in range(0, N, Bc):
+        Kj, Vj = K[j:j+Bc], V[j:j+Bc]
+        Sij = (Qi @ Kj.T) * scale               # 仅占 Br x Bc SRAM
+        mij = np.max(Sij, axis=-1, keepdims=True)
+        m_new = np.maximum(mi, mij)
+        alpha = np.exp(mi - m_new)              # 历史重标定因子 <= 1
+        pij = np.exp(Sij - m_new)               # 当前块非归一化概率
+        l_new = alpha * li + np.sum(pij, axis=-1, keepdims=True)
+        Oi = (Oi * (alpha * li) + pij @ Vj) / l_new
+        mi, li = m_new, l_new
+    O_flash[i:i+Br] = Oi
+
+max_err = float(np.max(np.abs(O_std - O_flash)))
+peak_ratio = (Br * Bc) / (N * N) * 100.0
+print(f"max_err = {max_err:.2e}, peak_tile_ratio = {peak_ratio:.2f}%")
+\end{lstlisting}
+
+在 IEEE-754 双精度浮点下的实测输出令人拍案叫绝：
+\begin{itemize}
+  \item \textbf{最大逐元素绝对误差}：\texttt{max\_err = 3.89e-16}（精确落入 64 位浮点数的机器精度量级 $\epsilon_{\mathrm{FP64}} \approx 2.22\times 10^{-16}$，数学上完全无损！）；
+  \item \textbf{峰值注意力分数瓦片占比}：\texttt{peak\_tile\_ratio = 1.56\%}（即 $\frac{32\times 32}{256\times 256} = \frac{1}{64}$）；若序列长度延伸至 $N = 8192$ 而块大小仍保持 $B_r = B_c = 64$，峰值瓦片更是仅占完整矩阵的 $\mathbf{0.006\%}$！
+\end{itemize}
+仔细留意代码第 33 行：与教材中“把未除以 $\ell_i$ 的未归一化累加器 $\tilde{O}_i$ 留到循环最后统一除以 $\ell_i^{(T_c)}$”的 FlashAttention-2 写法相比，这里每步即时除以 \texttt{l\_new} 与最后统一除法在代数上完全等价（见习题~\textbf{6.5.4}），而在 GPU 上把除法推迟到内循环之外还能进一步省去 $T_c - 1$ 次向量除法开销！
+
+\section{硬件优化陷阱与前沿算子生态}
+\label{sec:hw-pitfalls-ext}
+
+\begin{failBox}{算子工程中的三大隐蔽性能与数值陷阱}
+\begin{enumerate}
+  \item \textbf{访存受限的未融合逐元素算子（为什么 Kernel Fusion 至关重要）}：在 Transformer 中，诸如残差相加（Residual Add）、RMSNorm、Dropout、SwiGLU 激活等逐元素或逐行归约算子，虽然总 FLOPs 不足整网的 $1\%$，但如果不做\textbf{算子融合（Kernel Fusion）}，每次独立调用都要把完整的 $(B, S, d)$ 张量从 HBM 读进来再写回去——算术强度甚至低于 $1\,\mathrm{FLOP/B}$！在长序列或中小模型上，这些“看似微不足道”的逐元素算子往往会吃掉 $30\%\text{--}50\%$ 的总墙钟时间。PyTorch 2.0 的 \texttt{torch.compile}（TorchInductor）自动把连续逐元素算子融合成单个片上核函数，本质上就是把它们对 HBM 的往返次数从 $k$ 次压成 $1$ 次。
+  \item \textbf{非合并访存（Non-Coalesced Memory Access）与共享内存 Bank Conflict}：GPU 从 HBM 读取数据时以 32\,B 或 128\,B 的缓存行（Cache Line）为最小事务单位。如果同一个 Warp 的 32 个线程访问的是相邻连续地址（例如行主序遍历矩阵的同一行），硬件只需 1 次内存事务即可满足全部 32 个线程（\textbf{合并访存}）；反之，若按列大步幅跨行跳跃访问，32 个线程可能触发 32 次独立内存事务，实际有效带宽瞬间暴跌至标称值的 $1/32$！同理，片上 Shared Memory 通常划分为 32 个并发存储体（Bank），若同 Warp 多个线程同时读写同一 Bank 的不同地址，便会发生串行化的 Bank Conflict（工程上常在二维瓦片列宽上填充 1--8 个 Padding 元素打破周期对齐）。
+  \item \textbf{FP16 梯度下溢（Underflow）陷阱 vs BF16 动态范围优势}：虽然 FP16 与 BF16 同占 2 字节（16 比特），但二者的比特位分配截然不同：
+  \begin{itemize}
+    \item \textbf{FP16}（1 符号 + 5 指数 + 10 尾数）：最大表示值仅 $65504$，最小正规数约 $6.1\times 10^{-5}$。反向传播中大量微弱梯度（$10^{-6}\text{--}10^{-8}$）在 FP16 中会直接下溢归零，导致模型学不动！因此使用 FP16 混合精度训练时\textbf{必须配合动态损失缩放（Dynamic Loss Scaling）}：反向前把损失乘以一个大系数 $S_{\mathrm{loss}}$（如 $2^{16}$）把梯度抬进正规区，更新权重前再除以 $S_{\mathrm{loss}}$；一旦检测到梯度出现 \texttt{Inf/NaN} 则跳过该步并把 $S_{\mathrm{loss}}$ 减半。
+    \item \textbf{BF16}（1 符号 + 8 指数 + 7 尾数）：直接继承了 FP32 完整的 8 位指数（动态范围 $\sim 10^{\pm 38}$），梯度几乎永不下溢，彻底免去了繁琐的 Loss Scaling！代价则是尾数精度较粗糙，从而严格要求按式~\eqref{eq:16phi-rule} 维护 FP32 主权重。
+  \end{itemize}
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{FlashAttention-2/3、FP8 Tensor Core 与 OpenAI Triton 编程范式}
+FlashAttention 提出之后，软硬件协同演化仍在飞速狂奔：
+\begin{itemize}
+  \item \textbf{FlashAttention-2}（2023）：将内循环中的非矩阵乘浮点运算（如逐块缩放除 $\ell_i$）推迟到循环结束统一执行，仅保留未归一化累加器 $\tilde{O}_i$；同时改写外循环为遍历查询块 $Q_i$ 以便在序列维上充分并行，并优化 SM 内部多个 Warp 的切分方式（按 $Q$ 切分而非按 $K$ 切分），彻底消除了 Warp 间通过 Shared Memory 同步归约的通信开销，使 A100 上的 Tensor Core 利用率从约 $35\%$ 跃升至 $70\%$ 以上。
+  \item \textbf{FlashAttention-3}（2024，面向 Hopper H100）：深度挖掘 Hopper 架构的两项异步硬件特性——\textbf{TMA（张量内存加速器）}异步拷贝引擎与 \textbf{WGMMA} 异步矩阵乘指令，让“从 HBM 搬运下一块 $K_{j+1}, V_{j+1}$”、“在 Tensor Core 上算当前块 $Q_i K_j^\top$”与“在特殊函数单元 SFU 上算上一块的指数 Softmax”三条流水线在硬件上真正重叠执行；同时引入\textbf{块级 FP8 量化}与非相干哈达玛变换，将单卡注意力吞吐进一步推高至惊人的 $1.2\,\mathrm{PFLOP/s}$！
+  \item \textbf{OpenAI Triton 块级编程}：传统编写一个高性能 CUDA C++ 融合算子需要手工管理每个线程的索引、共享内存 Bank Conflict、异步预取指令与寄存器溢出，门槛极高。Triton 将编程抽象从“单线程”提升到了“瓦片块（Block/Tile）”：开发者只需用类 Python 语法描述如何加载 $(B_r, d)$ 的矩阵块、在块上做矩阵乘和在线 Softmax 并写回，编译器便会自动完成合并访存调度、共享内存分配与 Tensor Core 指令映射——几十行 Triton 代码即可跑出接近手工汇编 CUDA 核 $90\%$ 以上的性能。
+\end{itemize}
+\end{extBox}
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与公式手算}{熟练核算 Roofline 拐点、临界批大小与 $16\Phi$ 训练显存账本}
+
+\begin{enumerate}
+  \item[\textbf{6.5.1}] \textbf{Roofline 算术强度与跨芯片拐点核算}：假设某新型 AI 加速芯片的 BF16 峰值算力为 $P_{\mathrm{peak}} = 2000$ TFLOP/s，HBM 显存带宽为 $B_{\mathrm{HBM}} = 8.0\,\mathrm{TB/s}$。现于其上执行维度为 $d_{\mathrm{in}} = 4096, d_{\mathrm{out}} = 16384$ 的 BF16 线性层 $Y = X W$（输入 $X \in \R^{T \times 4096}$）。
+  \begin{enumerate}
+    \item 计算该芯片的硬件拐点 $I^*$（单位：$\mathrm{FLOP/B}$）；
+    \item 推导该非方阵线性层的精确算术强度 $\mathrm{AI}(T)$ 公式（注意读 $X$、读 $W$、写 $Y$ 的字节数各不相同）；
+    \item 分别计算 $T = 1$（单请求 Decode）与 $T = 512$（Prefill）时的可达算力与硬件利用率，并求出进入计算受限区所需的最小词元数 $T^*$。
+  \end{enumerate}
+  \exHint{(a) $I^* = 2000 / 8.0 = 250\,\mathrm{FLOP/B}$；(b) $F = 2 T d_{\mathrm{in}} d_{\mathrm{out}}$，$Q = 2(d_{\mathrm{in}} d_{\mathrm{out}} + T d_{\mathrm{in}} + T d_{\mathrm{out}})$，从而 $\mathrm{AI}(T) = T d_{\mathrm{in}} d_{\mathrm{out}} / [d_{\mathrm{in}} d_{\mathrm{out}} + T(d_{\mathrm{in}} + d_{\mathrm{out}})]$；代入 $d_{\mathrm{in}} = 4096, d_{\mathrm{out}} = 16384$ 可解得 $T^* \approx 271$。}
+
+  \item[\textbf{6.5.2}] \textbf{13B 大模型训练静态与激活显存全账本}：现拟在 $80\,\mathrm{GB}$ 显存的 GPU 集群上，使用混合精度（BF16 权重与梯度 + FP32 主权重与 AdamW）训练一个 $\Phi = 1.3\times 10^{10}$（13B）的 Transformer 模型，具体结构参数为 $L = 40$ 层、隐藏维度 $d = 5120$、注意力头数 $h = 40$，单卡微批大小 $B = 2$、序列长度 $S = 4096$。
+  \begin{enumerate}
+    \item 用 $16\Phi$ 法则分别列出权重、梯度、主权重与优化器状态各占多少 GB，静态总计多少 GB？
+    \item 用式~\eqref{eq:act-memory-layer} 分别计算\textbf{未启用 FlashAttention}（保留 $O(S^2)$ 项）与\textbf{启用 FlashAttention}（消去 $\frac{5hS}{d}$ 项）时全网 40 层的总激活显存；
+    \item 若进一步对 40 层启用均匀激活检查点（取近似最优块长 $k = 5$ 或 $k = 8$），启用 FlashAttention 后的峰值激活显存将压缩到多少 GB？
+  \end{enumerate}
+  \exHint{(a) 静态总计 $16 \times 13 = 208\,\mathrm{GB}$；(b) $B S d = 2 \times 4096 \times 5120 \approx 4.194\times 10^7$ 字节，$\frac{5hS}{d} = 160$，可见标准注意力下 $O(S^2)$ 项竟是线性项 $34$ 的近 5 倍！全网激活约 $325\,\mathrm{GB}$（无 Flash）降至 $57\,\mathrm{GB}$（有 Flash）；(c) 取 $k=8$ 时仅保留 $L/k + k = 5 + 8 = 13$ 层，峰值激活压至约 $18.5\,\mathrm{GB}$。}
+\end{enumerate}
+
+\exTier{B 层：严谨数学证明}{吃透非均匀检查点优化、未归一化在线 Softmax 与反向重算恒等式}
+
+\begin{enumerate}
+  \item[\textbf{6.5.3}] \textbf{激活检查点定理的推广与极限边界}：在定理~\ref{thm:activation-checkpointing} 的设定下：
+  \begin{enumerate}
+    \item 若我们追求\textbf{极限压低显存}（甚至把检查点也只保留 1 个，并递归分段，即 Griewank 的二项式检查点思想），请先考虑最简单的“两级嵌套检查点”：将 $L$ 层分为 $L / k_1$ 个大段，每大段再按 $k_2$ 分为子段（$1 \le k_2 \le k_1 \le L$）。推导峰值激活显存关于 $(k_1, k_2)$ 的表达式，并用三元 AM-GM 不等式证明其最小显存可进一步降至 $3 L^{1/3} M_1$，同时计算额外前向传播次数变为多少倍？
+    \item 说明在真实大规模预训练中为何工程界普遍采用单级检查点（甚至仅按每个 Transformer 层边界做检查点，$k = 1$ 的算子级局部重算）而非三级以上嵌套重算。
+  \end{enumerate}
+  \exHint{(a) 峰值激活为 $(\frac{L}{k_1} + \frac{k_1}{k_2} + k_2) M_1 \ge 3 L^{1/3} M_1$，当 $k_1 = L^{2/3}, k_2 = L^{1/3}$ 时取等，但每个底层需经历多达 2 次额外前向（总算力开销升至 $+66.7\%$）；(b) 当单级检查点已把激活显存压到低于静态模型显存或通信带宽边界时，再牺牲算力换显存得不偿失。}
+
+  \item[\textbf{6.5.4}] \textbf{FlashAttention-2 延迟归一化形式与反向传播 $L_i$ 重构证明}：
+  \begin{enumerate}
+    \item 证明：若在定理~\ref{thm:online-softmax-tiling} 的内循环中去掉每步除以 $\ell_i^{(j)}$ 的操作，改为维护未归一化累加器 $\tilde{O}_i^{(j)} = \alpha_i^{(j)} \tilde{O}_i^{(j-1)} + \tilde{P}_{ij} V_j$（初始 $\tilde{O}_i^{(0)} = \mathbf{0}$），仅在循环结束 $j = T_c$ 后统一计算 $O_i = \tilde{O}_i^{(T_c)} / \ell_i^{(T_c)}$，则所得结果与式~\eqref{eq:flash-o} 完全恒等；
+    \item 前向仅保存标量 $L_i = m_i^{(T_c)} + \ln \ell_i^{(T_c)}$。证明在反向传播重算任意分数瓦片 $S_{ij} = \tau Q_i K_j^\top$ 后，精确注意力概率块恰等于 $P_{ij} = \exp(S_{ij} - L_i)$（按行广播），并据此写出利用 $dO_i$、$O_i$ 与 $P_{ij}$ 在片上计算行标量 $D_i = \operatorname{rowsum}(dO_i \odot O_i)$ 与分数梯度 $dS_{ij} = P_{ij} \odot (dP_{ij} - D_i)$ 的精确推导！
+  \end{enumerate}
+  \exHint{(a) 直接归纳证明 $\tilde{O}_i^{(j)} = \ell_i^{(j)} O_i^{(j)}$；(b) 注意 $\exp(S_{ij} - m_i - \ln \ell_i) = \frac{\exp(S_{ij} - m_i)}{\ell_i} = P_{ij}$，再利用 Softmax 雅可比公式 $dS_i = P_i \odot (dP_i - \sum_k P_{ik} dP_{ik})$ 以及 $\sum_k P_{ik} dP_{ik} = \sum_k P_{ik} \langle dO_i, V_k\rangle = \langle dO_i, \sum_k P_{ik} V_k\rangle = \langle dO_i, O_i\rangle = D_i$！最后一步把跨列的 $dP_{ij}$ 归约巧妙转化为了仅依赖当前块 $O_i, dO_i$ 的局部内积，彻底解除反向传播的行同步依赖！}
+\end{enumerate}
+
+\exTier{C 层：机制剖析与反例设计}{诊断融合收益与 BF16 尾数吞噬反例}
+
+\begin{enumerate}
+  \item[\textbf{6.5.5}] \textbf{定量诊断算子融合对访存受限算子的加速比}：考虑形状为 $(B, S, d) = (16, 2048, 4096)$ 的 BF16 张量流水线：
+  \[
+    H_1 = X + R \;\text{（残差加）} \;\longrightarrow\; H_2 = \mathrm{RMSNorm}(H_1) \;\longrightarrow\; H_3 = \mathrm{SiLU}(H_2).
+  \]
+  \begin{enumerate}
+    \item 分别计算\textbf{未融合}（3 个独立核函数，每次读写 HBM）与\textbf{完全融合}（单核片上流水，仅读 $X, R$ 与归一化权重 $\gamma \in \R^d$，写出 $H_3$）两种实现下的 HBM 总字节读写量（忽略极小的 $d$ 维参数 $\gamma$）；
+    \item 在 H100（$3.35\,\mathrm{TB/s}$）上，假设上述三步均处于深度访存受限区，计算融合前后的理论墙钟耗时与加速比。
+  \end{enumerate}
+  \exHint{单张量体积 $V = 16 \times 2048 \times 4096 \times 2\,\mathrm{B} = 268.4\,\mathrm{MB}$。未融合：残差加读 2 写 1（$3V$）+ RMSNorm 读 1 写 1（$2V$）+ SiLU 读 1 写 1（$2V$），总计 $7V$；融合后仅读 $X, R$ 并写 $H_3$，总计 $3V$，理论直接提速 $7/3 \approx 2.33\times$！}
+
+  \item[\textbf{6.5.6}] \textbf{数值反例：为什么纯 BF16 权重更新会导致优化彻底“冻结”？}：IEEE 风格 BF16 的格式为 1 位符号、8 位指数、7 位显式尾数（加 1 位隐含前导 1，共 8 位有效二进制数字）。
+  \begin{enumerate}
+    \item 在区间 $[1, 2)$ 内，相邻两个可精确表示的 BF16 浮点数之间的步长（ULP）是多少？
+    \item 设某权重当前为 $w = 1.0$，采用学习率 $\eta = 10^{-3}$，每步精确梯度恒为 $g = -1.0$（理想情况下每步应增加 $+10^{-3}$）。若不保存 FP32 主权重，直接按“舍入到最近偶数（Round-to-Nearest-Even）”规则在 BF16 中执行 $w \leftarrow \mathrm{BF16}(w - \eta g)$，经过 $10000$ 步后 $w$ 的值是多少？请精确说明为何必须搭配 FP32 主权重（或随机舍入 Stochastic Rounding）才能打破这一冻结陷阱。
+  \end{enumerate}
+  \exHint{(a) 在 $[1, 2)$ 内，ULP $= 2^{-7} = 1/128 = 0.0078125$；(b) 半个 ULP 为 $0.00390625$，由于单步增量 $0.001 < 0.00390625$，每次加完舍入后严格等于 $1.0$，跑完 $10000$ 步后 $w$ 依然纹丝不动停在 $1.0$！}
+\end{enumerate}
+
+\exTier{D 层：编程实验与系统延伸}{动手实现因果掩码 FlashAttention 与长上下文 GQA 带宽仿真}
+
+\begin{enumerate}
+  \item[\textbf{6.5.7}] \textbf{编程实验：为分块在线 Softmax 添加因果掩码（Causal Mask）与上三角跳过加速}：基于代码~\ref{lst:flash-online}（实验 5 脚本）：
+  \begin{enumerate}
+    \item 在标准注意力中为上三角（列索引 $>$ 行索引）加上 $-\infty$ 因果掩码，得到自回归语言模型的标准因果输出 $O_{\mathrm{causal}}$；
+    \item 在分块在线 Softmax 循环中实现两项工程优化：对完全位于对角线上方的块（\texttt{j > i + Br - 1}）直接 \texttt{continue} 跳过零计算；仅对主对角线上的块（\texttt{j == i}，当 $B_r = B_c$）施加局部上三角 $-\infty$ 掩码；
+    \item 验证在 $N = 256, B_r = B_c = 32$ 时，最大误差仍小于 $10^{-15}$，并统计跳过的块计算量比例（理论上接近 $50\%$ 加速！）。
+  \end{enumerate}
+  \exHint{跳过上三角纯掩码块后，总计 $8 \times 8 = 64$ 个瓦片中仅需计算下三角与对角线共 $8 \times 9 / 2 = 36$ 个瓦片，直接省去 $43.75\%$ 的块乘加；当块数增多时渐近省去 $50\%$ 计算量。}
+
+  \item[\textbf{6.5.8}] \textbf{编程实验：Roofline 分析标准 MHA 与分组查询注意力（GQA）在长上下文 Decode 中的带宽瓶颈}：编写一个小型 Python Roofline 模拟器，考虑单层自注意力在 Decode 阶段（批量 $B = 16$，历史上下文长度 $S$ 从 $512$ 扫描至 $32768$，$d = 4096$，查询头数 $h_q = 32$，头维度 $d_h = 128$）：
+  \begin{enumerate}
+    \item 推导该步注意力打分 $q K_{\mathrm{cache}}^\top$ 与加权求和 $p V_{\mathrm{cache}}$ 的总 FLOPs（约为 $4 B S d$）与从 HBM 读入历史 KV 缓存的字节数（对于标准 MHA，$h_{\mathrm{kv}} = 32$；对于 GQA-8，$h_{\mathrm{kv}} = 4$；每元素 BF16 占 2 字节）；
+    \item 计算 MHA 与 GQA-8 在上述条件下的注意力 Decode 算术强度 $\mathrm{AI}_{\mathrm{attn}}$，验证一个惊人事实：\textbf{无论批量 $B$ 或长度 $S$ 多大，标准 MHA 的 Decode 注意力算术强度都被死死锁死在 $1\,\mathrm{FLOP/B}$ 附近}，而 GQA-8 将其精确抬升了 $8\times$！
+  \end{enumerate}
+  \exHint{因为每个请求的 KV 缓存都是各自独立的，无法像模型权重 $W$ 那样在批量 $B$ 之间共享复用！单请求每个 KV 元素（2 字节）在 MHA 中仅与 1 个查询头做 1 次 FMA（2 FLOPs），故 $\mathrm{AI}_{\mathrm{MHA}} \approx 1\,\mathrm{FLOP/B}$；而在 GQA-8 中，同一份 KV 头被 8 个查询头共享复用，算术强度直接提升 $8\times$！}
+\end{enumerate}

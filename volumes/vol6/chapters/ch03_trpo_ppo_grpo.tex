@@ -1,0 +1,721 @@
+\chapter[信任域、PPO 裁剪与 GRPO 演进]{信任域方法、近端策略优化（PPO）\\与群体相对策略优化（GRPO）}
+\label{ch:trpo-ppo-grpo}
+
+\chapEpigraph{理智不应插上翅膀，而应当加上铅锤与重物，以防它任意飞跃。}{Francis Bacon（弗朗西斯·培根，《新工具》，1620）}
+
+\begin{chapIntro}{本章导读：给策略梯度装上“安全阀”，从信任域走向大模型强化学习}
+第~\ref{ch:dqn-pg-ac} 章的策略梯度与 Actor-Critic 优雅地绕开了离散 $\argmax$ 难题，却背负着一个令人抓狂的工程死穴：\textbf{严格的同策略（On-Policy）单步消耗}。每与昂贵的环境交互收集一批轨迹，刚执行一次梯度上升，策略参数就从 $\theta_{\mathrm{old}}$ 变成了 $\theta$，旧数据随即作废；而一旦试图把同一批样本拿来重复更新多轮，策略往往在几步之内彻底崩塌，再也爬不起来。
+
+培根四百年前的告诫恰是现代策略优化的核心哲学——\textbf{比“迈出更大一步”更重要的，是给每一步套上防飞跃的铅锤}。本章沿着“发现崩塌 $\to$ 理论保底 $\to$ 一阶简化 $\to$ 大模型革命”的脉络，完整推导当代强化学习最核心的三代算法：
+\begin{enumerate}
+  \item \textbf{重要性采样与信任域策略优化（TRPO）}：从性能差异引理出发，证明含 KL 散度惩罚的单调改进下界，并用 Fisher 信息矩阵导出自然策略梯度步长。
+  \item \textbf{近端策略优化（PPO-Clip）}：如何仅用一行分段裁剪函数，就在一阶优化框架下构筑与信任域异曲同工的悲观安全边界？我们将完成 $\hat{A}_t > 0$ 与 $\hat{A}_t < 0$ 全六种区间的严格分段求导，并用双子图直观剖析其梯度动力学。
+  \item \textbf{群体相对策略优化（GRPO）}：面对千亿参数大语言模型，如何彻底甩掉沉重的 Critic 价值网络？推导组内相对优势归一化与非负无偏 KL 估计量，打通通向第~\ref{ch:posttrain-rlhf-dpo} 章推理模型训练的最后一公里。
+  \item \textbf{实测验证}：在一维连续高斯 LQR 控制任务上执行 $K=10$ 轮样本复用，用实测数据 \texttt{data/ppo\_vs\_unclip.csv} 亲眼对比未裁剪重要性采样策略梯度的反复崩塌与 PPO-Clip 的稳健爬升。
+\end{enumerate}
+\end{chapIntro}
+
+\section{策略崩塌之谜：为什么多轮复用梯度会摧毁策略？}
+\label{sec:pg-collapse}
+
+\subsection{监督学习与强化学习对步长的本质差异}
+
+在监督学习中，即使某一步学习率偏大导致参数跳过极小值、验证损失暂时反弹，训练数据集 $\mathcal{D}$ 依然静止不动——只要调小步长，后续梯度仍会稳稳地把参数拉回低损失盆地。然而在强化学习中，\textbf{策略参数 $\theta$ 不仅决定预测质量，更直接决定下一轮采集到什么样的数据}：
+\[
+  \theta_k \;\longrightarrow\; \pi_{\theta_k} \;\longrightarrow\; \text{采样轨迹 } \tau \sim p_{\theta_k} \;\longrightarrow\; \text{构造梯度 } \hat{g}(\theta_k) \;\longrightarrow\; \theta_{k+1}.
+\]
+一旦某次更新步长过大，把策略推入一片低回报的糟糕参数区，接下来智能体采集到的全都是“原地打转”或“瞬间坠毁”的垃圾轨迹；基于垃圾轨迹估计出的策略梯度几乎不包含通往高回报区域的信号，智能体于是陷入\textbf{“策略变差 $\to$ 数据变差 $\to$ 策略更差”的不可逆崩塌螺旋（Performance Collapse）}。
+
+更棘手的是，\textbf{参数空间中的欧氏距离 $\|\theta - \theta_{\mathrm{old}}\|_2$ 并不等于策略分布空间中的距离}。对于深层神经网络或高斯策略 $\mathcal{N}(\mu_\theta(s), \sigma^2)$：当 $\sigma$ 很小时，均值 $\mu_\theta(s)$ 仅偏移 $0.1$ 就足以让新旧动作分布几乎零重叠；反之，在激活饱和区，参数变动 $1.0$ 却可能几乎不改变动作概率。因此，仅仅在参数空间里设置固定学习率，根本无法保证策略行为“步子迈得温和”。
+
+\subsection{重要性采样代理目标与无约束多轮复用的崩溃机制}
+
+为了把旧策略 $\pi_{\theta_{\mathrm{old}}}$ 辛辛苦苦采集的一批轨迹重复利用 $K$ 轮（例如 $K = 4 \sim 10$），我们借助概率论中的\textbf{重要性采样（Importance Sampling, IS）}恒等式：只要 $\operatorname{supp}(\pi_\theta) \subseteq \operatorname{supp}(\pi_{\theta_{\mathrm{old}}})$，对任意动作函数 $f(a)$ 都有
+\begin{equation}
+  \E_{a \sim \pi_\theta(\cdot \mid s)}[f(a)]
+  = \sum_a \pi_\theta(a \mid s)\, f(a)
+  = \sum_a \pi_{\theta_{\mathrm{old}}}(a \mid s)\,\frac{\pi_\theta(a \mid s)}{\pi_{\theta_{\mathrm{old}}}(a \mid s)}\, f(a)
+  = \E_{a \sim \pi_{\theta_{\mathrm{old}}}(\cdot \mid s)}\!\left[r(\theta)\, f(a)\right],
+  \label{eq:is-identity}
+\end{equation}
+其中定义关键的\textbf{概率比（Importance Ratio）}：
+\begin{equation}
+  r_t(\theta) \triangleq \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}
+  = \exp\!\Big(\ln \pi_\theta(a_t \mid s_t) - \ln \pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)\Big).
+  \label{eq:is-ratio}
+\end{equation}
+由此构造所谓的\textbf{保守策略迭代代理目标（Conservative Policy Iteration Surrogate, CPI）}：
+\begin{equation}
+  L^{\mathrm{CPI}}(\theta) \triangleq \hat{\E}_t\!\left[\frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}\,\hat{A}_t\right]
+  = \hat{\E}_t\!\left[r_t(\theta)\,\hat{A}_t\right].
+  \label{eq:cpi-surrogate}
+\end{equation}
+
+在起点 $\theta = \theta_{\mathrm{old}}$ 处，显然 $r_t(\theta_{\mathrm{old}}) = 1$，且其梯度精确吻合第~\ref{ch:dqn-pg-ac} 章的策略梯度：
+\[
+  \nabla_\theta L^{\mathrm{CPI}}(\theta)\Big|_{\theta=\theta_{\mathrm{old}}}
+  = \hat{\E}_t\!\left[\frac{\nabla_\theta \pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}\,\hat{A}_t\right]_{\theta=\theta_{\mathrm{old}}}
+  = \hat{\E}_t\!\left[\nabla_\theta \ln \pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)\,\hat{A}_t\right].
+\]
+
+那么，为什么直接拿 $L^{\mathrm{CPI}}(\theta)$ 做 $K=10$ 轮梯度上升会引发灾难？这背后隐藏着\textbf{双重失真}：
+\begin{enumerate}
+  \item \textbf{状态访问分布失配}：式~\eqref{eq:cpi-surrogate} 仅对动作分布做了重要性校正，却把状态分布冻结在旧策略的 $d^{\pi_{\theta_{\mathrm{old}}}}(s)$ 上！一旦 $\pi_\theta$ 显著偏离 $\pi_{\theta_{\mathrm{old}}}$，真实状态分布 $d^{\pi_\theta}(s)$ 早已面目全非，$L^{\mathrm{CPI}}(\theta)$ 不再反映真实性能 $J(\theta)$。
+  \item \textbf{无界概率比的爆炸杠杆}：假设旧策略偶然抽到一个低概率动作（例如 $\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t) = 0.01$），恰好撞上噪声带来的正优势 $\hat{A}_t > 0$。在无约束最大化 $r_t(\theta)\hat{A}_t$ 时，优化器会把 $\pi_\theta(a_t \mid s_t)$ 疯狂推向 $1$，令 $r_t(\theta)$ 飙升至 $100$，从而凭空制造出虚假的巨额代理收益！而对于离散 softmax 或连续高斯分布，把单个样本的概率比推向极端会彻底摧毁其他所有状态的合理策略，引发雪崩式掉分。
+\end{enumerate}
+
+要打破这一困境，我们必须回答一个精确的数学问题：\textbf{代理目标 $L^{\mathrm{CPI}}(\theta)$ 与真实回报 $J(\theta)$ 之间的误差，究竟如何受新旧策略散度的控制？}
+
+\section{性能差异引理与信任域策略优化（TRPO）}
+\label{sec:trpo}
+
+\subsection{性能差异引理（Performance Difference Lemma）}
+
+比较任意两个策略 $\pi$ 与 $\tilde{\pi}$ 的全局折扣回报 $J(\pi) = \E_{\tau \sim \pi}[\sum_{t=0}^\infty \gamma^t r_t]$ 时，下面的恒等式堪称现代强化学习理论的“瑞士军刀”。它把全局性能之差精确表示为新策略轨迹上旧策略优势函数的折扣累加。
+
+\begin{thmBox}
+\begin{lemma}[性能差异引理，Kakade \& Langford, 2002]
+\label{lem:pdl}
+对任意两个策略 $\pi$ 与 $\tilde{\pi}$ 及折扣因子 $\gamma \in [0, 1)$，记 $d^{\tilde{\pi}}(s) = (1 - \gamma)\sum_{t=0}^\infty \gamma^t \Prob(s_t = s \mid \tilde{\pi})$ 为新策略 $\tilde{\pi}$ 的归一化折扣状态访问分布，则严格成立恒等式
+\begin{equation}
+  J(\tilde{\pi}) - J(\pi)
+  = \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^t A^\pi(s_t, a_t)\right]
+  = \frac{1}{1-\gamma}\,\E_{s \sim d^{\tilde{\pi}},\, a \sim \tilde{\pi}(\cdot \mid s)}\!\left[A^\pi(s, a)\right].
+  \label{eq:pdl}
+\end{equation}
+\end{lemma}
+\begin{proof}
+由优势函数定义 $A^\pi(s_t, a_t) = Q^\pi(s_t, a_t) - V^\pi(s_t) = \E_{s_{t+1} \sim P(\cdot\mid s_t, a_t)}[r_t + \gamma V^\pi(s_{t+1}) - V^\pi(s_t)]$，将其代入右边并在 $\tau \sim \tilde{\pi}$ 下利用全期望公式与线性性展开：
+\begin{align*}
+  \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^t A^\pi(s_t, a_t)\right]
+  &= \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^t \Big(r_t + \gamma V^\pi(s_{t+1}) - V^\pi(s_t)\Big)\right] \\
+  &= \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^t r_t\right]
+     + \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^{t+1} V^\pi(s_{t+1}) - \sum_{t=0}^\infty \gamma^t V^\pi(s_t)\right].
+\end{align*}
+注意第二个括号内是精确的\textbf{望远镜级数（Telescoping Sum）}：设 $V^\pi$ 有界，当 $t \ge 1$ 时所有 $\gamma^t V^\pi(s_t)$ 项两两完全抵消，仅留下初值项 $-V^\pi(s_0)$！又因为初始状态分布 $\rho_0(s_0)$ 与策略无关，故
+\[
+  \E_{s_0 \sim \rho_0}[V^\pi(s_0)] = J(\pi), \qquad
+  \E_{\tau \sim \tilde{\pi}}\!\left[\sum_{t=0}^\infty \gamma^t r_t\right] = J(\tilde{\pi}).
+\]
+合并即得 $J(\tilde{\pi}) - J(\pi) = \E_{\tau \sim \tilde{\pi}}[\sum_{t=0}^\infty \gamma^t A^\pi(s_t, a_t)]$。最后，将时间求和改写为状态访问分布期望：
+\[
+  \sum_{t=0}^\infty \gamma^t \E_{s_t \sim P_t^{\tilde{\pi}},\, a_t \sim \tilde{\pi}}\!\left[A^\pi(s_t, a_t)\right]
+  = \frac{1}{1-\gamma}\sum_s \underbrace{(1-\gamma)\sum_{t=0}^\infty \gamma^t \Prob(s_t = s \mid \tilde{\pi})}_{d^{\tilde{\pi}}(s)} \E_{a \sim \tilde{\pi}(\cdot\mid s)}[A^\pi(s, a)],
+\]
+证毕。
+\end{proof}
+\end{thmBox}
+
+引理~\ref{lem:pdl} 揭示了一条惊人的推论：只要新策略 $\tilde{\pi}$ 在每个状态下的期望旧优势均满足 $\E_{a \sim \tilde{\pi}}[A^\pi(s, a)] \ge 0$，便必有 $J(\tilde{\pi}) \ge J(\pi)$。遗憾的是，由于神经网络共享参数，某处优势为正往往伴随他处为负；而式~\eqref{eq:pdl} 依赖未知的新分布 $d^{\tilde{\pi}}$，无法在采样前直接计算。
+
+\subsection{单调改进下界与 Majorization--Minimization（MM）哲学}
+
+为了摆脱对未知 $d^{\tilde{\pi}}$ 的依赖，Schulman 等（2015）先用旧策略的状态分布 $d^\pi$ 替代 $d^{\tilde{\pi}}$，定义局部线性近似代理目标：
+\begin{equation}
+  L_\pi(\tilde{\pi}) \triangleq J(\pi) + \frac{1}{1-\gamma}\,\E_{s \sim d^\pi,\, a \sim \tilde{\pi}(\cdot \mid s)}\!\left[A^\pi(s, a)\right].
+  \label{eq:trpo-local-surrogate}
+\end{equation}
+容易验证 $L_\pi$ 与 $J$ 在 $\tilde{\pi} = \pi$ 处具有\textbf{零阶与一阶完全一致}：因为 $\E_{a\sim\pi}[A^\pi(s,a)] = 0$，故 $L_\pi(\pi) = J(\pi)$；且对参数求导时，因为 $d^{\tilde{\pi}}$ 的导数乘以零期望项 $\E_{a\sim\pi}[A^\pi(s,a)] = 0$ 恰好消去，所以 $\nabla_\theta L_{\pi_{\theta_0}}(\pi_\theta)\big|_{\theta=\theta_0} = \nabla_\theta J(\pi_\theta)\big|_{\theta=\theta_0}$！
+
+更进一步，当 $\tilde{\pi}$ 离开 $\pi$ 不太远时，用 $d^\pi$ 替换 $d^{\tilde{\pi}}$ 产生的误差可以用新旧策略间的最大 KL 散度严格界定：
+
+\begin{thmBox}
+\begin{theorem}[TRPO 单调改进下界，Schulman et al., 2015]
+\label{thm:trpo-bound}
+记 $D_{\mathrm{KL}}^{\max}(\pi \,\|\, \tilde{\pi}) \triangleq \max_{s \in \mathcal{S}} \DKL\big(\pi(\cdot \mid s) \,\|\, \tilde{\pi}(\cdot \mid s)\big)$，并设最大绝对优势 $\varepsilon = \max_{s,a} |A^\pi(s, a)|$。则对任意策略 $\tilde{\pi}$，真实回报严格满足下界
+\begin{equation}
+  J(\tilde{\pi}) \;\ge\; M_\pi(\tilde{\pi}) \triangleq L_\pi(\tilde{\pi}) - C\, D_{\mathrm{KL}}^{\max}(\pi \,\|\, \tilde{\pi}),
+  \qquad C = \frac{4\varepsilon \gamma}{(1 - \gamma)^2}.
+  \label{eq:trpo-mm-bound}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{insightBox}{证明骨架与 MM 单调爬坡保证}
+式~\eqref{eq:trpo-mm-bound} 的证明分为两步精妙的不等式放缩：
+\begin{enumerate}
+  \item \textbf{总变差耦合界}：由性能差异引理，$J(\tilde{\pi}) - L_\pi(\tilde{\pi}) = \frac{1}{1-\gamma}\sum_s \big(d^{\tilde{\pi}}(s) - d^\pi(s)\big)\E_{a\sim\tilde{\pi}}[A^\pi(s,a)]$。令 $\alpha = \max_s D_{\mathrm{TV}}(\pi(\cdot\mid s), \tilde{\pi}(\cdot\mid s))$，通过状态耦合引理可知第 $t$ 步两个策略未曾分叉的概率至少为 $(1-\alpha)^t$，从而证明状态分布偏移 $\|d^{\tilde{\pi}} - d^\pi\|_1 \le \frac{2\gamma\alpha}{1-\gamma}$，且每个状态的期望优势绝对值 $|\E_{a\sim\tilde{\pi}}[A^\pi(s,a)]| \le 2\varepsilon \alpha$，两项相乘便得到二次惩罚 $-O(\alpha^2)$。
+  \item \textbf{Pinsker 不等式转化}：由信息论经典的 Pinsker 不等式 $D_{\mathrm{TV}}(p, q)^2 \le \frac{1}{2}\DKL(p \| q)$（注意这里是一次 KL 散度控制平方总变差！），立刻把 $\alpha^2$ 替换为 $D_{\mathrm{KL}}^{\max}(\pi \| \tilde{\pi})$，得到式~\eqref{eq:trpo-mm-bound}。
+\end{enumerate}
+由此立刻推出\textbf{严格单调改进定理（MM 算法）}：若令 $\pi_{k+1} = \argmax_{\tilde{\pi}} M_{\pi_k}(\tilde{\pi})$，则因为 $M_{\pi_k}(\pi_k) = J(\pi_k)$，必然有
+\[
+  J(\pi_{k+1}) \;\ge\; M_{\pi_k}(\pi_{k+1}) \;\ge\; M_{\pi_k}(\pi_k) \;=\; J(\pi_k).
+\]
+从几何上看，$M_{\pi_k}(\tilde{\pi})$ 是一条在当前点 $\pi_k$ 处与真实曲折地形 $J(\tilde{\pi})$ 相切、且处处位于其下方的“光滑托盘”；只要把策略推到托盘最高点，真实性能就绝不会掉下去。
+\end{insightBox}
+
+\subsection{TRPO 约束优化、Fisher 信息矩阵与自然策略梯度}
+
+直接按定理~\ref{thm:trpo-bound} 的理论惩罚系数 $C = \frac{4\varepsilon\gamma}{(1-\gamma)^2}$ 优化往往过于保守（当 $\gamma = 0.99$ 时 $C \propto 10^4$，步长小如蜗牛）。因此在实用算法\textbf{信任域策略优化（Trust Region Policy Optimization, TRPO）}中，研究者将软惩罚改写为显式 KL 球约束，并用易于采样的平均 KL 散度替代难以计算的最大 KL 散度：
+\begin{equation}
+  \max_\theta \; \E_{s \sim d^{\theta_{\mathrm{old}}},\, a \sim \pi_{\theta_{\mathrm{old}}}}\!\left[\frac{\pi_\theta(a \mid s)}{\pi_{\theta_{\mathrm{old}}}(a \mid s)}\,\hat{A}_t\right]
+  \quad \text{s.t.} \quad
+  \bar{D}_{\mathrm{KL}}^{\theta_{\mathrm{old}}}(\theta_{\mathrm{old}} \,\|\, \theta) \triangleq \E_{s \sim d^{\theta_{\mathrm{old}}}}\!\Big[\DKL\big(\pi_{\theta_{\mathrm{old}}}(\cdot \mid s) \,\|\, \pi_\theta(\cdot \mid s)\big)\Big] \le \delta.
+  \label{eq:trpo-opt}
+\end{equation}
+
+如何在 $\theta_{\mathrm{old}}$ 附近近似求解带非线性约束的式~\eqref{eq:trpo-opt}？令步长 $\Delta\theta = \theta - \theta_{\mathrm{old}}$，对目标函数作一阶泰勒展开、对 KL 约束作二阶泰勒展开：
+\begin{itemize}
+  \item \textbf{目标展开}：$L^{\mathrm{CPI}}(\theta_{\mathrm{old}} + \Delta\theta) \approx L^{\mathrm{CPI}}(\theta_{\mathrm{old}}) + g^\top \Delta\theta$，其中 $g = \nabla_\theta L^{\mathrm{CPI}}(\theta)\big|_{\theta_{\mathrm{old}}}$ 正是普通策略梯度。
+  \item \textbf{KL 约束的零阶、一阶与二阶导数}：记 $D(\theta) = \bar{D}_{\mathrm{KL}}^{\theta_{\mathrm{old}}}(\theta_{\mathrm{old}} \,\|\, \theta)$。
+  \begin{enumerate}
+    \item 零阶项：$D(\theta_{\mathrm{old}}) = 0$。
+    \item 一阶导数：$\nabla_\theta D(\theta)\big|_{\theta_{\mathrm{old}}} = -\E_{s, a\sim \pi_{\theta_{\mathrm{old}}}}[\nabla_\theta \ln \pi_\theta(a\mid s)]\big|_{\theta_{\mathrm{old}}} = 0$（因为概率分布对数梯度的期望恒为零，这与第~\ref{ch:dqn-pg-ac} 章定理~\ref{thm:baseline-unbiased} 用的正是同一个恒等式！）。
+    \item 二阶 Hessian 矩阵：再次求导并利用 $\E[\nabla^2 \ln \pi] = -\E[\nabla \ln \pi\,\nabla \ln \pi^\top]$，得到正半定的\textbf{Fisher 信息矩阵（Fisher Information Matrix, FIM）}：
+    \begin{equation}
+      F \triangleq \nabla_\theta^2 D(\theta)\Big|_{\theta_{\mathrm{old}}}
+      = \E_{s \sim d^{\theta_{\mathrm{old}}},\, a \sim \pi_{\theta_{\mathrm{old}}}}\!\Big[\nabla_\theta \ln \pi_\theta(a \mid s)\,\nabla_\theta \ln \pi_\theta(a \mid s)^\top\Big]_{\theta=\theta_{\mathrm{old}}}.
+      \label{eq:fisher-matrix}
+    \end{equation}
+  \end{enumerate}
+\end{itemize}
+于是式~\eqref{eq:trpo-opt} 局部化为一个标准的二次约束线性规划：
+\begin{equation}
+  \max_{\Delta\theta} \; g^\top \Delta\theta \quad \text{s.t.} \quad \frac{1}{2}\,\Delta\theta^\top F\, \Delta\theta \le \delta.
+  \label{eq:trpo-qp}
+\end{equation}
+对式~\eqref{eq:trpo-qp} 应用拉格朗日乘子法（$\mathcal{L}(\Delta\theta, \lambda) = g^\top \Delta\theta - \lambda(\frac{1}{2}\Delta\theta^\top F\Delta\theta - \delta)$，令 $\nabla_{\Delta\theta}\mathcal{L} = 0$ 得 $\Delta\theta = \frac{1}{\lambda} F^{-1} g$，再代回边界等式 $\frac{1}{2}\Delta\theta^\top F\Delta\theta = \delta$ 解出 $\lambda$），即得著名的\textbf{自然策略梯度（Natural Policy Gradient）}闭式步长：
+\begin{equation}
+  \Delta\theta^* = \sqrt{\frac{2\delta}{g^\top F^{-1} g}}\, F^{-1} g.
+  \label{eq:npg-step}
+\end{equation}
+
+为了避免显式构造和求逆 $d \times d$ 维的 Fisher 矩阵 $F$（对百万参数网络，$F$ 需要数 TB 显存），TRPO 采用\textbf{共轭梯度法（Conjugate Gradient, CG）}仅通过二阶自动微分计算矩阵-向量积 $Fv = \nabla_\theta\big((\nabla_\theta D)^\top v\big)$ 来近似求解线性方程 $Fx = g$，最后辅以\textbf{回溯线搜索（Backtracking Line Search）}验证真实代理目标上升且真实 KL 不超 $\delta$。
+
+尽管 TRPO 在理论上无懈可击，它在现代深度学习与大模型工程中却举步维艰：二阶 CG 迭代实现复杂、难以兼容共享特征层的 Actor-Critic 架构与 Dropout/LayerNorm，也无法直接套用 Adam 等自适应一阶优化器。于是历史向我们发问：\textbf{能否只用一阶随机梯度下降（SGD / Adam），就复现出信任域的绝大部分威力？}
+
+\section{近端策略优化（PPO-Clip）：一阶裁剪如何筑起信任域}
+\label{sec:ppo-clip}
+
+\subsection{从 PPO-Penalty 到 PPO-Clip 代理目标}
+
+2017 年，Schulman 等提出\textbf{近端策略优化（Proximal Policy Optimization, PPO）}，最初考察了两条一阶路线：
+\begin{itemize}
+  \item \textbf{PPO-Penalty（自适应 KL 惩罚）}：直接将 KL 散度作为软惩罚项并入一阶目标，即最大化 $\hat{\E}_t\!\big[r_t(\theta)\hat{A}_t - \beta \DKL(\pi_{\theta_{\mathrm{old}}} \| \pi_\theta)\big]$，若本轮实测 KL 偏大就加倍 $\beta$，偏小就减半 $\beta$。
+  \item \textbf{PPO-Clip（概率比裁剪）}：彻底省去显式计算 KL 散度和调节 $\beta$ 的麻烦，直接对概率比 $r_t(\theta)$ 施加对称区间 $[1-\epsilon, 1+\epsilon]$ 裁剪，并与原始项取悲观极小值！
+\end{itemize}
+大量消融实验表明，结构更简单的 \textbf{PPO-Clip} 不仅代码极短，在连续控制、电子竞技乃至大语言模型 RLHF 中的稳定性还全面胜过 PPO-Penalty。
+
+\begin{defBox}
+\begin{definition}[PPO-Clip 代理目标函数，Schulman et al., 2017]
+\label{def:ppo-clip}
+设裁剪超参数 $\epsilon \in (0, 1)$（工程经典默认值 $\epsilon = 0.2$），概率比 $r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}$，$\hat{A}_t$ 为由旧轨迹计算并截断梯度（\texttt{.detach()}）的优势估计（通常采用 GAE($\lambda$)）。PPO-Clip 的策略代理目标定义为
+\begin{equation}
+  L^{\mathrm{CLIP}}(\theta)
+  \triangleq \hat{\E}_t\!\left[\min\!\Big(r_t(\theta)\hat{A}_t,\;\; \clip\!\big(r_t(\theta),\, 1-\epsilon,\, 1+\epsilon\big)\,\hat{A}_t\Big)\right],
+  \label{eq:ppo-clip}
+\end{equation}
+其中 $\clip(r, 1-\epsilon, 1+\epsilon) = \min\big(\max(r, 1-\epsilon),\, 1+\epsilon\big)$。
+\end{definition}
+\end{defBox}
+
+初看式~\eqref{eq:ppo-clip}，许多初学者都会心生疑惑：\textbf{为什么不能直接最大化 $\clip(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t$，非要在外面多套一层看似多余的 $\min(\cdot, \cdot)$ 呢？} 下面的完整逐情形求导剖析将彻底揭开这层 $\min$ 的神来之笔。
+
+\subsection{逐情形严格分段求导剖析：$\hat{A}_t > 0$ 与 $\hat{A}_t < 0$}
+
+\begin{thmBox}
+\begin{proposition}[PPO-Clip 代理目标的分段闭式表达与梯度行为]
+\label{prop:ppo-cases}
+记单步裁剪代理函数为 $f(r; \hat{A}) \triangleq \min\big(r\hat{A},\; \clip(r, 1-\epsilon, 1+\epsilon)\hat{A}\big)$（其中 $r = r_t(\theta) > 0$）。其严格分段形式与关于 $r$ 的导数 $\frac{\partial f}{\partial r}$ 完全刻画如下：
+\begin{enumerate}
+  \item \textbf{情形一：正优势 $\hat{A} > 0$（好动作，希望提高概率 $r$）}
+  \begin{equation}
+    f(r; \hat{A}) =
+    \begin{cases}
+      r\hat{A}, & 0 < r < 1 - \epsilon \quad \text{（$\frac{\partial f}{\partial r} = \hat{A} > 0$，\textbf{未截断，积极拉回！}）} \\
+      r\hat{A}, & 1 - \epsilon \le r \le 1 + \epsilon \quad \text{（$\frac{\partial f}{\partial r} = \hat{A} > 0$，信任域内正常上升）} \\
+      (1 + \epsilon)\hat{A}, & r > 1 + \epsilon \quad \text{（$\frac{\partial f}{\partial r} = 0$，\textbf{饱和封顶，禁止继续拉高！}）}
+    \end{cases}
+    \label{eq:ppo-case-pos}
+  \end{equation}
+  合并前两段可精炼写作 $f(r; \hat{A}) = \min(r, 1+\epsilon)\,\hat{A}$。
+
+  \item \textbf{情形二：负优势 $\hat{A} < 0$（坏动作，希望压低概率 $r$）}
+  \begin{equation}
+    f(r; \hat{A}) =
+    \begin{cases}
+      (1 - \epsilon)\hat{A}, & 0 < r < 1 - \epsilon \quad \text{（$\frac{\partial f}{\partial r} = 0$，\textbf{饱和封底，禁止继续压低！}）} \\
+      r\hat{A}, & 1 - \epsilon \le r \le 1 + \epsilon \quad \text{（$\frac{\partial f}{\partial r} = \hat{A} < 0$，信任域内正常压低）} \\
+      r\hat{A}, & r > 1 + \epsilon \quad \text{（$\frac{\partial f}{\partial r} = \hat{A} < 0$，\textbf{未截断，严厉纠偏！}）}
+    \end{cases}
+    \label{eq:ppo-case-neg}
+  \end{equation}
+  合并后两段可精炼写作 $f(r; \hat{A}) = \max(r, 1-\epsilon)\,\hat{A}$。
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+当 $\hat{A} > 0$ 时，同乘正数 $\hat{A}$ 保持不等号方向，故
+\[
+  f(r; \hat{A}) = \min\big(r,\; \clip(r, 1-\epsilon, 1+\epsilon)\big)\,\hat{A}.
+\]
+分段验证三个区间：若 $r < 1-\epsilon$，则 $\clip(r) = 1-\epsilon > r$，取 $\min$ 得 $r$；若 $r \in [1-\epsilon, 1+\epsilon]$，则 $\clip(r) = r$，取 $\min$ 得 $r$；若 $r > 1+\epsilon$，则 $\clip(r) = 1+\epsilon < r$，取 $\min$ 得 $1+\epsilon$。由此立得式~\eqref{eq:ppo-case-pos}。
+
+当 $\hat{A} < 0$ 时，同乘负数 $\hat{A}$ 翻转不等号，即 $\min(u\hat{A}, v\hat{A}) = \max(u, v)\hat{A}$，故
+\[
+  f(r; \hat{A}) = \max\big(r,\; \clip(r, 1-\epsilon, 1+\epsilon)\big)\,\hat{A}.
+\]
+再分三段检验：若 $r < 1-\epsilon$，则 $\clip(r) = 1-\epsilon > r$，取 $\max$ 得 $1-\epsilon$；若 $r \in [1-\epsilon, 1+\epsilon]$，则 $\clip(r) = r$，取 $\max$ 得 $r$；若 $r > 1+\epsilon$，则 $\clip(r) = 1+\epsilon < r$，取 $\max$ 得 $r$。由此立得式~\eqref{eq:ppo-case-neg}。
+\end{proof}
+\end{thmBox}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\footnotesize]
+  % ==================== Left Panel: A_t > 0 ====================
+  \begin{scope}[shift={(0,0)}]
+    \node[font=\sffamily\bfseries\small, color=tealDark] at (3.1, 4.72) {(a) 正优势 $\hat{A}_t > 0$（好动作：封顶不封底）};
+    % Shaded trust region [1-eps, 1+eps] -> x in [1.9, 3.7], center r=1 at x=2.8
+    \fill[tealLight] (1.9, 0) rectangle (3.7, 3.75);
+    \fill[ochreLight!65] (3.7, 0) rectangle (5.8, 3.75);
+    % Axes
+    \draw[-{Stealth[length=2mm]}, thick, slate] (0, 0) -- (6.1, 0) node[right, text=ink] {$r_t(\theta)$};
+    \draw[-{Stealth[length=2mm]}, thick, slate] (0, 0) -- (0, 4.0) node[left, yshift=-1mm, text=ink] {$L^{\mathrm{CLIP}}$};
+    % Ticks on x-axis
+    \draw[slate, dashed, thin] (1.9, 0) -- (1.9, 3.75);
+    \draw[slate, dashed, thin] (2.8, 0) -- (2.8, 3.75);
+    \draw[slate, dashed, thin] (3.7, 0) -- (3.7, 3.75);
+    \node[below, font=\scriptsize] at (1.9, -0.05) {$1-\epsilon$};
+    \node[below, font=\scriptsize] at (2.8, -0.05) {$1$};
+    \node[below, font=\scriptsize] at (3.7, -0.05) {$1+\epsilon$};
+
+    % Unclipped line: y = 0.72 * x
+    \draw[navy, dashed, thick] (0.2, 0.144) -- (5.2, 3.744);
+    \node[navy, font=\scriptsize, anchor=west] at (4.95, 3.40) {$r_t \hat{A}_t$};
+    % Clipped-only line (dotted) on left side r < 1-eps
+    \draw[slate, dotted, very thick] (0.2, 1.368) -- (1.9, 1.368);
+    \node[slate, font=\scriptsize, align=center] at (1.02, 1.88) {仅裁剪线\\(已舍弃)};
+
+    % Actual PPO-Clip min curve: y = 0.72*x for x<=3.7, y = 2.664 for x>3.7
+    \draw[teal, line width=2.2pt] (0.2, 0.144) -- (3.7, 2.664) -- (5.8, 2.664);
+    \fill[tealDark] (2.8, 2.016) circle (2.6pt);
+    \fill[ochre] (3.7, 2.664) circle (2.6pt);
+
+    % Annotations
+    \node[tealDark, font=\scriptsize, align=center] at (1.30, 0.42) {纠偏区\\$\nabla \neq 0$};
+    \node[teal, font=\scriptsize, align=center] at (2.8, 3.25) {信任域\\正常上升};
+    \node[ochre, font=\scriptsize, align=center] at (4.78, 2.02) {梯度截断区\\$\frac{\partial f}{\partial r} = 0$};
+    \draw[-{Stealth[length=1.8mm]}, teal, thick] (0.55, 0.65) -- (1.20, 1.12);
+    \node[left, font=\scriptsize, color=ochre] at (0, 2.664) {$(1+\epsilon)\hat{A}_t$};
+    \draw[ochre, dotted] (0, 2.664) -- (3.7, 2.664);
+  \end{scope}
+
+  % ==================== Right Panel: A_t < 0 ====================
+  \begin{scope}[shift={(7.5,0)}]
+    \node[font=\sffamily\bfseries\small, color=ochre] at (3.1, 4.72) {(b) 负优势 $\hat{A}_t < 0$（坏动作：封底不封顶）};
+    % Shaded trust region [1-eps, 1+eps]
+    \fill[tealLight] (1.9, 0) rectangle (3.7, 3.75);
+    \fill[ochreLight!65] (0, 0) rectangle (1.9, 3.75);
+    % Axes: x-axis at y=3.75 (value 0), downward is negative
+    \draw[-{Stealth[length=2mm]}, thick, slate] (0, 3.75) -- (6.1, 3.75) node[right, text=ink] {$r_t(\theta)$};
+    \draw[-{Stealth[length=2mm]}, thick, slate] (0, 0) -- (0, 4.0) node[left, yshift=-1mm, text=ink] {$L^{\mathrm{CLIP}}$};
+    % Ticks
+    \draw[slate, dashed, thin] (1.9, 0) -- (1.9, 3.75);
+    \draw[slate, dashed, thin] (2.8, 0) -- (2.8, 3.75);
+    \draw[slate, dashed, thin] (3.7, 0) -- (3.7, 3.75);
+    \node[above, font=\scriptsize] at (1.9, 3.80) {$1-\epsilon$};
+    \node[above, font=\scriptsize] at (2.8, 3.80) {$1$};
+    \node[above, font=\scriptsize] at (3.7, 3.80) {$1+\epsilon$};
+
+    % Unclipped line: y = 3.75 - 0.65 * x
+    \draw[navy, dashed, thick] (0.2, 3.62) -- (5.5, 0.175);
+    \node[navy, font=\scriptsize, anchor=west] at (5.15, 0.72) {$r_t \hat{A}_t$};
+    % Clipped-only line (dotted) on right side r > 1+eps: y = 3.75 - 0.65*3.7 = 1.345
+    \draw[slate, dotted, very thick] (3.7, 1.345) -- (5.8, 1.345);
+    \node[slate, font=\scriptsize, align=center] at (4.85, 1.72) {仅裁剪线(已舍弃)};
+
+    % Actual PPO-Clip min curve: flat at y = 3.75 - 0.65*1.9 = 2.515 for x<=1.9, then follows 3.75 - 0.65*x
+    \draw[ochre, line width=2.2pt] (0.15, 2.515) -- (1.9, 2.515) -- (5.5, 0.175);
+    \fill[tealDark] (2.8, 1.93) circle (2.6pt);
+    \fill[ochre] (1.9, 2.515) circle (2.6pt);
+
+    % Annotations
+    \node[ochre, font=\scriptsize, align=center] at (0.95, 1.85) {梯度截断区\\$\frac{\partial f}{\partial r} = 0$};
+    \node[teal, font=\scriptsize, align=center] at (2.8, 0.65) {信任域\\正常压低};
+    \node[tealDark, font=\scriptsize, align=center] at (4.22, 0.25) {严厉纠偏区\\$\nabla \neq 0$};
+    \draw[-{Stealth[length=1.8mm]}, ochre, thick] (5.10, 0.78) -- (4.50, 1.15);
+    \node[left, font=\scriptsize, color=ochre] at (0, 2.515) {$(1-\epsilon)\hat{A}_t$};
+  \end{scope}
+\end{tikzpicture}}
+\caption{PPO-Clip 单步代理目标函数 $f(r_t; \hat{A}_t)$ 在正优势与负优势下的精确分段几何。外层 $\min$ 构造了原始代理目标的\textbf{悲观下界}：当更新试图继续冲出信任域以谋取更大收益时，曲线变平令梯度归零；而当其他小批量更新意外将 $r_t$ 推向错误一侧时，梯度保持激活以迅速纠偏。}
+\label{fig:ppo-clip-geometry}
+\end{figure}
+
+结合图~\ref{fig:ppo-clip-geometry}，现在我们可以彻底回答前面提出的灵魂拷问——\textbf{外层 $\min$ 到底起了什么作用？}
+\begin{itemize}
+  \item \textbf{它是一道单向棘轮（One-Way Ratchet）}：当动作是好动作（$\hat{A}_t > 0$）且概率已经被拉高超过 $1+\epsilon$ 时，梯度归零，防止贪婪榨干；但如果因为同批次中其他样本的参数耦合，意外把该好动作的概率压到了 $1-\epsilon$ 以下，外层 $\min$ 选中的是\emph{更低}的 $r_t \hat{A}_t$ 而非 $(1-\epsilon)\hat{A}_t$——于是梯度仍然为正，立刻把误伤的好动作拉回信任域！
+  \item \textbf{坏动作同理（$\hat{A}_t < 0$）}：把坏动作的概率压低到 $1-\epsilon$ 以下后，梯度归零，防止把探索概率一棒子打死成 $0$；但如果某个坏动作的概率反常飙升到了 $1+\epsilon$ 以上，外层 $\min$ 依然保持惩罚梯度激活，毫不留情地把它按回 $[1-\epsilon, 1+\epsilon]$！
+\end{itemize}
+正因为这一精妙的非对称“只拦激进、不拦纠偏”悲观下界设计，PPO-Clip 允许我们在同一批轨迹上安心切分 mini-batch、重复迭代 $K = 4 \sim 10$ 轮，将样本利用率直接提升一个数量级，却只需一行 \texttt{torch.min} 与 \texttt{torch.clamp}！
+
+\subsection{完整 PPO 算法流程与 PyTorch 核心实现}
+
+在工程实践中，PPO 将策略裁剪目标、价值函数回归损失与策略熵正则项组合成联合目标（注意 PyTorch 执行梯度\emph{下降}，因此对代理目标与熵取负号）：
+\begin{equation}
+  \mathcal{L}_{\mathrm{PPO}}(\theta, \phi)
+  = -L^{\mathrm{CLIP}}(\theta)
+    + c_1\,\hat{\E}_t\!\left[\big(V_\phi(s_t) - \hat{R}_t\big)^2\right]
+    - c_2\,\hat{\E}_t\!\left[\mathcal{H}\big(\pi_\theta(\cdot \mid s_t)\big)\right],
+  \label{eq:ppo-total-loss}
+\end{equation}
+其中 $\hat{R}_t = \hat{A}_t^{\mathrm{GAE}} + V_{\phi_{\mathrm{old}}}(s_t)$ 为 $\lambda$-回报目标，常用系数 $c_1 = 0.5, c_2 \in [0, 0.01]$。此外，现代 PPO 实现通常配套三项久经考验的工程稳定技巧：
+\begin{enumerate}
+  \item \textbf{小批量优势标准化}：将每个 batch 内的优势归一化为 $\tilde{A}_t = \frac{\hat{A}_t - \mu_A}{\sigma_A + 10^{-8}}$，消除不同任务奖励尺度差异。
+  \item \textbf{全局梯度范数裁剪}：\texttt{clip\_grad\_norm\_(params, 0.5)} 防止偶发极大优势引发参数突变。
+  \item \textbf{近似 KL 早停（KL Early Stopping）}：在 $K$ 轮复用中实时监测近似散度 $\hat{d}_{\mathrm{KL}} = \hat{\E}_t[(r_t - 1) - \ln r_t]$；一旦超过阈值（如 $1.5\,\delta_{\mathrm{target}}$），立刻提前终止本轮剩余 epoch。
+\end{enumerate}
+
+\begin{lstlisting}[caption={PPO-Clip 多轮复用更新核心模块（支持连续高斯与离散策略的简洁 PyTorch 实现）}]
+def ppo_clip_update(policy, value_net, opt, batch, clip_eps=0.2,
+                    epochs=10, vf_coef=0.5, ent_coef=0.01, max_kl=0.03):
+    # batch 中 old_logp 与 adv 必须在采样阶段经 torch.no_grad() 彻底冻结!
+    states, actions, old_logp, returns, adv = batch
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+    for _ in range(epochs):
+        dist = policy(states)                      # 返回 Categorical 或 Normal 分布
+        new_logp = dist.log_prob(actions)
+        if new_logp.ndim > 1:
+            new_logp = new_logp.sum(dim=-1)        # 连续多维动作对数概率相加
+
+        log_ratio = torch.clamp(new_logp - old_logp, -10.0, 10.0)
+        ratio = torch.exp(log_ratio)               # r_t(theta) = pi_new / pi_old
+
+        # PPO-Clip 悲观下界代理目标
+        surr1 = ratio * adv
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        value_loss = F.mse_loss(value_net(states).squeeze(-1), returns)
+        entropy = dist.entropy().mean()
+        loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(policy.parameters()) + list(value_net.parameters()), 0.5
+        )
+        opt.step()
+
+        # 非负近似 KL 早停监控 (Schulman k3 估计量)
+        with torch.no_grad():
+            approx_kl = ((ratio - 1.0) - log_ratio).mean().item()
+            if approx_kl > 1.5 * max_kl:
+                break
+\end{lstlisting}
+
+\section{群体相对策略优化（GRPO）：甩掉 Critic 的大模型 RL 革命}
+\label{sec:grpo}
+
+\subsection{为什么标准 PPO 在大语言模型时代变得无比沉重？}
+
+从 2022 年起，PPO 成为大语言模型人类反馈强化学习（RLHF）的标准引擎。然而，当人们把 PPO 从几万参数的机器人 MLP 搬到 700 亿（70B）参数的大语言模型时，立刻撞上了两堵铜墙铁壁：
+\begin{enumerate}
+  \item \textbf{显存与算力的“四模型噩梦”}：标准 LLM-PPO 训练需要同时常驻四个同量级巨无霸模型——待训练的策略模型 $\pi_\theta$（Actor）、价值模型 $V_\phi$（Critic）、冻结参考模型 $\pi_{\mathrm{ref}}$（防止遗忘语言能力）、以及奖励模型 $r_\psi$（RM）。其中 Critic $V_\phi$ 与 Actor 规模相当，仅其权重、梯度与 Adam 一二阶动量就吞噬了近一半的训练显存与算力！
+  \item \textbf{长思维链上的稀疏终端奖励难题}：在数学解题或代码生成任务中，模型一口气输出长达 4000 个 token 的推理过程，只有最后一个答案对错才给出标量奖励 $R \in \{0, 1\}$。试图训练一个 token 级 Critic $V_\phi(q, o_{\le t})$ 在推理进行到第 1372 个词时就准确预判最终能否解出难题，噪声极大且极易欠拟合；一个糟糕的 Critic 反而会通过有偏优势估计把 Actor 带偏。
+\end{enumerate}
+
+\subsection{GRPO 的核心洞察：用“同题组内比拼”取代 Critic 基线}
+
+2024 年，DeepSeekMath 与随后的 DeepSeek-R1 提出了\textbf{群体相对策略优化（Group Relative Policy Optimization, GRPO，Shao et al., 2024）}。它的破局思路返璞归真却威力惊人：\textbf{既然价值基线 $V(q)$ 的本质不过是“同一提示 $q$ 下策略生成回答的期望奖励”，何必养一个千亿参数的 Critic 去艰难拟合它？直接让旧策略 $\pi_{\theta_{\mathrm{old}}}$ 对同一个问题 $q$ 独立采样一组 $G$ 个回答，用这组回答的经验均值当基线、经验标准差做归一化不就行了吗！}
+
+\begin{defBox}
+\begin{definition}[GRPO 群体相对优势与目标函数，Shao et al., 2024]
+\label{def:grpo}
+给定问题（提示）$q \sim P(Q)$，从旧策略 $\pi_{\theta_{\mathrm{old}}}(\cdot \mid q)$ 独立采样一组 $G$ 条完整回答 $\{o_1, o_2, \dots, o_G\}$（典型值 $G \in \{8, 16, 64\}$），由奖励模型或可验证规则（如数学答案比对、单元测试）给出每条回答的标量结果奖励 $\{R_1, R_2, \dots, R_G\}$。
+\begin{enumerate}
+  \item \textbf{群体相对归一化优势}：对组内第 $i$ 条回答，定义其相对优势为 z-score 标准化值，并广播至该回答的每一个输出 token $t \in \{1, \dots, |o_i|\}$：
+  \begin{equation}
+    \hat{A}_{i, t} = \hat{A}_i \triangleq \frac{R_i - \bar{R}}{\sigma_R + \varepsilon}, \qquad
+    \bar{R} = \frac{1}{G}\sum_{j=1}^G R_j, \qquad
+    \sigma_R = \sqrt{\frac{1}{G}\sum_{j=1}^G (R_j - \bar{R})^2},
+    \label{eq:grpo-adv}
+  \end{equation}
+  其中 $\varepsilon \approx 10^{-6}$ 用于防止全组奖励相同时除以零。
+  \item \textbf{带显式参考 KL 正则的 GRPO 代理目标}：记 token 级概率比 $r_{i,t}(\theta) = \frac{\pi_\theta(o_{i,t} \mid q, o_{i,<t})}{\pi_{\theta_{\mathrm{old}}}(o_{i,t} \mid q, o_{i,<t})}$，GRPO 最大化
+  \begin{equation}
+  \begin{aligned}
+    \mathcal{J}_{\mathrm{GRPO}}(\theta)
+    = \E_{\substack{q \sim P(Q) \\ \{o_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}}}
+    \Bigg[\frac{1}{G}\sum_{i=1}^G \frac{1}{|o_i|}\sum_{t=1}^{|o_i|}
+    \Big(&\min\!\big(r_{i,t}(\theta)\hat{A}_i,\; \clip(r_{i,t}(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_i\big) \\
+    &- \beta\,\hat{D}_{\mathrm{KL}}\big(\pi_\theta \,\|\, \pi_{\mathrm{ref}}\big)_{i,t}\Big)\Bigg],
+  \end{aligned}
+  \label{eq:grpo-obj}
+  \end{equation}
+  其中 $\beta \ge 0$ 为参考策略偏离惩罚系数，token 级 KL 估计量采用 Schulman $k_3$ 形式：
+  \begin{equation}
+    \hat{D}_{\mathrm{KL}}\big(\pi_\theta \,\|\, \pi_{\mathrm{ref}}\big)_{i,t}
+    \triangleq \frac{\pi_{\mathrm{ref}}(o_{i,t} \mid q, o_{i,<t})}{\pi_\theta(o_{i,t} \mid q, o_{i,<t})}
+    - \ln \frac{\pi_{\mathrm{ref}}(o_{i,t} \mid q, o_{i,<t})}{\pi_\theta(o_{i,t} \mid q, o_{i,<t})} - 1.
+    \label{eq:grpo-kl-k3}
+  \end{equation}
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+注意 GRPO 在两个精妙之处与传统 LLM-PPO 截然不同：第一，它用\textbf{组内蒙特卡洛基线}彻底消灭了 Critic 网络；第二，传统 PPO 把 $-\beta \ln \frac{\pi_\theta}{\pi_{\mathrm{ref}}}$ 揉进每步奖励里再算优势，而 GRPO 直接把非负 KL 估计量~\eqref{eq:grpo-kl-k3} 作为显式正则项写入损失函数。为什么非要用这个看似绕口的 $\frac{\pi_{\mathrm{ref}}}{\pi_\theta} - \ln \frac{\pi_{\mathrm{ref}}}{\pi_\theta} - 1$，而不是更直观的 $-\ln \frac{\pi_{\mathrm{ref}}}{\pi_\theta} = \ln \frac{\pi_\theta}{\pi_{\mathrm{ref}}}$？下面的短小命题给出了天书级的回答。
+
+\begin{thmBox}
+\begin{proposition}[GRPO 非负 KL 估计量的无偏性与严格非负性]
+\label{prop:kl-k3}
+设 $p, q$ 为同一支撑集上的两个概率分布，定义随机变量 $u(a) = \frac{q(a)}{p(a)}$（其中 $a \sim p$），并令
+\[
+  k_1(a) \triangleq -\ln u(a) = \ln \frac{p(a)}{q(a)}, \qquad
+  k_3(a) \triangleq u(a) - 1 - \ln u(a) = \frac{q(a)}{p(a)} - \ln \frac{q(a)}{p(a)} - 1.
+\]
+则对所有采样结果 $a$ 严格成立：
+\begin{enumerate}
+  \item \textbf{两者均无偏}：$\E_{a \sim p}[k_1(a)] = \E_{a \sim p}[k_3(a)] = \DKL(p \,\|\, q)$；
+  \item \textbf{逐点严格非负}：$k_3(a) \ge 0$ 恒成立（当且仅当 $p(a) = q(a)$ 时取等号），而 $k_1(a)$ 在 $p(a) < q(a)$ 时会取负值；
+  \item \textbf{方差更低}：利用控制变量 $(u(a) - 1)$（其期望为零且与 $-\ln u(a)$ 强负相关），在 $p \approx q$ 时 $k_3(a) \approx \frac{1}{2}(u(a)-1)^2$ 的方差量级远低于 $k_1(a) \approx -(u(a)-1)$。
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+首先验证控制变量期望为零：
+\[
+  \E_{a \sim p}[u(a) - 1] = \sum_a p(a)\,\frac{q(a)}{p(a)} - 1 = \sum_a q(a) - 1 = 1 - 1 = 0.
+\]
+因此 $\E_{a \sim p}[k_3(a)] = \E_{a \sim p}[u(a) - 1] + \E_{a \sim p}[-\ln u(a)] = 0 + \E_{a \sim p}\!\big[\ln\frac{p(a)}{q(a)}\big] = \DKL(p \,\|\, q)$。
+
+其次，令 $h(u) = u - 1 - \ln u$（$u > 0$），求导得 $h'(u) = 1 - \frac{1}{u}$、$h''(u) = \frac{1}{u^2} > 0$。故 $h(u)$ 在 $u = 1$ 处取得唯一全局极小值 $h(1) = 0$，即对任意 $u > 0$ 恒有 $k_3(a) \ge 0$。最后，记 $\delta = u - 1$，当 $p \approx q$（$|\delta| \ll 1$）时泰勒展开得 $k_1 = -\delta + O(\delta^2)$（方差为 $O(\E[\delta^2])$），而 $k_3 = \frac{1}{2}\delta^2 + O(\delta^3)$（方差为 $O(\E[\delta^4])$），在策略微调的近端区域实现量级级的方差压缩！
+\end{proof}
+\end{thmBox}
+
+\begin{table}[htbp]
+\centering
+\caption{标准 LLM-PPO 与群体相对策略优化（GRPO）系统架构与数学特性全面对比}
+\label{tab:ppo-vs-grpo}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{27mm}XX@{}}
+\toprule
+\textbf{对比维度} & \textbf{标准 PPO（Actor-Critic + GAE）} & \textbf{GRPO（Group Relative Policy Opt.）} \\
+\midrule
+常驻模型开销 & Actor $+$ \textbf{Critic} $+$ Ref $+$ RM（4 份） & Actor $+$ Ref（若用规则验证器，\textbf{仅 2 份！}） \\
+优势基线来源 & 参数化价值网络 $V_\phi(s_t)$ $+$ GAE($\lambda$) 递推 & 同提示 $G$ 条采样的组内统计量 $(\bar{R}, \sigma_R)$ \\
+优势粒度 & Token 级稠密优势 $\hat{A}_t$（依赖 Critic 精度） & 序列级结果优势广播至全句（或配合 PRM） \\
+KL 正则注入 & 并入每步奖励 $r_t - \beta \ln\frac{\pi_\theta}{\pi_{\mathrm{ref}}}$ & 直接加入损失函数 $-\beta \hat{D}_{\mathrm{KL}}^{(k_3)}(\pi_\theta \| \pi_{\mathrm{ref}})$ \\
+采样计算成本 & 每个 prompt 采样 1 条即可更新 & 每个 prompt 需采样 $G$ 条（如 $G=8 \sim 64$），推理并行度高 \\
+核心短板 & Critic 显存翻倍、长思维链价值估计高偏 & 若组内全对或全错（$\sigma_R = 0$），该题梯度归零 \\
+最佳适用场景 & 稠密奖励连续控制、密集步级反馈任务 & 数学/代码推理（RLVR）、结果导向型大模型后训练 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{lstlisting}[caption={GRPO 核心损失函数（群体相对优势归一化 $+$ PPO-Clip $+$ 非负 $k_3$ KL 正则）}]
+def grpo_loss(new_logp, old_logp, ref_logp, rewards, mask,
+              clip_eps=0.2, beta=0.04):
+    """
+    new_logp, old_logp, ref_logp, mask: (B, G, T)  B组问题, 每组G条回答, 长度T
+    rewards: (B, G) 每条完整回答的标量结果奖励; old_logp 与 ref_logp 需 no_grad
+    """
+    # 1. 组内相对优势归一化 (无需 Critic!) -> 广播到每个 token 位置
+    mean_r = rewards.mean(dim=1, keepdim=True)
+    std_r  = rewards.std(dim=1, keepdim=True, unbiased=False)
+    adv    = ((rewards - mean_r) / (std_r + 1e-6)).unsqueeze(-1)   # (B, G, 1)
+
+    # 2. Token 级概率比与 PPO-Clip 悲观代理目标
+    log_ratio = torch.clamp(new_logp - old_logp, -10.0, 10.0)
+    ratio     = torch.exp(log_ratio)
+    surr1     = ratio * adv
+    surr2     = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv
+    pg_obj    = torch.min(surr1, surr2)
+
+    # 3. Schulman k3 非负无偏 KL 估计量: exp(ref - new) - (ref - new) - 1
+    log_ref_diff = torch.clamp(ref_logp - new_logp, -10.0, 10.0)
+    kl_k3        = torch.exp(log_ref_diff) - log_ref_diff - 1.0
+
+    # 4. 按每条序列真实 token 长度求均值, 再跨组求均值
+    per_token = (pg_obj - beta * kl_k3) * mask
+    seq_lens  = mask.sum(dim=-1).clamp(min=1.0)                    # (B, G)
+    return -(per_token.sum(dim=-1) / seq_lens).mean()
+\end{lstlisting}
+
+请细品这段仅二十余行的 GRPO 代码：它与前文的 PPO-Clip 一脉相承，却在架构上彻底卸下了千亿参数的 Critic 巨石。正是这套简洁到近乎苛刻的机制，让开源社区得以用相对有限的算力复现出具备自我反思与长链推理能力的前沿推理模型（我们将在第~\ref{ch:posttrain-rlhf-dpo} 章深入探讨 RLVR 推理涌现现象）。
+
+\section{实测验证：多轮复用下未裁剪 IS-PG 的崩塌与 PPO-Clip 的稳健爬升}
+\label{sec:exp-ppo}
+
+理论上的推导固然自洽，但最令人震撼的莫过于亲眼见证“去掉裁剪”与“加上裁剪”在完全相同的随机种子、完全相同的网络架构与优化器下走上截然不同的命运。
+
+在配套实验脚本 \texttt{code/vol6\_experiments.py} 的 \texttt{exp3\_ppo\_vs\_unclipped()} 中，我们搭建了一个经典的一维连续高斯\textbf{线性二次调节器（LQR）控制环境}：
+\begin{itemize}
+  \item \textbf{动力学与奖励}：初始位置 $x_0 \sim \mathrm{Uniform}(-1.5, 1.5)$，每回合 $T = 10$ 步。策略输出高斯分布 $a_t \sim \mathcal{N}(\mu_\theta(s_t), \sigma^2)$（截断至 $[-2, 2]$），状态按 $x_{t+1} = \clip(x_t + 0.5 a_t + \xi_t, -3, 3)$ 演化（噪声 $\xi_t \sim \mathcal{N}(0, 0.05^2)$），即时奖励为二次控制代价 $r_t = -x_t^2 - 0.1 a_t^2$（理论最优回报接近 $0$）。
+  \item \textbf{严格对照设置}：每次外循环收集 16 条轨迹，随后在同一批轨迹上执行 \textbf{$K = 10$ 轮样本复用}（Adam 学习率 $4 \times 10^{-2}$，优势标准化，全局梯度范数裁剪 $2.0$）。两组实验除是否启用 PPO-Clip（$\epsilon = 0.2$）外，初始化种子（\texttt{2026}）与全部超参数完全一致。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  % Left panel: Full trajectory from iter 1 (-51.54) to 49
+  \begin{axis}[
+    name=leftplot,
+    width=0.47\linewidth, height=6.1cm,
+    title={\footnotesize\sffamily\bfseries (a) 全局收敛轨迹（迭代 1--49）},
+    xlabel={策略更新迭代轮数（每轮复用 $K=10$ 次）},
+    ylabel={回合平均总回报},
+    xmin=0, xmax=51, ymin=-55, ymax=3,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.06)}, anchor=south east, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, thick, dashed, mark=triangle*, mark size=1.4pt]
+      table[x=iter, y=unclipped, col sep=comma]{data/ppo_vs_unclip.csv};
+    \addlegendentry{未裁剪 IS-PG}
+
+    \addplot[teal, very thick, mark=*, mark size=1.3pt]
+      table[x=iter, y=ppo, col sep=comma]{data/ppo_vs_unclip.csv};
+    \addlegendentry{PPO-Clip ($\epsilon=0.2$)}
+  \end{axis}
+
+  % Right panel: Zoomed view iter 7..49 showing repeated crashes of unclipped IS-PG
+  \begin{axis}[
+    at={(leftplot.east)}, anchor=west, xshift=12mm,
+    width=0.47\linewidth, height=6.1cm,
+    title={\footnotesize\sffamily\bfseries (b) 局部放大（迭代 7--49：崩塌尖峰对比）},
+    xlabel={策略更新迭代轮数（局部放大）},
+    ylabel={回合平均总回报},
+    xmin=6, xmax=51, ymin=-8.2, ymax=0.4,
+    grid=both, grid style={tealLine!45, dashed},
+    axis line style={slate},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize\sffamily, color=ink},
+    legend style={at={(0.97,0.06)}, anchor=south east, font=\scriptsize, fill=white, draw=tealLine}
+  ]
+    \addplot[ochre, thick, dashed, mark=triangle*, mark size=1.6pt]
+      table[x=iter, y=unclipped, col sep=comma]{data/ppo_vs_unclip.csv};
+    \addlegendentry{未裁剪 IS-PG（最差 $-7.26$）}
+
+    \addplot[teal, very thick, mark=*, mark size=1.4pt]
+      table[x=iter, y=ppo, col sep=comma]{data/ppo_vs_unclip.csv};
+    \addlegendentry{PPO-Clip（末 10 轮均值 $-0.36$）}
+
+    % Annotate the dramatic crash at iter=11 (-7.263), clear of legend
+    \node[ochre, font=\scriptsize\sffamily, anchor=west] at (axis cs:14.0, -4.95) {第 11 轮骤崩至 $-7.26$};
+    \draw[-{Stealth[length=1.8mm]}, ochre, thin] (axis cs:15.2, -5.25) -- (axis cs:11.4, -7.12);
+    % Annotate secondary crash at iter=25 (-2.431)
+    \node[ochre, font=\scriptsize\sffamily, anchor=west] at (axis cs:27.5, -3.55) {第 21/25 轮反复回撤};
+    \draw[-{Stealth[length=1.8mm]}, ochre, thin] (axis cs:28.0, -3.35) -- (axis cs:25.3, -2.52);
+  \end{axis}
+\end{tikzpicture}
+\caption{连续一维高斯 LQR 控制任务上 $K=10$ 轮多步样本复用的实测结果（读取自 \texttt{data/ppo\_vs\_unclip.csv}）。(a) 两者均从初始回报 $-51.54$ 起步；(b) 进入精细控制区后，未裁剪的重要性采样策略梯度因概率比失控反复剧烈崩塌，而 PPO-Clip（$\epsilon=0.2$）牢牢锁住信任域，平稳收敛至近优区间。}
+\label{fig:ppo-vs-unclip}
+\end{figure}
+
+图~\ref{fig:ppo-vs-unclip}（直接读取 \texttt{data/ppo\_vs\_unclip.csv}）清晰呈现了两种算法在多轮复用下的鲜明分叉：
+\begin{enumerate}
+  \item \textbf{初期步幅与风险的直觉反差}：两种策略起点完全相同（第 1 轮回报均为 \textbf{$-51.54$}）。前 5 轮中，无约束的未裁剪 IS-PG 看似“冲得更快”（第 3 轮即跳至 $-2.56$，而保守的 PPO-Clip 因受 $[0.8, 1.2]$ 裁剪约束仅稳步爬至 $-18.53$）——这正是培根所警示的“插上翅膀的虚幻飞跃”！
+  \item \textbf{未裁剪 IS-PG 的反复崩塌}：一旦进入精细控制区，未裁剪 IS-PG 在第 9 轮刚摸到 $-0.61$，紧接着第 11 轮就遭遇断崖式崩塌，骤跌至全中后期最差值 \textbf{$-7.26$}（性能恶化超过 $11\times$）！随后在第 21 轮（$-2.18$）、第 25 轮（$-2.43$）、第 35 轮（$-1.18$）与第 41 轮（$-1.36$）反复上演“刚爬上去、一步踩空摔回来”的剧烈震荡，最后 10 轮平均回报仅停留在 \textbf{$-0.55$}。
+  \item \textbf{PPO-Clip 的稳健爬升与高精度收敛}：反观 PPO-Clip（$\epsilon = 0.2$），虽然前几步刻意放慢了速度，但自第 11 轮跨入 $-0.76$ 后便如履平地、全程零崩塌，第 27 轮更是达到 $-0.20$ 的优异表现，最后 10 轮平均回报稳定在 \textbf{$-0.36$}——相比未裁剪版本，稳态控制代价直接降低了 \textbf{$34.5\%$}！
+\end{enumerate}
+
+\begin{failBox}{PPO 与 GRPO 实战中最隐蔽的三大数值与逻辑陷阱}
+\begin{enumerate}
+  \item \textbf{忘记冻结 \texttt{old\_logp} 导致 PPO-Clip 悄无声息失效}：如果计算 \texttt{old\_logp} 时忘了包裹 \texttt{torch.no\_grad()} 或忘了在多轮更新前保存脱离计算图的张量，使得循环内误用当前参数重新算了 \texttt{old\_logp}，则每一步都有 \texttt{ratio == 1.0} 恒成立！此时裁剪机制永远不会触发，虽然第一轮梯度恰好仍等于单步策略梯度，但多轮复用直接退化为无保护的灾难性暴走。
+  \item \textbf{指数运算 \texttt{torch.exp(new\_logp - old\_logp)} 溢出成 \texttt{NaN}}：在高维连续动作或长文本序列中，对数概率是数百个维度/token 的累加值；若某个异常样本引起对数概率差飙升至 $+90$ 以上，FP32 的 \texttt{exp} 会瞬间溢出为 \texttt{inf}，紧接着 \texttt{inf * 0} 或反向传播便将整个网络权重染成 \texttt{NaN}。工程上既应对单步/单 token（而非整句联合概率！）计算概率比，也应对 \texttt{log\_ratio} 施加安全截断（如 $[-10, 10]$）。
+  \item \textbf{GRPO 中组内奖励全等与 KL 方向颠倒}：当一批数学题太简单（全对 $R_i \equiv 1$）或太难（全错 $R_i \equiv 0$）时，$\sigma_R = 0$，该组所有样本的优势 $\hat{A}_i = 0$，产生“空转梯度”；同时，务必核对 $k_3$ 公式中的分子是 $\pi_{\mathrm{ref}}$、分母是 $\pi_\theta$（对应正向惩罚 $\DKL(\pi_\theta \| \pi_{\mathrm{ref}})$）——一旦写反为 $\pi_\theta / \pi_{\mathrm{ref}}$，模型会朝错误的高方差方向偏离，且容易因 $\pi_{\mathrm{ref}} \to 0$ 引发爆炸！
+\end{enumerate}
+\end{failBox}
+
+\begin{extBox}{后 GRPO 时代的前沿精修：DAPO 与 Dr. GRPO}
+2025 年以来，随着大规模推理模型强化学习（RLVR）的深入实践，研究者发现了原始 GRPO 目标~\eqref{eq:grpo-obj} 中潜藏的三个微妙结构偏差，并提出了广受欢迎的改进算法 \textbf{DAPO}（Yu et al., 2025）与 \textbf{Dr. GRPO}（Liu et al., 2025）：
+\begin{enumerate}
+  \item \textbf{非对称裁剪（Clip-Higher）}：在原始对称裁剪 $[1-\epsilon, 1+\epsilon]$（$\epsilon=0.2$）下，一个初始概率仅 $0.01$ 的低概率探索 token 最多只能涨到 $0.012$，而一个初始概率 $0.9$ 的高概率 token 却能一步涨到 $1.0$，这会系统性加速\textbf{熵坍缩}。DAPO 将上限放宽（如 $\epsilon_{\mathrm{low}} = 0.2, \epsilon_{\mathrm{high}} = 0.28$），专门给罕见的“顿悟推理词”（如“等等，让我再验算一遍”）留出足够的概率攀升空间。
+  \item \textbf{动态采样（Dynamic Sampling）}：剔除组内准确率 $0\%$（全错）和 $100\%$（全对）的零梯度提示，动态补采直到有效批次填满，避免训练后期因题目越做越熟导致有效批量塌缩。
+  \item \textbf{消除长度偏差与标准差偏差（Dr. GRPO）}：观察式~\eqref{eq:grpo-obj} 中的 $\frac{1}{|o_i|}$——对于答错的负优势回答（$\hat{A}_i < 0$），拉长回答长度 $|o_i|$ 反而会稀释每个错词受到的惩罚，无意间诱导出“越错越冗长”的长度膨胀！同时，除以 $\sigma_R$ 会给极易或极难（方差小）的题目赋予过大权重。Dr. GRPO 主张改为用固定最大长度常数 $L_{\max}$ 归一化并去掉 $\sigma_R$ 分母，令无偏性更接近纯策略梯度。
+\end{enumerate}
+\end{extBox}
+
+\section*{本章小结与核心脉络}
+\addcontentsline{toc}{section}{本章小结与核心脉络}
+
+本章完成了现代策略优化从“危险的裸跑”到“工业级精密引擎”的跃迁：
+\begin{itemize}
+  \item \textbf{问题诊断}：多轮复用旧样本时，未加约束的重要性采样目标 $L^{\mathrm{CPI}}(\theta) = \hat{\E}_t[r_t(\theta)\hat{A}_t]$ 会因状态分布失配与无界概率比杠杆导致策略剧烈崩塌。
+  \item \textbf{信任域基石（TRPO）}：通过性能差异引理证明了含最大 KL 散度惩罚的 MM 单调改进下界；借由二阶泰勒展开得到 Fisher 信息矩阵与自然策略梯度步长 $\Delta\theta^* \propto F^{-1} g$。
+  \item \textbf{一阶革命（PPO-Clip）}：通过悲观下界 $L^{\mathrm{CLIP}}(\theta) = \hat{\E}_t[\min(r_t\hat{A}_t, \clip(r_t, 1-\epsilon, 1+\epsilon)\hat{A}_t)]$ 构筑出“只截断激进外冲、不截断反向纠偏”的单向棘轮；在 1D 连续 LQR 实测中彻底消除了未裁剪 IS-PG 的反复骤崩（$-7.26$），将终段回报稳步推升至 $-0.36$。
+  \item \textbf{大模型跃迁（GRPO）}：用同题 $G$ 条采样的组内相对归一化 $\hat{A}_i = (R_i - \bar{R})/(\sigma_R + \varepsilon)$ 彻底甩掉庞大的 Critic 网络，配合非负无偏的 Schulman $k_3$ KL 估计量，成为前沿大模型推理强化的核心引擎。
+\end{itemize}
+
+现在，我们已经手握 PPO 与 GRPO 两把无往不利的策略优化利剑。但对大语言模型而言，一个更为根本的问题浮出水面：\textbf{在开放的对话、写作、安全与复杂推理世界里，环境并不会天然吐出标量奖励 $r_t$——我们究竟该如何把模糊的人类偏好与客观正确性，转化为机器可优化的数学目标？有没有办法甚至连显式奖励模型和在线强化学习采样也一并省去？} 下一章，我们将迈入大模型后训练与对齐的殿堂：SFT、RLHF、DPO 与 RLVR。
+
+\section*{本章分层习题}
+\addcontentsline{toc}{section}{本章分层习题}
+
+\exTier{A 层：概念与公式手算}{熟练掌握概率比、PPO-Clip 分段取值与 GRPO 组内优势}
+
+\begin{enumerate}
+  \item[\textbf{6.3.1}] \textbf{PPO-Clip 六种边界情形逐一验算}：设裁剪参数 $\epsilon = 0.2$（即信任区间为 $[0.8, 1.2]$）。对下表中的 6 个样本，分别计算未裁剪值 $r_t \hat{A}_t$、裁剪值 $\clip(r_t, 0.8, 1.2)\hat{A}_t$、PPO-Clip 目标值 $f(r_t; \hat{A}_t)$，以及关于 $r_t$ 的导数 $\frac{\partial f}{\partial r_t}$（标明是否发生梯度截断）：
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{ccccccc}
+  \toprule
+  样本编号 & (1) & (2) & (3) & (4) & (5) & (6) \\
+  \midrule
+  概率比 $r_t$ & $0.6$ & $1.1$ & $1.5$ & $0.6$ & $1.1$ & $1.5$ \\
+  优势 $\hat{A}_t$ & $+2.0$ & $+2.0$ & $+2.0$ & $-2.0$ & $-2.0$ & $-2.0$ \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \exHint{对照命题~\ref{prop:ppo-cases}：特别注意样本 (1)（好动作被误压至 $0.6$）与样本 (6)（坏动作被误抬至 $1.5$）虽然都在 $[0.8, 1.2]$ 之外，但外层 $\min$ 均保留了非零纠偏梯度！真正梯度归零的只有样本 (3) 与样本 (4)。}
+
+  \item[\textbf{6.3.2}] \textbf{GRPO 群体优势与 $k_3$ KL 估计量手算}：对同一道数学题，旧策略采样 $G = 4$ 条回答，验证器给出二元奖励 $(R_1, R_2, R_3, R_4) = (1, 0, 1, 0)$。
+  \begin{enumerate}
+    \item 计算组内均值 $\bar{R}$、总体标准差 $\sigma_R$ 及每条回答的 GRPO 相对优势 $\hat{A}_i$（忽略 $\varepsilon$）；
+    \item 若某条回答的某个 token 上当前策略概率 $\pi_\theta = 0.5$、参考策略概率 $\pi_{\mathrm{ref}} = 0.25$，分别计算朴素对数比 $k_1 = \ln(\pi_\theta/\pi_{\mathrm{ref}})$ 与 Schulman 非负估计量 $k_3 = \frac{\pi_{\mathrm{ref}}}{\pi_\theta} - \ln\frac{\pi_{\mathrm{ref}}}{\pi_\theta} - 1$ 的精确数值；若 $\pi_\theta = 0.25, \pi_{\mathrm{ref}} = 0.5$，两者又分别为多少？
+  \end{enumerate}
+  \exHint{(a) $\bar{R} = 0.5, \sigma_R = 0.5$，故答对者 $\hat{A}_i = +1$、答错者 $\hat{A}_i = -1$；(b) 注意第二种情形下 $k_1 = -\ln 2 < 0$，而 $k_3 = 2 - \ln 2 - 1 \approx 0.307 > 0$。}
+\end{enumerate}
+
+\exTier{B 层：严谨数学证明}{深入理解 KL 二阶几何、自然梯度与控制变量方差分析}
+
+\begin{enumerate}
+  \item[\textbf{6.3.3}] \textbf{KL 散度的 Hessian 严格等于 Fisher 信息矩阵}：设参数化概率分布族 $\pi_\theta(a \mid s)$ 对 $\theta$ 二阶连续可微，且允许微分与求和/积分交换顺序。定义以 $\theta_0$ 为锚点的 KL 散度 $D(\theta) = \DKL(\pi_{\theta_0}(\cdot \mid s) \,\|\, \pi_\theta(\cdot \mid s))$。
+  \begin{enumerate}
+    \item 严格证明 $\nabla_\theta D(\theta)\big|_{\theta=\theta_0} = 0$；
+    \item 严格证明 Hessian 矩阵满足 $\nabla_\theta^2 D(\theta)\big|_{\theta=\theta_0} = -\E_{a \sim \pi_{\theta_0}}[\nabla_\theta^2 \ln \pi_\theta(a \mid s)]\big|_{\theta_0} = \E_{a \sim \pi_{\theta_0}}[\nabla_\theta \ln \pi_{\theta_0}(a \mid s)\,\nabla_\theta \ln \pi_{\theta_0}(a \mid s)^\top]$；
+    \item 证明反向散度 $\tilde{D}(\theta) = \DKL(\pi_\theta(\cdot \mid s) \,\|\, \pi_{\theta_0}(\cdot \mid s))$ 在 $\theta = \theta_0$ 处具有完全相同的二阶 Hessian（即局部意义下正反向 KL 散度二阶等价！）。
+  \end{enumerate}
+  \exHint{对恒等式 $\sum_a \pi_\theta(a\mid s) = 1$ 连续求两次梯度，再利用恒等式 $\nabla^2 \ln \pi = \frac{\nabla^2 \pi}{\pi} - \nabla \ln \pi\,\nabla \ln \pi^\top$ 即可优雅证明。}
+
+  \item[\textbf{6.3.4}] \textbf{TRPO 自然梯度步长的参数重参数化不变性}：考虑式~\eqref{eq:trpo-qp} 的信任域子问题：在约束 $\frac{1}{2}\Delta\theta^\top F\Delta\theta \le \delta$（设 $F \succ 0$）下最大化 $g^\top \Delta\theta$。
+  \begin{enumerate}
+    \item 用拉格朗日乘子法完整推导出闭式最优解式~\eqref{eq:npg-step}：$\Delta\theta^* = \sqrt{\frac{2\delta}{g^\top F^{-1} g}} F^{-1} g$；
+    \item 设我们对参数做可逆线性坐标变换 $\psi = A\theta$（$A \in \R^{d \times d}$ 可逆）。写出新坐标系下的梯度 $g_\psi$ 与 Fisher 矩阵 $F_\psi$，并证明自然梯度步长满足 $\Delta\psi^* = A \Delta\theta^*$（而普通欧氏梯度步长 $\Delta\theta = \eta g$ 不具备这种坐标不变性！）。
+  \end{enumerate}
+  \exHint{链式法则给出 $g_\psi = A^{-\top} g$，$F_\psi = A^{-\top} F A^{-1}$；代入 $F_\psi^{-1} g_\psi = A F^{-1} A^\top A^{-\top} g = A F^{-1} g$，且二次型标量 $g_\psi^\top F_\psi^{-1} g_\psi = g^\top F^{-1} g$ 严格不变！}
+\end{enumerate}
+
+\exTier{C 层：机制剖析与反例设计}{辨识去 $\min$ 裁剪缺陷、二元奖励分布与长度偏差}
+
+\begin{enumerate}
+  \item[\textbf{6.3.5}] \textbf{反例构造：删去 PPO-Clip 外层 $\min$ 的灾难后果}：假设某同学删掉外层 $\min$，将目标简化为 $\tilde{L}(\theta) = \hat{\E}_t\!\big[\clip(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\big]$。
+  \begin{enumerate}
+    \item 画出 $\hat{A}_t > 0$ 与 $\hat{A}_t < 0$ 时 $\tilde{L}$ 随 $r_t$ 变化的图像，指出它在哪两个区间与真正的 PPO-Clip 分道扬镳；
+    \item 构造一个仅含两个样本 $(s_1, a_1, \hat{A}_1 = +1)$ 与 $(s_2, a_2, \hat{A}_2 = -1)$ 的一维参数场景，说明当一步更新意外把坏动作 $(s_2, a_2)$ 的概率比推到 $r_2 = 1.5$ 后，删去 $\min$ 的目标函数为何会对这个严重错误“彻底装瞎”（梯度为零），拒绝将其拉回信任域！
+  \end{enumerate}
+  \exHint{当 $\hat{A}_2 = -1 < 0$ 且 $r_2 = 1.5 > 1+\epsilon$ 时，$\clip(r_2)\hat{A}_2 = -1.2$ 是常数，导数为 $0$；坏动作越高反而不再受罚，策略安全防线瞬间洞穿。}
+
+  \item[\textbf{6.3.6}] \textbf{GRPO 在二元奖励 $R_i \in \{0, 1\}$ 下的难度加权效应分析}：在可验证数学题训练中，设题目 $q$ 当前的通过率为 $p \in (0, 1)$，采样组容量 $G$ 足够大，使得组内经验均值 $\bar{R} \approx p$、标准差 $\sigma_R \approx \sqrt{p(1-p)}$。
+  \begin{enumerate}
+    \item 计算答对样本（$R_i = 1$）与答错样本（$R_i = 0$）的 GRPO 归一化优势 $\hat{A}_+$ 与 $\hat{A}_-$；
+    \item 计算单道题目上所有答对样本贡献的总正权重 $p \cdot \hat{A}_+$，并讨论当 $p \to 0^+$（极难题）或 $p \to 1^-$（极易题）时，除以 $\sigma_R$ 如何改变单条答对/答错轨迹的梯度幅值（对比 Dr. GRPO 去掉 $\sigma_R$ 后的表现）。
+  \end{enumerate}
+  \exHint{$\hat{A}_+ = \sqrt{\frac{1-p}{p}}$，$\hat{A}_- = -\sqrt{\frac{p}{1-p}}$。当 $p = 0.01$ 时，唯一答对的那条样本优势高达 $\approx +9.95$，若偶发“蒙对答案但推理胡扯”的假阳性轨迹，单条样本便会产生近 $10\times$ 的剧烈梯度冲击！}
+\end{enumerate}
+
+\exTier{D 层：编程实验与系统延伸}{复现裁剪消融实验并实现轻量级 GRPO}
+
+\begin{enumerate}
+  \item[\textbf{6.3.7}] \textbf{编程实验：PPO 裁剪阈值 $\epsilon$ 与复用轮数 $K$ 的相图扫描}：修改 \texttt{code/vol6\_experiments.py} 中的 \texttt{exp3\_ppo\_vs\_unclipped()}：
+  \begin{enumerate}
+    \item 固定 $K = 10$，扫描 $\epsilon \in \{0.05, 0.1, 0.2, 0.4, 0.8, \infty\}$，绘制并记录各配置前 10 轮爬升速度、中后期最差回撤值与末 10 轮均值，验证 $\epsilon = 0.2$ 为何处于速度与稳定性的黄金甜点区；
+    \item 尝试在 PPO-Clip 循环中加入代码清单里的 \textbf{KL 早停}（\texttt{max\_kl = 0.05}），统计每轮实际平均执行了多少次 epoch 才触发早停。
+  \end{enumerate}
+  \exHint{$\epsilon = 0.05$ 会极其稳定但前期爬升明显变慢；当 $\epsilon \ge 0.8$ 时，裁剪边界过于宽松，中后期会重新出现类似未裁剪 IS-PG 的回撤尖峰。}
+
+  \item[\textbf{6.3.8}] \textbf{编程实验：在上下文赌博机上亲手实现无 Critic 的 GRPO}：构造一个含 32 个上下文状态、8 个离散动作的随机赌博机任务（每个状态仅 1 个动作奖励为 $1$，其余为 $0$）。使用本文给出的 \texttt{grpo\_loss} 函数，对每个状态采样 $G = 8$ 个动作执行 GRPO 训练（无需任何价值网络），并在 $\beta \in \{0.0, 0.05, 0.5\}$ 下观察平均准确率与策略到初始均匀参考策略的 KL 散度演化。思考：如果把奖励从客观 $\{0, 1\}$ 换成“两条回答谁更好”的人类偏好对，能否绕开采样与奖励模型直接优化策略？这正是第~\ref{ch:posttrain-rlhf-dpo} 章 DPO 的起点。
+  \exHint{当 $\beta = 0$ 时策略会收敛到接近 $100\%$ 确定性选择最优动作（KL $\to \ln 8 \approx 2.08$）；当 $\beta = 0.5$ 时策略会停在柔和的玻尔兹曼分布上——试猜想它的闭式解与第~\ref{ch:posttrain-rlhf-dpo} 章定理的关系！}
+\end{enumerate}

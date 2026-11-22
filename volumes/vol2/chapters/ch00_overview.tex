@@ -1,0 +1,75 @@
+\chapter*{序章：本卷在七卷本中的坐标与八校考点对照}
+\addcontentsline{toc}{chapter}{序章：本卷在七卷本中的坐标与八校考点对照}
+\markboth{序章\quad 本卷坐标与八校考点对照}{}
+
+\begin{chapIntro}{本章定位}
+第 1 卷已经把 Python/NumPy 数值编程、AI 线性代数与多元微积分装配完毕。本卷（第 2 卷）专攻 AI 底座的另一半——\textbf{概率论、数理统计与信息论}，并在第 6 章将两卷数理工具合流，完成无框架纯 NumPy 的线性回归与逻辑/Softmax 回归端到端实战闭环。
+\end{chapIntro}
+
+\section*{0.1\quad 为什么不能只靠传统应试概率学 AI？}
+\addcontentsline{toc}{section}{0.1\quad 为什么不能只靠传统应试概率学 AI？}
+
+传统工科概率论（及考研数学一概率部分）侧重二维连续联合密度积分、顺序统计量与抽样分布查表，但现代人工智能论文与代码里天天出现的却是另一批核心结构：
+\begin{enumerate}
+  \item \textbf{高维结构化分布}：不是两维手算积分，而是用第 1 卷的实对称谱定理看懂\textbf{多元高斯分布 $\mathcal{N}(\mu,\Sigma)$} 的椭球几何、仿射封闭性与条件更新；
+  \item \textbf{信息论语言}：没有\textbf{熵、交叉熵、KL 散度与互信息}，就无法真正理解分类损失函数、决策树信息增益、语言模型困惑度、VAE 的 ELBO 与大模型对齐（DPO/RLHF）中的 KL 惩罚；
+  \item \textbf{有限样本保证与重采样}：通过\textbf{Jensen 与 Hoeffding 浓度不等式}量化经验误差逼近真实泛化误差所需的样本量，并用\textbf{蒙特卡洛与 Bootstrap} 在不假设正态分布时给出模型指标的置信区间；
+  \item \textbf{概率建模直通监督学习}：看清最小二乘即高斯 MLE、岭回归即高斯 MAP、逻辑回归交叉熵即 Bernoulli MLE 与最小 KL 散度，并严格防范数据泄漏与不平衡准确率陷阱。
+\end{enumerate}
+
+\section*{0.2\quad 第 2 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.2\quad 第 2 卷八校核心考点覆盖对照表}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{34mm}p{34mm}p{16mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+条件独立、Explaining Away 与 Bayes 更新 & Stanford CS109 / 北大通班 & 第 1 章 & 第 3 卷贝叶斯网络、HMM 与朴素贝叶斯 \\
+Bernoulli / Categorical / Beta / 多元高斯 & MIT 6.3700 / CS109 & 第 2 章 & 分类建模、第 4 卷 GMM-EM、第 5 卷 VAE 重参数化 \\
+Jensen、Markov/Chebyshev/Hoeffding 界 & Berkeley CS70 / 清华 & 第 3 章 & 第 4 章 KL 非负性、第 4 卷泛化界与 EM 下界 \\
+蒙特卡洛估计与重要性采样 & MIT 6.3700 / CMU & 第 3 章 & 第 3 卷图采样、第 6 卷 PPO 策略梯度 \\
+熵、互信息、交叉熵、正/反向 KL 散度 & CS109 / CS229 / 北大 & 第 4 章 & 分类损失、语言模型困惑度、决策树、VAE/DPO \\
+MSE 偏差-方差、MLE/MAP、共轭与 Bootstrap & CMU 36-401 / 南大概统 & 第 5 章 & 第 4 卷正则化与泛化、第 7 卷实验置信区间 \\
+纯 NumPy 线性/逻辑/Softmax 回归与评测 & CS229 / CMU 07-280 & 第 6 章 & 阶段一验收里程碑，全系列监督学习基线 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.3\quad 第 2 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.3\quad 第 2 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white,line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\概率建模、条件独立\\与 Bayes 推断};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\AI 核心分布与\\多元高斯几何};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\Jensen、浓度不等式\\与蒙特卡洛};
+
+  \node[ch, below=9mm of c1] (c4) {\textbf{第 4 章}\\信息论：熵、交叉熵\\与正/反向 KL 散度};
+  \node[ch, below=9mm of c2] (c5) {\textbf{第 5 章}\\统计估计：MLE、MAP\\共轭先验与 Bootstrap};
+  \node[goal, below=9mm of c3] (c6) {\textbf{\color{ochre}第 6 章（底座大合流）}\\纯 NumPy 线性/逻辑/\\Softmax 回归全闭环};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] (c1.south) -- (c4.north);
+  \draw[arr] ([xshift=-9mm]c3.south) -- ([xshift=9mm]c4.north);
+  \draw[arr] (c2) -- (c5);
+  \draw[arr] (c3) -- (c5);
+  \draw[arr] (c4) -- (c5);
+  \draw[arr] (c4.south) -- ++(0,-4.5mm) -| (c6.south);
+  \draw[arr] (c5) -- (c6);
+\end{tikzpicture}}
+\end{center}

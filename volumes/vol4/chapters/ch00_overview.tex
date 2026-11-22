@@ -1,0 +1,75 @@
+\chapter*{序章：最优化与统计学习的交汇与八校考点对照}
+\addcontentsline{toc}{chapter}{序章：最优化与统计学习的交汇与八校考点对照}
+\markboth{序章\quad 本卷坐标与八校考点对照}{}
+
+\chapEpigraph{你不必相信上帝，但你应当相信“天书”的存在。}{Paul Erdős（保罗·埃尔德什，谈论记录最美证明的 \emph{THE BOOK}）}
+
+\begin{chapIntro}{本章定位与丛书题记}
+保罗·埃尔德什曾说，宇宙中藏着一本记录最纯粹、最不可避免证明的“天书”（\emph{THE BOOK}）。本套《天书中的智能》七卷手记，便是我们在那本天书的页边空白处，用严密推导与可验证代码一笔一划还原出的智能基石。
+
+本卷（第 4 卷）正式收编了第 1 卷刻意留白的\textbf{凸优化收敛理论与对偶分析}，并将其与\textbf{统计学习泛化思维及四大经典机器学习支柱（SVM/核、树与集成、聚类与 EM）}融为一体。读完本卷，你将拥有判断任何经典与现代机器学习模型“为何有效、何时过拟合、怎样求解”的完整理论视角。
+\end{chapIntro}
+
+\section*{0.1\quad 为什么把凸优化与经典机器学习合为一卷？}
+\addcontentsline{toc}{section}{0.1\quad 为什么把凸优化与经典机器学习合为一卷？}
+
+在 UC Berkeley（EECS127 + CS189）、Stanford（CS229）与南京大学（《最优化方法导论》+《机器学习导论》）的培养体系中，最优化与机器学习如车之两轮：
+\begin{enumerate}
+  \item \textbf{不学凸优化，经典模型只剩黑箱公式}：不懂 $L$-光滑与强凸，就只能死背步长经验；不懂拉格朗日对偶与 KKT 互补松弛，就看不懂 SVM 为什么只有少数支持向量起作用、更看不懂核技巧如何自然浮现；不懂次梯度与近端算子，就不知道不可微的 $L_1$ Lasso 怎么求精确零解。
+  \item \textbf{不学统计学习，训练误差会误导全局}：偏差-方差分解、PAC 泛化界与交叉验证教会我们区分“拟合训练集”与“真正学到规律”，这一准则在进入第 5 卷深度学习后依然是最高铁律。
+  \item \textbf{经典算法至今仍是不可替代的工业与科研基线}：表格数据上 GBDT（XGBoost/LightGBM）仍常胜过深度神经网络；EM 算法的 ELBO 下界推导将在第 5 卷直接演化为变分自编码器（VAE）的损失函数！
+\end{enumerate}
+
+\section*{0.2\quad 第 4 卷八校核心考点覆盖对照表}
+\addcontentsline{toc}{section}{0.2\quad 第 4 卷八校核心考点覆盖对照表}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{34mm}p{34mm}p{16mm}X@{}}
+\toprule
+\textbf{八校核心考点} & \textbf{主要对标课程} & \textbf{本卷位置} & \textbf{下游直接用途} \\
+\midrule
+凸分析、$L$-光滑下降引理、强凸与收敛率 & Berkeley EECS127 / 南大最优化 & 第 1 章 & 理解动量/加速、正则化加速优化与非凸训练诊断 \\
+拉格朗日对偶、KKT 互补松弛与近端 ISTA & EECS127 / Stanford CS229 & 第 2 章 & 第 4 章 SVM 对偶、$L_1$ 稀疏求解与带约束优化 \\
+偏差-方差分解、正则化、交叉验证与 PAC 界 & CS229 / Berkeley CS189 & 第 3 章 & 全系列过拟合诊断、超参选择与泛化误差评估 \\
+最大间隔 SVM、合页损失与核技巧（RBF） & CS229 / CMU 07-380 / 南大 ML & 第 4 章 & 非线性分类、再生核直觉与大间隔分类思维 \\
+CART 决策树、Bagging/随机森林与 GBDT & CS189 / CMU 07-380 & 第 5 章 & 表格数据强基线、函数空间梯度提升思想 \\
+K-Means++、高斯混合模型与 EM（ELBO） & CS229 / 南大 ML & 第 6 章 & 无监督聚类、隐变量建模、直通第 5 卷 VAE \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section*{0.3\quad 第 4 卷知识阶梯（零先修倒挂）}
+\addcontentsline{toc}{section}{0.3\quad 第 4 卷知识阶梯（零先修倒挂）}
+
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6.5mm and 7.5mm,
+  ch/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    text width=34mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  goal/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=37mm, minimum height=14.5mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=4pt
+  },
+  arr/.style={-{Stealth[length=2.2mm]}, thick, teal, preaction={draw=white, line width=2.5pt, arrows=-}}
+]
+  \node[ch] (c1) {\textbf{第 1 章}\\凸分析与一阶优化\\收敛率理论};
+  \node[ch, right=of c1] (c2) {\textbf{第 2 章}\\拉格朗日对偶、KKT\\与近端梯度 ISTA};
+  \node[ch, right=of c2] (c3) {\textbf{第 3 章}\\统计学习：偏差-方差\\与 PAC 泛化界};
+
+  \node[ch, below=9mm of c1] (c4) {\textbf{第 4 章}\\支持向量机（SVM）\\与核技巧};
+  \node[ch, below=9mm of c2] (c5) {\textbf{第 5 章}\\决策树、随机森林\\与 GBDT};
+  \node[goal, below=9mm of c3] (c6) {\textbf{\color{ochre}第 6 章（直通第 5 卷 VAE）}\\K-Means、GMM 与\\EM（ELBO）算法};
+
+  \draw[arr] (c1) -- (c2);
+  \draw[arr] (c2) -- (c3);
+  \draw[arr] ([xshift=-9mm]c2.south) -- ([xshift=3mm]c4.north);
+  \draw[arr] ([xshift=-12mm]c3.south) -- ([xshift=12mm]c4.north);
+  \draw[arr] ([xshift=-4mm]c3.south) -- ([xshift=10mm]c5.north);
+  \draw[arr] ([xshift=9mm]c1.south) -- ([xshift=-9mm]c5.north);
+  \draw[arr] (c3.south) -- (c6.north);
+\end{tikzpicture}}
+\end{center}

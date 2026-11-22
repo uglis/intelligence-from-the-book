@@ -1,0 +1,717 @@
+\chapter[统计估计：MLE、MAP 与 Bootstrap]{统计估计方法论：MLE、MAP、共轭先验与 Bootstrap}
+\label{ch:ch5-estimation-bootstrap}
+
+\chapEpigraph{所有模型都是错的，但其中一些是有用的。}{乔治·博克斯（George E. P. Box），1976}
+
+\begin{chapIntro}{本章定位：从“已知分布算概率”到“手握数据反推模型”}
+前四章我们都在做同一件事——\textbf{给定概率分布的参数，推导概率、期望、浓度界与信息散度}。但在真实人工智能任务里，方向恰好反过来：自然界不会把硬币正面概率 $p$、高斯噪声方差 $\sigma^2$ 或分类器权重 $w$ 印在说明书上，它只给我们一份有限的数据集 $\mathcal{D} = \{x_1, \dots, x_n\}$。本章建立从数据反推参数与量化不确定性的完整统计方法论：
+\begin{itemize}
+  \item 用\textbf{偏差-方差分解}回答“什么样的估计量才算好”，并彻底讲透为何样本方差要除以 $n-1$；
+  \item 用\textbf{极大似然估计（MLE）}统一常见分布参数估计与第 4 章的最小 KL 散度，同时用“连抛 3 次全正面”反例揭露其小样本过拟合陷阱；
+  \item 用\textbf{共轭先验与最大后验估计（MAP）}把领域知识转化为伪计数与正则化，为第 6 章导出岭回归与 Lasso 铺好数学桥梁；
+  \item 用\textbf{非参数 Bootstrap 重采样}为准确率、$F_1$、AUC 等任意 AI 指标构造无需正态假设的置信区间。
+\end{itemize}
+\end{chapIntro}
+
+% ====================================================================
+\section{估计量的偏差、方差与均方误差分解}
+\label{sec:ch5-bias-var-mse}
+
+\begin{recallBox}{第 2--3 章核心结论速忆}
+对独立同分布（i.i.d.）随机变量 $X_1, \dots, X_n$，若 $\E[X_i] = \mu$、$\Var(X_i) = \sigma^2 < \infty$，则样本均值 $\bar{X} = \frac{1}{n}\sum_{i=1}^n X_i$ 满足
+\[
+  \E[\bar{X}] = \mu, \qquad \Var(\bar{X}) = \frac{\sigma^2}{n}.
+\]
+同时恒有方差展开式 $\Var(Z) = \E[Z^2] - (\E[Z])^2$ 与期望线性性 $\E[aZ + b] = a\E[Z] + b$。
+\end{recallBox}
+
+先看一个贴近工程的场景：你想测量某个广告推荐位真实的点击率 $\theta \in [0,1]$。由于不可能把广告展示给全世界所有人，你抽样观测了 $n=100$ 次曝光记录 $X_1, \dots, X_{100} \stackrel{\text{i.i.d.}}{\sim} \mathrm{Bernoulli}(\theta)$，然后用某种规则（例如点击比例 $\hat{\theta}_n = \bar{X}$）给出一个数值猜测。
+
+这里必须严格区分三个初学极易混淆的对象：
+\begin{enumerate}
+  \item \textbf{真实参数（True Parameter）$\theta$}：在频率派视角下，它是一个未知但固定的常数；
+  \item \textbf{点估计量（Point Estimator）$\hat{\theta}_n = g(X_1, \dots, X_n)$}：它是随机样本的函数，因此在抽样前本身是一个\textbf{随机变量}，拥有自己的期望与方差；
+  \item \textbf{估计值（Estimate）}：把具体采集到的数据 $x_1, \dots, x_n$ 代入后算出的那个具体实数，例如 $0.23$。
+\end{enumerate}
+
+既然 $\hat{\theta}_n$ 是一个随机变量，如果今天重新采样 100 次曝光，估计值可能变成 $0.19$；明天再采一次，可能是 $0.27$。那么我们如何科学地评判两个不同估计量 $\hat{\theta}_n^{(1)}$ 和 $\hat{\theta}_n^{(2)}$ 谁更“准”？
+
+\begin{defBox}
+\begin{definition}[偏差、方差、均方误差与相合性]
+\label{def:ch5-estimator-metrics}
+设 $\hat{\theta}_n = g(X_1, \dots, X_n)$ 是未知标量参数 $\theta \in \R$ 的点估计量。定义：
+\begin{itemize}
+  \item \textbf{偏差（Bias）}：衡量估计量的平均瞄准位置与真值的系统性偏移，
+  \[
+    \Bias(\hat{\theta}_n) \triangleq \E[\hat{\theta}_n] - \theta.
+  \]
+  若对参数空间中所有 $\theta$ 均有 $\Bias(\hat{\theta}_n) = 0$（即 $\E[\hat{\theta}_n] = \theta$），则称 $\hat{\theta}_n$ 为\textbf{无偏估计量（Unbiased Estimator）}。
+  \item \textbf{方差（Variance）}：衡量不同次随机抽样导致估计值自身抖动的幅度，
+  \[
+    \Var(\hat{\theta}_n) \triangleq \E\!\left[\big(\hat{\theta}_n - \E[\hat{\theta}_n]\big)^2\right].
+  \]
+  \item \textbf{均方误差（Mean Squared Error, MSE）}：衡量估计量到真实参数 $\theta$ 的平均平方距离，
+  \[
+    \mathrm{MSE}(\hat{\theta}_n) \triangleq \E\!\left[(\hat{\theta}_n - \theta)^2\right].
+  \]
+  \item \textbf{相合性（Consistency）}：若对任意 $\epsilon > 0$ 有 $\lim_{n\to\infty}\Prob\big(\abs{\hat{\theta}_n - \theta} > \epsilon\big) = 0$（记作 $\hat{\theta}_n \xrightarrow{P} \theta$），则称 $\hat{\theta}_n$ 是相合估计量。由第 3 章 Chebyshev 不等式可知，只要 $\lim_{n\to\infty}\mathrm{MSE}(\hat{\theta}_n) = 0$，估计量必然相合。
+\end{itemize}
+\end{definition}
+\end{defBox}
+
+如果把估计参数比作打靶：真值 $\theta$ 是靶心，每次抽样算出的估计值是一发子弹。$\Bias(\hat{\theta}_n)$ 是弹着点中心偏离靶心的距离，$\Var(\hat{\theta}_n)$ 是弹着点自身的散开程度，而 $\mathrm{MSE}(\hat{\theta}_n)$ 则是所有子弹到靶心平均平方距离的总账。下面这条极其优美的四行定理揭示了三者之间的精确关系。
+
+\begin{thmBox}
+\begin{theorem}[估计量的均方误差偏差-方差分解]
+\label{thm:ch5-mse-decomp}
+对任意具有有限二阶矩的估计量 $\hat{\theta}$ 与真实参数 $\theta$，恒有
+\begin{equation}
+  \mathrm{MSE}(\hat{\theta}) = \Bias(\hat{\theta})^2 + \Var(\hat{\theta}).
+  \label{eq:ch5-mse-decomp}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+记 $m = \E[\hat{\theta}]$（它是一个确定性常数）。在 $(\hat{\theta} - \theta)^2$ 中添项减项 $m$ 并展开：
+\begin{align*}
+  \mathrm{MSE}(\hat{\theta})
+  &= \E\!\left[\big((\hat{\theta} - m) + (m - \theta)\big)^2\right] \\
+  &= \E\!\left[(\hat{\theta} - m)^2\right] + 2(m - \theta)\,\E[\hat{\theta} - m] + (m - \theta)^2 \\
+  &= \Var(\hat{\theta}) + 2(m - \theta)\cdot 0 + \Bias(\hat{\theta})^2 \\
+  &= \Bias(\hat{\theta})^2 + \Var(\hat{\theta}).
+\end{align*}
+其中第二步利用了 $m - \theta$ 为常数可提出期望号，第三步利用了 $\E[\hat{\theta} - m] = \E[\hat{\theta}] - \E[\hat{\theta}] = 0$。
+\end{proof}
+
+\begin{insightBox}{直通第 4 卷监督学习的核心法则：偏差-方差权衡}
+式~\eqref{eq:ch5-mse-decomp} 是整个机器学习理论中最著名的\textbf{偏差-方差权衡（Bias-Variance Tradeoff）}在参数估计层的直接前身！很多人直觉上认为“无偏估计量一定是最好的”，但式~\eqref{eq:ch5-mse-decomp} 明确指出：总误差 $\mathrm{MSE}$ 是\textbf{偏差平方与方差之和}。如果一个估计量稍微引入一点点可控偏差（例如将参数向零收缩），却能把方差砍掉一大半，它的总体 $\mathrm{MSE}$ 反而会\textbf{严格低于}无偏估计量！我们在第 5.3 节的贝叶斯 MAP 估计与第 6 章的 $L_2$ 岭回归中，都会反复见证“以微小偏差换取方差暴跌”的魔力。
+\end{insightBox}
+
+\subsection{经典推导：为什么样本方差要除以 $n-1$？}
+\label{subsec:ch5-bessel}
+
+几乎每位理工科学生都背过“无偏样本方差要除以 $n-1$（Bessel 校正）”，但到底少了哪 $1$ 个自由度？直接除以 $n$ 又会偏小多少？让我们先看一个 $n=2$ 的极简特例：设 $X_1, X_2 \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, 1)$，真方差 $\sigma^2 = 1$。此时 $\bar{X} = \frac{X_1+X_2}{2}$，于是
+\[
+  \frac{1}{2}\sum_{i=1}^2 (X_i - \bar{X})^2
+  = \frac{1}{2}\!\left[\left(\frac{X_1-X_2}{2}\right)^2 + \left(\frac{X_2-X_1}{2}\right)^2\right]
+  = \frac{1}{4}(X_1 - X_2)^2.
+\]
+因为 $X_1 - X_2 \sim \mathcal{N}(0, 2)$，其二阶矩为 $2$，所以除以 $n=2$ 得到的期望竟只有 $\frac{1}{4}\times 2 = 0.5$——系统性地\textbf{低估了整整一半}！直觉上，样本均值 $\bar{X}$ 恰好位于样本 $X_1, \dots, X_n$ 的“正中心”，它天然比未知的真实中心 $\mu$ 更贴近这批样本，从而人为压小了偏差平方和。下面的命题精确量化了这个低估量。
+
+\begin{thmBox}
+\begin{proposition}[样本方差的无偏校正与 MLE 偏差]
+\label{prop:ch5-sample-var}
+设 $X_1, \dots, X_n$（$n \ge 2$）i.i.d. 且均值为 $\mu$、方差为 $\sigma^2 < \infty$。定义直接除以 $n$ 的经验方差与除以 $n-1$ 的样本方差分别为
+\[
+  \hat{\sigma}_n^2 \triangleq \frac{1}{n}\sum_{i=1}^n (X_i - \bar{X})^2,
+  \qquad
+  S^2 \triangleq \frac{1}{n-1}\sum_{i=1}^n (X_i - \bar{X})^2.
+\]
+则恒有：
+\[
+  \E[\hat{\sigma}_n^2] = \frac{n-1}{n}\sigma^2,
+  \qquad
+  \Bias(\hat{\sigma}_n^2) = -\frac{\sigma^2}{n},
+  \qquad
+  \E[S^2] = \sigma^2 \;\;(\text{无偏}).
+\]
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+对离差平方和做“以 $\bar{X}$ 为中转”的恒等分解。首先将 $X_i - \mu = (X_i - \bar{X}) + (\bar{X} - \mu)$ 两边平方并对 $i=1,\dots,n$ 求和：
+\begin{align*}
+  \sum_{i=1}^n (X_i - \mu)^2
+  &= \sum_{i=1}^n (X_i - \bar{X})^2 + 2(\bar{X} - \mu)\underbrace{\sum_{i=1}^n (X_i - \bar{X})}_{=\,0} + \sum_{i=1}^n (\bar{X} - \mu)^2 \\
+  &= \sum_{i=1}^n (X_i - \bar{X})^2 + n(\bar{X} - \mu)^2.
+\end{align*}
+移项得核心恒等式：
+\[
+  \sum_{i=1}^n (X_i - \bar{X})^2 = \sum_{i=1}^n (X_i - \mu)^2 - n(\bar{X} - \mu)^2.
+\]
+两边同时取期望，利用 $\E[(X_i - \mu)^2] = \Var(X_i) = \sigma^2$ 与 $\E[(\bar{X} - \mu)^2] = \Var(\bar{X}) = \sigma^2/n$：
+\[
+  \E\!\left[\sum_{i=1}^n (X_i - \bar{X})^2\right]
+  = \sum_{i=1}^n \sigma^2 - n\cdot\frac{\sigma^2}{n}
+  = (n - 1)\sigma^2.
+\]
+因此 $\E[\hat{\sigma}_n^2] = \frac{n-1}{n}\sigma^2$，其偏差为 $\Bias(\hat{\sigma}_n^2) = \frac{n-1}{n}\sigma^2 - \sigma^2 = -\frac{\sigma^2}{n}$；而 $S^2 = \frac{1}{n-1}\sum_{i=1}^n (X_i - \bar{X})^2$ 满足 $\E[S^2] = \sigma^2$，精确无偏。
+\end{proof}
+
+\begin{remark}[几何视角与“无偏未必 MSE 最小”]
+{\rightskip=0pt plus 1em\relax 回想第 1 卷第 2 章的正交投影：把样本向量 $x = (X_1,\dots,X_n)^T$（$\in \R^n$）减去均值 $\bar{X}\mathbf{1}$，本质上是把 $x - \mu\mathbf{1}$ 正交投影到与全一向量 $\mathbf{1}$ 垂直的 $(n-1)$ 维超平面上，投影正好丢掉了沿 $\mathbf{1}$ 方向的 $1$ 个自由度（能量恰好等于 $\sigma^2$）！\par}
+
+更有趣的是，如果数据服从高斯分布 $\mathcal{N}(\mu, \sigma^2)$，可以证明 $\Var\!\left(\sum_{i=1}^n (X_i-\bar{X})^2\right) = 2(n-1)\sigma^4$。于是对形如 $c\sum_{i=1}^n (X_i-\bar{X})^2$ 的缩放估计量，应用定理~\ref{thm:ch5-mse-decomp} 得
+\[
+  \mathrm{MSE}(c) = \sigma^4\!\left[\big(c(n-1) - 1\big)^2 + 2c^2(n-1)\right].
+\]
+对 $c$ 求导令其为零，竟解出使 $\mathrm{MSE}$ 最小的系数是 $c^* = \frac{1}{n+1}$！以 $n=5, \sigma^2=4$ 为例（见习题 5.7 实测验证）：无偏估计量 $S^2$（除以 $4$）的 $\mathrm{MSE} = 8.000$，除以 $5$ 的 $\hat{\sigma}_n^2$ 的 $\mathrm{MSE} = 5.760$，而有偏更甚的除以 $6$ 估计量的 $\mathrm{MSE}$ 反倒最低，仅 $5.333$！这再次提醒我们：在 AI 建模里，切忌迷信“无偏”，要时刻盯紧偏差与方差的合账。
+\end{remark}
+
+% ====================================================================
+\section{极大似然估计（MLE）及其小样本过拟合陷阱}
+\label{sec:ch5-mle}
+
+现在我们提出一个系统性的通用方法来构造估计量：假设观测数据 $\mathcal{D} = \{x_1, \dots, x_n\}$ 独立同分布地采样自参数化分布族 $\{p(x; \theta)\}_{\theta \in \Theta}$，怎么挑出最合理的 $\theta$？
+
+先看一个直觉小例：抛一枚质地不均的硬币 $10$ 次，观测到 $7$ 次正面、$3$ 次反面。在候选参数 $p \in \{0.1,\allowbreak 0.5,\allowbreak 0.7,\allowbreak 0.9\}$ 中，哪一个最“合理”？让我们直接算出每个 $p$ 下出现这一观测序列的概率 $p^7(1-p)^3$：
+\begin{itemize}
+  \item 若 $p = 0.1$：$0.1^7 \times 0.9^3 \approx 7.29 \times 10^{-8}$（几乎不可能发生）；
+  \item 若 $p = 0.5$：$0.5^{10} \approx 9.77 \times 10^{-4}$；
+  \item 若 $p = 0.7$：$0.7^7 \times 0.3^3 \approx 2.22 \times 10^{-3}$（最大！）；
+  \item 若 $p = 0.9$：$0.9^7 \times 0.1^3 \approx 4.78 \times 10^{-4}$。
+\end{itemize}
+把“选出让已经发生的观测数据出现概率（或密度）最大的那个参数”这一朴素原则形式化，就得到了现代统计与机器学习最核心的参数估计准则——\textbf{极大似然估计}。
+
+\begin{defBox}
+\begin{definition}[似然函数、对数似然与极大似然估计（MLE）]
+\label{def:ch5-mle}
+设样本 $\mathcal{D} = \{x_1, \dots, x_n\}$ 独立同分布于概率质量函数（离散）或概率密度函数（连续）$p(x; \theta)$。固定观测数据 $\mathcal{D}$，将联合概率视为参数 $\theta$ 的函数，称为\textbf{似然函数（Likelihood Function）}：
+\[
+  L(\theta; \mathcal{D}) \triangleq \prod_{i=1}^n p(x_i; \theta).
+\]
+取自然对数得到\textbf{对数似然函数（Log-Likelihood）}：
+\begin{equation}
+  \ell(\theta) \triangleq \ln L(\theta; \mathcal{D}) = \sum_{i=1}^n \ln p(x_i; \theta).
+  \label{eq:ch5-loglik}
+\end{equation}
+\textbf{极大似然估计（Maximum Likelihood Estimation, MLE）}定义为最大化似然（等价于最大化对数似然）的参数：
+\[
+  \hat{\theta}_{\text{MLE}} \triangleq \argmax_{\theta \in \Theta} L(\theta; \mathcal{D}) = \argmax_{\theta \in \Theta} \ell(\theta).
+\]
+\end{definition}
+\end{defBox}
+
+为什么在理论推导和代码实现中几乎永远使用\textbf{对数似然} $\ell(\theta)$ 而非原始连乘 $L(\theta)$？原因有二：（1）对数函数 $\ln(\cdot)$ 严格单调递增，不改变极大值点位置；（2）把连乘变成求和后，不仅求导极为方便，更避免了数值下溢——哪怕每个样本概率高达 $0.5$，连乘 $n=10000$ 个也会得到 $0.5^{10000} \approx 10^{-3010}$，远低于 IEEE 754 双精度浮点数最小正数 $2.2\times 10^{-308}$ 而直接下溢成 \texttt{0.0}！
+
+\subsection{MLE 与第 4 章最小 KL 散度的等价性}
+\label{subsec:ch5-mle-kl}
+
+在第 4 章我们建立了信息论中的交叉熵与 KL 散度；现在把第 4 章和本章接通，会看到一个贯通整个深度学习的黄金恒等式。
+
+\begin{thmBox}
+\begin{proposition}[极大似然估计 $\equiv$ 最小化经验 KL 散度]
+\label{prop:ch5-mle-kl}
+设 $\hat{P}_{\text{data}}$ 表示由样本 $\{x_1, \dots, x_n\}$ 定义的经验分布（每个观测点权重 $1/n$），$P_\theta$ 表示模型分布 $p(\cdot; \theta)$。则最大化平均对数似然完全等价于最小化经验交叉熵，也等价于最小化从数据分布到模型分布的\textbf{正向 KL 散度}：
+\begin{equation}
+  \argmax_\theta \frac{1}{n}\sum_{i=1}^n \ln p(x_i; \theta)
+  = \argmin_\theta H(\hat{P}_{\text{data}}, P_\theta)
+  = \argmin_\theta \DKL(\hat{P}_{\text{data}} \| P_\theta).
+  \label{eq:ch5-mle-kl}
+\end{equation}
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+由第 4 章交叉熵与 KL 散度定义（使用自然对数底，单位 nat）：
+\[
+  \DKL(\hat{P}_{\text{data}} \| P_\theta)
+  = \underbrace{-\frac{1}{n}\sum_{i=1}^n \ln p(x_i; \theta)}_{=\, H(\hat{P}_{\text{data}}, P_\theta)} - H(\hat{P}_{\text{data}}).
+\]
+由于经验分布的熵 $H(\hat{P}_{\text{data}})$ 与待优化参数 $\theta$ 无关，最小化 $\DKL(\hat{P}_{\text{data}} \| P_\theta)$ 恰好等价于最小化负平均对数似然 $-\frac{1}{n}\ell(\theta)$，即最大化对数似然 $\ell(\theta)$。
+\end{proof}
+
+这条等价性解释了为什么大语言模型做“下一个词预测”（本质是自回归 MLE）优化的正是交叉熵损失，也解释了为何第 4 章强调\textbf{正向 KL 散度（mode-covering）}——用 MLE 拟合模型时，只要数据里出现过的样本 $x_i$，模型绝不敢给它赋予零概率（否则 $-\ln 0 = +\infty$）。
+
+\subsection{三个核心分布的 MLE 完整推导}
+\label{subsec:ch5-mle-examples}
+
+\begin{example}[Bernoulli 分布的 MLE]
+\label{ex:ch5-mle-bern}
+设 $x_1, \dots, x_n \in \{0, 1\}$ 独立同分布于 $\mathrm{Bernoulli}(p)$（$p \in (0,1)$），记正面总次数 $k = \sum_{i=1}^n x_i$。似然与对数似然为
+\[
+  L(p) = \prod_{i=1}^n p^{x_i}(1-p)^{1-x_i} = p^k (1-p)^{n-k},
+  \qquad
+  \ell(p) = k\ln p + (n - k)\ln(1 - p).
+\]
+对 $p$ 求一阶导并令其为零：
+\[
+  \ell'(p) = \frac{k}{p} - \frac{n - k}{1 - p} = 0
+  \;\Longrightarrow\;
+  k(1 - p) = (n - k)p
+  \;\Longrightarrow\;
+  \hat{p}_{\text{MLE}} = \frac{k}{n}.
+\]
+检验二阶导数 $\ell''(p) = -\frac{k}{p^2} - \frac{n-k}{(1-p)^2} < 0$（对 $0 < k < n$ 严格凹），故 $\hat{p}_{\text{MLE}} = k/n$ 确为唯一全局极大值点；而当边界情况 $k=0$ 或 $k=n$ 时，直接观察 $L(p) = (1-p)^n$ 或 $L(p) = p^n$ 在 $[0,1]$ 上的单调性，可知 $\hat{p}_{\text{MLE}} = 0$ 或 $1$，统一写作 $\hat{p}_{\text{MLE}} = k/n$。
+\end{example}
+
+\begin{example}[一维高斯分布 $\mathcal{N}(\mu, \sigma^2)$ 的 MLE]
+\label{ex:ch5-mle-1dgauss}
+设 $x_1, \dots, x_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \sigma^2)$，令 $v = \sigma^2 > 0$。写出对数似然：
+\[
+  \ell(\mu, v)
+  = \sum_{i=1}^n \left[-\frac{1}{2}\ln(2\pi) - \frac{1}{2}\ln v - \frac{(x_i - \mu)^2}{2v}\right]
+  = -\frac{n}{2}\ln(2\pi) - \frac{n}{2}\ln v - \frac{1}{2v}\sum_{i=1}^n (x_i - \mu)^2.
+\]
+分别对 $\mu$ 和 $v$ 求偏导并令其为零：
+\[
+  \frac{\partial \ell}{\partial \mu} = \frac{1}{v}\sum_{i=1}^n (x_i - \mu) = 0
+  \;\Longrightarrow\;
+  \hat{\mu}_{\text{MLE}} = \frac{1}{n}\sum_{i=1}^n x_i = \bar{x}.
+\]
+将 $\mu = \bar{x}$ 代入对 $v$ 的偏导方程：
+\[
+  \frac{\partial \ell}{\partial v} = -\frac{n}{2v} + \frac{1}{2v^2}\sum_{i=1}^n (x_i - \bar{x})^2 = 0
+  \;\Longrightarrow\;
+  \hat{\sigma}^2_{\text{MLE}} = \hat{v}_{\text{MLE}} = \frac{1}{n}\sum_{i=1}^n (x_i - \bar{x})^2.
+\]
+请注意：高斯方差的极大似然估计自动给出的是\textbf{除以 $n$} 的 $\hat{\sigma}_n^2$！结合命题~\ref{prop:ch5-sample-var} 立即得到一个重要结论：\textbf{MLE 并不保证无偏}（$\hat{\sigma}^2_{\text{MLE}}$ 有偏差 $-\sigma^2/n$），但随着 $n\to\infty$，偏差迅速趋近于零，因此它是渐近无偏且相合的。
+\end{example}
+
+\begin{example}[多元高斯分布 $\mathcal{N}(\mu, \Sigma)$ 的 MLE]
+\label{ex:ch5-mle-mvg}
+设 $d$ 维向量样本 $x_1, \dots, x_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \Sigma)$，其中 $\Sigma \succ 0$ 为对称正定协方差矩阵（第 2 章）。直接将一维结果推广到矩阵形式，其极大似然估计同样简洁优美：
+\begin{equation}
+  \hat{\mu}_{\text{MLE}} = \bar{x} = \frac{1}{n}\sum_{i=1}^n x_i,
+  \qquad
+  \widehat{\Sigma}_{\text{MLE}} = \frac{1}{n}\sum_{i=1}^n (x_i - \bar{x})(x_i - \bar{x})^T.
+  \label{eq:ch5-mvg-mle}
+\end{equation}
+注意当样本数 $n \le d$ 时，$\widehat{\Sigma}_{\text{MLE}}$ 的秩至多为 $n-1 < d$，必然是\textbf{奇异（不可逆）矩阵}——这正是在高维小样本下使用高斯判别分析（GDA）或 GMM 时必须对协方差矩阵加对角正则项 $\widehat{\Sigma} + \epsilon I$ 的根本原因！
+\end{example}
+
+\begin{extBox}{多元高斯 MLE 的矩阵微分推导（衔接第 1 卷第 5 章迹技巧）}
+引入对称正定\textbf{精度矩阵} $\Lambda \triangleq \Sigma^{-1} \succ 0$，利用 $\ln\det(\Sigma^{-1}) = -\ln\det\Sigma$ 与标量的迹恒等式 $a^T \Lambda a = \tr(\Lambda a a^T)$，多元高斯对数似然写为
+\[
+  \ell(\mu, \Lambda)
+  = -\frac{nd}{2}\ln(2\pi) + \frac{n}{2}\ln\det\Lambda - \frac{1}{2}\sum_{i=1}^n (x_i - \mu)^T \Lambda (x_i - \mu).
+\]
+先对 $\mu$ 求梯度：$\nabla_\mu \ell = \Lambda\sum_{i=1}^n (x_i - \mu) = 0$，因 $\Lambda \succ 0$ 可逆，立得 $\hat{\mu}_{\text{MLE}} = \bar{x}$。
+
+再记散度矩阵 $S_0 \triangleq \sum_{i=1}^n (x_i - \bar{x})(x_i - \bar{x})^T$，利用迹的线性性把二次型之和改写为 $-\frac{1}{2}\tr(\Lambda S_0)$。结合第 1 卷第 5 章的矩阵求导法则 $\nabla_\Lambda \tr(\Lambda S_0) = S_0^T = S_0$ 与雅可比行列式求导公式 $\nabla_\Lambda \ln\det\Lambda = \Lambda^{-T} = \Lambda^{-1}$（对对称正定矩阵 $\Lambda$）：
+\[
+  \nabla_\Lambda \ell(\bar{x}, \Lambda) = \frac{n}{2}\Lambda^{-1} - \frac{1}{2}S_0 = 0
+  \;\Longrightarrow\;
+  \widehat{\Sigma}_{\text{MLE}} = \widehat{\Lambda}_{\text{MLE}}^{-1} = \frac{1}{n}S_0 = \frac{1}{n}\sum_{i=1}^n (x_i - \bar{x})(x_i - \bar{x})^T.
+\]
+一气呵成！用精度矩阵 $\Lambda = \Sigma^{-1}$ 换元避免了对 $\Sigma^{-1}$ 做复杂的矩阵求逆微分，是概率图与高斯建模中极其常用的化简技巧。
+\end{extBox}
+
+\begin{failBox}{小样本过拟合反例：连抛 3 次全正面，反面概率真是 0？}
+假设你拿到一枚陌生硬币，只抛了 $n=3$ 次，结果碰巧全是正面（$k=3$）。按例~\ref{ex:ch5-mle-bern} 的 MLE 公式，你会毫不犹豫地输出
+\[
+  \hat{p}_{\text{MLE}} = \frac{3}{3} = 1.000,
+  \qquad
+  \widehat{\Prob}(\text{反面}) = 1 - \hat{p}_{\text{MLE}} = 0.000.
+\]
+这个看似“完全忠于数据”的估计在 AI 部署中是一场\textbf{灾难}：
+\begin{enumerate}
+  \item \textbf{零概率崩溃（Zero-Probability Disaster）}：只要测试集里第 1 次出现反面，模型给出的对数似然就是 $\ln(0) = -\infty$，交叉熵损失与语言模型困惑度（Perplexity）瞬间炸成无穷大！
+  \item \textbf{真实 NLP / 朴素贝叶斯事故}：在垃圾邮件过滤（第 1 章朴素贝叶斯）或 $n$-gram 语言模型中，词表高达数万词，训练集哪怕再大也总会有低频词从未出现过（$k=0$）。若用裸 MLE 把未登录词概率估成 $0$，整个句子的连乘联合概率会立刻被这一个词一票否决归零！
+\end{enumerate}
+根因非常清晰：MLE 是一种\textbf{唯数据论}的估计器，当样本量 $n$ 很小时，它会把抽样中的偶然波动（噪声）当成绝对真理来死记硬背——这就是统计学习中\textbf{过拟合（Overfitting）}最原始的形态。
+\end{failBox}
+
+% ====================================================================
+\section{贝叶斯估计、共轭先验与最大后验（MAP）}
+\label{sec:ch5-bayes-map}
+
+怎么拯救“连抛 3 次全正面就断定反面永不出现”的 MLE？只需要让模型保留一点人类常识：在抛硬币之前，我们心里本来就有一个模糊的\textbf{先验信念（Prior）}——正常硬币正反面大概率接近 $0.5$，不太可能极端到 $0$ 或 $1$；除非你给我看连续 50 次正面，否则单凭 3 次正面不足以让我相信反面概率为零！
+
+这正是\textbf{贝叶斯参数估计}的思想飞跃：不再把参数 $\theta$ 当成冰冷的未知常数，而是把它也看作一个随机变量，用先验分布 $p(\theta)$ 表达见数据前的信念；看到数据 $\mathcal{D}$ 后，用第 1 章的 Bayes 定理把先验更新为\textbf{后验分布（Posterior）}：
+\begin{equation}
+  p(\theta \mid \mathcal{D})
+  = \frac{p(\mathcal{D} \mid \theta)\,p(\theta)}{p(\mathcal{D})}
+  = \frac{p(\mathcal{D} \mid \theta)\,p(\theta)}{\int p(\mathcal{D} \mid \theta')\,p(\theta')\,\mathrm{d}\theta'}
+  \propto p(\mathcal{D} \mid \theta)\,p(\theta).
+  \label{eq:ch5-bayes-post}
+\end{equation}
+这里分母 $p(\mathcal{D})$ 称为\textbf{边缘似然（Evidence）}，它只依赖数据 $\mathcal{D}$ 而与待估参数 $\theta$ 无关，仅起到把后验密度积分为 $1$ 的归一化作用。
+
+拿到完整后验分布 $p(\theta \mid \mathcal{D})$ 后，如果工程上只需要输出一个具体的点估计值，有两种核心做法：
+
+\begin{defBox}
+\begin{definition}[最大后验估计（MAP）与全贝叶斯后验均值]
+\label{def:ch5-map-pm}
+给定先验分布 $p(\theta)$ 与数据似然 $p(\mathcal{D} \mid \theta)$：
+\begin{enumerate}
+  \item \textbf{最大后验估计（Maximum A Posteriori, MAP）}取后验分布的\textbf{众数（峰值）}：
+  \begin{equation}
+    \hat{\theta}_{\text{MAP}}
+    \triangleq \argmax_{\theta} p(\theta \mid \mathcal{D})
+    = \argmax_{\theta}\Big[\underbrace{\ln p(\mathcal{D} \mid \theta)}_{\text{对数似然（拟合数据）}} + \underbrace{\ln p(\theta)}_{\text{对数先验（正则惩罚）}}\Big].
+    \label{eq:ch5-map}
+  \end{equation}
+  因为分母 $p(\mathcal{D})$ 不含 $\theta$，求解 MAP 根本不需要计算高维归一化积分！
+  \item \textbf{全贝叶斯后验均值（Posterior Mean / MMSE 估计）}取后验分布的\textbf{期望}：
+  \[
+    \hat{\theta}_{\text{Bayes}} \triangleq \E[\theta \mid \mathcal{D}] = \int \theta\, p(\theta \mid \mathcal{D})\,\mathrm{d}\theta.
+  \]
+  可以证明它使后验均方误差 $\E[(\theta - \hat{\theta})^2 \mid \mathcal{D}]$ 达到最小，且在预测新样本 $x_{\text{new}}$ 时，全贝叶斯做法甚至会对整个后验积分求边缘预测分布 $p(x_{\text{new}}\mid \mathcal{D}) = \int p(x_{\text{new}}\mid \theta)\,p(\theta\mid \mathcal{D})\,\mathrm{d}\theta$。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+表~\ref{tab:ch5-mle-map-bayes} 简明对比了 MLE、MAP 与全贝叶斯三种范式在工程上的定位差异：当参数维度高达数百万（如神经网络）时，全贝叶斯高维积分几乎无法精确求解，而 MAP 只需在 MLE 的损失函数后面加上一项 $-\ln p(\theta)$，就能以几乎零额外计算成本获得强大的正则化保护！
+
+\begin{table}[htbp]
+\centering
+\caption{MLE、MAP 与全贝叶斯估计的核心对比}
+\label{tab:ch5-mle-map-bayes}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{21mm}p{26mm}p{24mm}p{24mm}X@{}}
+\toprule
+\textbf{估计范式} & \textbf{优化/计算目标} & \textbf{是否用先验} & \textbf{输出形式} & \textbf{核心优势与 AI 典型场景} \\
+\midrule
+\textbf{MLE} & $\max_\theta \ln p(\mathcal{D}\mid\theta)$ & 否（等价均匀先验） & 单一点估计 & 计算最简、大样本一致；小样本易过拟合（无正则回归、裸词频） \\
+\textbf{MAP} & $\max_\theta [\ln p(\mathcal{D}\mid\theta)+\ln p(\theta)]$ & 是 & 后验峰值（点估计） & 免高维积分、直接对应正则化损失（岭回归、Lasso、权重衰减） \\
+\textbf{全贝叶斯} & 计算 $p(\theta\mid\mathcal{D})$ 并积分 & 是 & 完整后验分布/均值 & 自动量化参数不确定性；共轭时有闭式解，高维需采样/变分近似 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Beta-Bernoulli 共轭先验：伪计数直觉与实测对比}
+\label{subsec:ch5-beta-bern}
+
+有没有办法让全贝叶斯后验分布的推导\textbf{不用算任何积分}，还能一眼看出解析形式？答案就是\textbf{共轭先验（Conjugate Prior）}：如果先验分布 $p(\theta)$ 与似然 $p(\mathcal{D}\mid\theta)$ 相乘后，得到的后验分布 $p(\theta\mid\mathcal{D})$ 仍然属于与先验\textbf{相同的分布族}（仅仅更新了超参数），我们就称该先验与该似然是共轭的。
+
+回忆第 2 章的 $\mathrm{Beta}(\alpha, \beta)$ 分布（定义在 $p \in [0,1]$ 上，超参数 $\alpha > 0, \beta > 0$）：
+\[
+  p(p; \alpha, \beta) = \frac{1}{B(\alpha, \beta)}\, p^{\alpha - 1}(1 - p)^{\beta - 1},
+  \qquad
+  \E[p] = \frac{\alpha}{\alpha + \beta},
+  \qquad
+  \mathrm{Mode}(p) = \frac{\alpha - 1}{\alpha + \beta - 2}\;\;(\alpha, \beta > 1).
+\]
+把 $\mathrm{Beta}(\alpha, \beta)$ 乘上 Bernoulli 似然，奇迹立刻发生！
+
+\begin{thmBox}
+\begin{theorem}[Beta-Bernoulli 共轭更新定理]
+\label{thm:ch5-beta-bern}
+设硬币正面概率 $p$ 服从先验 $\mathrm{Beta}(\alpha, \beta)$（$\alpha, \beta > 0$）。独立抛掷 $n$ 次观测到 $k$ 次正面与 $n-k$ 次反面，则后验分布精确为
+\begin{equation}
+  p \mid (n, k) \;\sim\; \mathrm{Beta}(\alpha + k,\; \beta + n - k).
+  \label{eq:ch5-beta-post}
+\end{equation}
+由此直接读出全贝叶斯后验均值与 MAP 估计（当 $\alpha + k > 1$ 且 $\beta + n - k > 1$ 时）：
+\begin{equation}
+  \hat{p}_{\text{Bayes}} = \frac{k + \alpha}{n + \alpha + \beta},
+  \qquad
+  \hat{p}_{\text{MAP}} = \frac{k + \alpha - 1}{n + \alpha + \beta - 2}.
+  \label{eq:ch5-beta-est}
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+依据式~\eqref{eq:ch5-bayes-post}，略去所有不含 $p$ 的归一化常数：
+\[
+  p(p \mid n, k)
+  \propto p(n, k \mid p)\, p(p)
+  \propto \big[p^k (1 - p)^{n-k}\big] \cdot \big[p^{\alpha - 1}(1 - p)^{\beta - 1}\big]
+  = p^{(\alpha + k) - 1} (1 - p)^{(\beta + n - k) - 1}.
+\]
+对比 Beta 密度核函数的指数形式，由于概率密度函数在 $[0,1]$ 上积分为 $1$ 的归一化常数唯一，故后验分布必然严格等于 $\mathrm{Beta}(\alpha + k,\, \beta + n - k)$。代入 Beta 分布的均值与众数公式即得式~\eqref{eq:ch5-beta-est}。
+\end{proof}
+
+式~\eqref{eq:ch5-beta-est} 赋予了 Beta 先验极为通透的\textbf{伪计数（Pseudo-Count）直觉}：
+\begin{itemize}
+  \item 在 MAP 眼里，设定 $\mathrm{Beta}(\alpha, \beta)$ 先验，完全等同于\textbf{在真实数据之外凭空预先塞进了 $\alpha - 1$ 次虚拟正面与 $\beta - 1$ 次虚拟反面}！特别地，当取对称平滑先验 $\mathrm{Beta}(2, 2)$ 时，$\alpha - 1 = \beta - 1 = 1$，MAP 公式变成 $\frac{k + 1}{n + 2}$——这正是 NLP 和朴素贝叶斯中鼎鼎大名的\textbf{拉普拉斯加一平滑（Laplace / Add-1 Smoothing）}！
+  \item 在后验均值眼里，即便取毫无偏向的均匀先验 $\mathrm{Beta}(1, 1)$，MAP 退化为裸 MLE $k/n$，但全贝叶斯后验均值依然给出 $\frac{k+1}{n+2}$（历史著名的\textbf{拉普拉斯继承法则}，例如太阳连续升起 $n$ 天后明天继续升起的预测概率），天然杜绝零概率灾难！
+\end{itemize}
+
+让我们把刚才“连抛 $n=3$ 次全是正面（$k=3$）”的棘手反例代入 $\mathrm{Beta}(2, 2)$ 先验（这与配套脚本 \texttt{code/vol2\_experiments.py} 的 \texttt{exp5\_mle\_map\_bootstrap} 实测完全一致）：
+\begin{itemize}
+  \item \textbf{裸 MLE}：$\hat{p}_{\text{MLE}} = \frac{3}{3} = \mathbf{1.0000}$（断定反面永不出现）；
+  \item \textbf{Beta(2,2) 后验分布}：$\mathrm{Beta}(2+3,\, 2+0) = \mathrm{Beta}(5, 2)$，密度函数为 $30\,p^4(1-p)$；
+  \item \textbf{MAP 估计}：$\hat{p}_{\text{MAP}} = \frac{3 + 2 - 1}{3 + 2 + 2 - 2} = \frac{4}{5} = \mathbf{0.8000}$；
+  \item \textbf{全贝叶斯后验均值}：$\hat{p}_{\text{Bayes}} = \frac{3 + 2}{3 + 2 + 2} = \frac{5}{7} \approx \mathbf{0.7143}$。
+\end{itemize}
+图~\ref{fig:ch5-beta-update} 直观绘制了这次贝叶斯更新中先验、归一化似然与后验三条曲线的几何拉锯：后验 $\mathrm{Beta}(5,2)$ 正好是先验 $\mathrm{Beta}(2,2)$ 与似然 $p^3$ 逐点相乘的折中产物——它在 $p=1$ 处被先验强制拉回 $0$，从而既尊重了“连出 3 正面”的偏高证据，又保留了反面出现的合理余地。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.84\linewidth,
+  height=6.2cm,
+  xmin=0, xmax=1.03,
+  ymin=0, ymax=4.35,
+  xlabel={硬币正面概率参数 $p$},
+  ylabel={概率密度（似然已归一化以便同图对比）},
+  xlabel style={font=\small\sffamily, yshift=-1mm},
+  ylabel style={font=\small\sffamily},
+  tick label style={font=\footnotesize},
+  grid=major,
+  grid style={dashed, gray!25},
+  legend pos=north west,
+  legend style={font=\footnotesize\sffamily, fill=white, fill opacity=0.92, draw=tealLine},
+  axis lines=left,
+  enlargelimits=false,
+  clip=false
+]
+  % Prior Beta(2,2): 6*x*(1-x)
+  \addplot[navy, very thick, dashed, domain=0:1, samples=120] {6*x*(1-x)};
+  \addlegendentry{先验 $\mathrm{Beta}(2,2)$（均值 $0.50$）}
+
+  % Normalized likelihood for k=3, n=3: 4*x^3 (Beta(4,1))
+  \addplot[ochre, very thick, dotted, domain=0:1, samples=120] {4*x^3};
+  \addlegendentry{归一化似然 $4p^3$（$n=3, k=3$）}
+
+  % Posterior Beta(5,2): 30*x^4*(1-x)
+  \addplot[teal, ultra thick, domain=0:1, samples=140] {30*x^4*(1-x)};
+  \addlegendentry{后验 $\mathrm{Beta}(5,2)$}
+
+  % Soft fill under posterior
+  \addplot[teal, fill=tealLight, fill opacity=0.45, draw=none, domain=0:1, samples=100] {30*x^4*(1-x)} \closedcycle;
+
+  % Vertical reference lines and non-overlapping annotations
+  % Posterior Mean = 5/7 = 0.7143, density = 30*(5/7)^4*(2/7) = 2.230
+  \draw[tealDark, thin, densely dashed] (axis cs:0.7143, 0) -- (axis cs:0.7143, 2.230);
+  \fill[tealDark] (axis cs:0.7143, 2.230) circle (2.2pt);
+  \node[font=\footnotesize\sffamily\bfseries, color=tealDark, align=center, anchor=east]
+    at (axis cs:0.68, 2.55) {后验均值\\$5/7 \approx 0.714$};
+  \draw[-{Stealth[length=1.8mm]}, thin, tealDark] (axis cs:0.685, 2.40) -- (axis cs:0.710, 2.26);
+
+  % MAP = 0.80, density = 30*(0.8)^4*(0.2) = 2.4576
+  \draw[teal, thin, densely dashed] (axis cs:0.80, 0) -- (axis cs:0.80, 2.4576);
+  \fill[teal] (axis cs:0.80, 2.4576) circle (2.4pt);
+  \node[font=\footnotesize\sffamily\bfseries, color=teal, align=center, anchor=south]
+    at (axis cs:0.76, 3.05) {MAP 峰值 $= 0.800$};
+  \draw[-{Stealth[length=1.8mm]}, thin, teal] (axis cs:0.78, 3.02) -- (axis cs:0.798, 2.52);
+
+  % MLE = 1.00, normalized likelihood peak = 4.0
+  \fill[ochre] (axis cs:1.0, 4.0) circle (2.4pt);
+  \node[font=\footnotesize\sffamily\bfseries, color=ochre, align=right, anchor=east]
+    at (axis cs:0.93, 3.92) {MLE $= 1.000$\\（过拟合崩溃点）};
+  \draw[-{Stealth[length=1.8mm]}, thin, ochre] (axis cs:0.935, 3.96) -- (axis cs:0.988, 3.99);
+\end{axis}
+\end{tikzpicture}
+\caption{“连抛 3 次全正面”的 Beta-Bernoulli 共轭更新：$\mathrm{Beta}(2,2)$ 先验把极端的 MLE 峰值 $1.000$ 拉回至 $\mathrm{MAP}=0.800$ 与后验均值 $0.7143$，彻底消除零概率灾难。}
+\label{fig:ch5-beta-update}
+\end{figure}
+
+读者也许会担心：“先验是我主观选的，万一我先验猜错了怎么办？”把后验均值写成一个加权平均就能彻底打消顾虑：
+\[
+  \hat{p}_{\text{Bayes}}
+  = \frac{k + \alpha}{n + \alpha + \beta}
+  = \underbrace{\frac{n}{n + \alpha + \beta}}_{\text{数据权重}\to 1}\,\hat{p}_{\text{MLE}}
+  \;+\;
+  \underbrace{\frac{\alpha + \beta}{n + \alpha + \beta}}_{\text{先验权重}\to 0}\,\frac{\alpha}{\alpha + \beta}.
+\]
+当样本量 $n$ 很小时（$n=3$），先验权重高达 $4/7$，果断保护模型免受噪声绑架；一旦样本量增大到 $n=1000$，先验权重骤降为 $4/1004 < 0.4\%$，\textbf{海量数据会彻底淹没任何合理的有限先验}，MAP 与后验均值双双收敛到 MLE 与真值 $p$！
+
+\subsection{高斯-高斯共轭：为第 6 章岭回归铺路}
+\label{subsec:ch5-gauss-gauss}
+
+除了离散硬币，连续变量中最核心的共轭组合是\textbf{高斯先验 + 高斯似然}。设观测噪声方差 $\sigma^2$ 已知，我们想估计未知均值 $\mu$：给定零均值高斯先验 $\mu \sim \mathcal{N}(0, \tau^2)$ 与样本 $x_1, \dots, x_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \sigma^2)$。写出后验对数密度（略去与 $\mu$ 无关的常数）：
+\begin{align*}
+  \ln p(\mu \mid x_1, \dots, x_n)
+  &= -\frac{1}{2\sigma^2}\sum_{i=1}^n (x_i - \mu)^2 - \frac{\mu^2}{2\tau^2} + \text{const} \\
+  &= -\frac{1}{2}\left(\frac{n}{\sigma^2} + \frac{1}{\tau^2}\right)\mu^2 + \left(\frac{n\bar{x}}{\sigma^2}\right)\mu + \text{const}.
+\end{align*}
+对 $\mu$ 配完全平方，立即看出后验分布仍然是高斯分布 $\mu \mid \mathcal{D} \sim \mathcal{N}(\mu_n, \tau_n^2)$，且满足极为优雅的\textbf{精度可加律}：
+\begin{equation}
+  \frac{1}{\tau_n^2} = \frac{1}{\tau^2} + \frac{n}{\sigma^2},
+  \qquad
+  \hat{\mu}_{\text{MAP}} = \hat{\mu}_{\text{Bayes}} = \mu_n
+  = \frac{\frac{n}{\sigma^2}\bar{x}}{\frac{1}{\tau^2} + \frac{n}{\sigma^2}}
+  = \frac{n}{n + \sigma^2/\tau^2}\,\bar{x}.
+  \label{eq:ch5-gauss-conj}
+\end{equation}
+由于高斯分布左右对称，后验众数（MAP）与后验均值完全重合！仔细端详式~\eqref{eq:ch5-gauss-conj} 中的收缩因子 $\frac{n}{n + \lambda}$（其中 $\lambda \triangleq \sigma^2/\tau^2$）：
+\begin{itemize}
+  \item 它自动把样本均值 $\bar{x}$ 向零收缩；
+  \item 当观测噪声很大（$\sigma^2$ 大）或先验非常笃定 $\mu$ 靠近零（$\tau^2$ 小）时，$\lambda = \sigma^2/\tau^2$ 变大，收缩力度更强；
+  \item 当样本量 $n \to \infty$ 时，收缩因子趋于 $1$，恢复无偏均值 $\bar{x}$。
+\end{itemize}
+
+\begin{insightBox}{直通第 6 章第 6.1 节：高斯先验 MAP $\equiv$ $L_2$ 岭回归！}
+请记住式~\eqref{eq:ch5-gauss-conj} 里刚刚诞生的比值 $\lambda = \sigma^2 / \tau^2$！在第 6 章一开篇，我们把标量均值 $\mu$ 升级为高维回归权重向量 $w \sim \mathcal{N}(0, \tau^2 I)$，对数先验 $-\ln p(w) = \frac{1}{2\tau^2}\norm{w}_2^2 + \text{const}$ 会原封不动地长成第 1 卷已经用过的\textbf{岭回归 $L_2$ 正则项 $\frac{\lambda}{2}\norm{w}_2^2$}，而神秘的超参数 $\lambda$ 恰好就是噪声方差与先验信号方差之比 $\sigma^2/\tau^2$！
+\end{insightBox}
+
+% ====================================================================
+\section{非参数重采样：Bootstrap 置信区间}
+\label{sec:ch5-bootstrap}
+
+假设你刚刚用第 6 章的逻辑回归在 $n=180$ 条验证样本上跑出了 $153$ 条预测正确，即验证集准确率 $\widehat{\text{Acc}} = 153/180 = \mathbf{85.00\%}$，$F_1 = 0.8439$，ROC-AUC $= 0.9160$。紧接着导师或审稿人追问你一个致命问题：
+\begin{quote}
+  \itshape “如果换一批同样来自真实世界的 180 条测试样本，你的准确率会波动多大？你说你的模型比基线 84.0\% 高 1 个百分点，这到底是真实进步，还是随机抽样的运气？”
+\end{quote}
+
+这就需要给点估计配上一个\textbf{置信区间（Confidence Interval, CI）}。在传统数理统计课上，你只能对样本均值这类极简单的统计量套用正态近似或 $t$ 分布查表；可面对 $F_1$ 分数、ROC-AUC、中位数推理延迟、甚至复杂深度学习评测指标（如 BLEU、mAP）时，它们根本没有闭式的有限样本抽样分布！
+
+1979 年统计学家 Bradley Efron 提出了一个堪称“用算力换公式”的天才构想——\textbf{自助法（Bootstrap）}，其核心哲学称为\textbf{代入原则（Plug-in Principle）}：
+\begin{itemize}
+  \item \textbf{理想世界（无法实现）}：从未知的真实总体分布 $P$ 中反复独立抽取 $B=5000$ 份大小为 $n$ 的测试集，算出 $5000$ 个指标值，直接看它们的波动范围；
+  \item \textbf{Bootstrap 世界（可计算）}：既然手里唯一的样本集 $\mathcal{D} = \{z_1, \dots, z_n\}$ 所构成的\textbf{经验分布 $\hat{P}_n$}（每个观测样本权重 $1/n$）是对未知总体 $P$ 最好的非参数近似，那就改为\textbf{从 $\mathcal{D}$ 中有放回地随机抽取 $n$ 个样本}来模拟一次新抽样，重复 $B$ 次！
+\end{itemize}
+
+\begin{remark}[为什么必须“有放回”？顺便预埋第 4 卷袋外误差]
+如果无放回抽取 $n$ 个样本，每次抽出的都是原数据集的完全拷贝，算出的指标纹丝不动（方差恒为 0）。而\textbf{有放回}抽取 $n$ 次时，某条特定样本一次都没被抽中的概率是 $(1 - 1/n)^n \xrightarrow{n\to\infty} e^{-1} \approx 36.8\%$，因此每份 Bootstrap 重采样集平均包含约 $63.2\%$ 的原始不重复样本（部分样本出现 $2$ 次或多次）。这个神奇的 $36.8\%$ 将在第 4 卷随机森林的\textbf{袋外验证（Out-of-Bag, OOB）}中再次登场！
+\end{remark}
+
+\begin{defBox}
+\begin{definition}[百分位 Bootstrap 置信区间算法（Percentile Bootstrap CI）]
+\label{def:ch5-bootstrap}
+给定含 $n$ 条独立样本的数据集 $\mathcal{D} = \{z_1, \dots, z_n\}$、任意待评统计量 $T(\mathcal{D})$（如准确率、$F_1$、AUC 等）、重采样次数 $B$（工程上常取 $B = 2000 \sim 10000$）与置信水平 $1 - \alpha$（如 $95\%$ 对应 $\alpha = 0.05$）：
+\begin{enumerate}
+  \item \textbf{有放回重采样}：对 $b = 1, \dots, B$，独立地从索引 $\{1, \dots, n\}$ 中有放回随机抽取 $n$ 个索引，构造第 $b$ 份自助样本集 $\mathcal{D}^{*(b)}$；
+  \item \textbf{重算统计量}：在每份自助样本上计算 $\hat{\theta}^{*(b)} = T(\mathcal{D}^{*(b)})$，得到经验抽样分布 $\{\hat{\theta}^{*(1)}, \dots, \hat{\theta}^{*(B)}\}$；
+  \item \textbf{估计标准误}：自助标准误 $\widehat{\mathrm{SE}}_{\text{boot}} = \mathrm{std}\big(\hat{\theta}^{*(1)}, \dots, \hat{\theta}^{*(B)}\big)$；
+  \item \textbf{截取分位数}：将 $B$ 个自助估计值从小到大排序，取 $\frac{\alpha}{2}$ 与 $1 - \frac{\alpha}{2}$ 分位数（$95\%$ CI 即 $2.5\%$ 与 $97.5\%$ 分位数），输出区间 $\big[q_{\alpha/2},\; q_{1-\alpha/2}\big]$。
+\end{enumerate}
+\end{definition}
+\end{defBox}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=5.5mm and 7.5mm,
+  box/.style={
+    rectangle, rounded corners=1.8mm, draw=teal, thick, fill=tealLight,
+    minimum height=14mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=5pt
+  },
+  rep/.style={
+    rectangle, rounded corners=1.4mm, draw=navy, thick, fill=navyLight,
+    text width=32mm, minimum height=7.2mm, align=center, font=\sffamily\scriptsize, text=ink, inner sep=3pt
+  },
+  res/.style={
+    rectangle, rounded corners=1.8mm, draw=ochre, very thick, fill=ochreLight,
+    text width=44mm, minimum height=17mm, align=center, font=\sffamily\footnotesize, text=ink, inner sep=5pt
+  },
+  arr/.style={-{Stealth[length=2.1mm]}, thick, teal}
+]
+  \node[box, text width=31mm] (orig) {\textbf{原始验证集 $\mathcal{D}$}\\$n=180$ 条样本\\命中 $153$ 条 ($85.00\%$)};
+
+  \node[rep, right=12mm of orig, yshift=11mm] (b1) {重采样 $\mathcal{D}^{*(1)}$ ($n=180$)\\$\Rightarrow \hat{\theta}^{*(1)} = 82.78\%$};
+  \node[rep, right=12mm of orig, yshift=0mm]  (b2) {重采样 $\mathcal{D}^{*(2)}$ ($n=180$)\\$\Rightarrow \hat{\theta}^{*(2)} = 86.11\%$};
+  \node[rep, right=12mm of orig, yshift=-11mm](bB) {重采样 $\mathcal{D}^{*(5000)}$ ($n=180$)\\$\Rightarrow \hat{\theta}^{*(5000)} = 84.44\%$};
+  \node[font=\footnotesize\sffamily, text=slate] at ($(b2.south)!0.5!(bB.north)$) {$\vdots$};
+
+  \node[res, right=12mm of b2] (ci) {\textbf{\color{ochre}百分位 95\% 置信区间}\\汇总 $B=5000$ 个 $\hat{\theta}^{*(b)}$\\截取 $[2.5\%,\, 97.5\%]$ 分位：\\\textbf{$[80.00\%,\; 90.00\%]$}\\{\scriptsize $\widehat{\mathrm{SE}}_{\text{boot}} = 2.63\%$}};
+
+  \draw[arr] (orig.east) -- ++(4mm,0) |- (b1.west);
+  \draw[arr] (orig.east) -- (b2.west);
+  \draw[arr] (orig.east) -- ++(4mm,0) |- (bB.west);
+  \node[font=\scriptsize\sffamily, text=tealDark, above=1.5mm] at ($(orig.east)+(4mm,11mm)$) {有放回抽样};
+
+  \draw[arr] (b1.east) -| ($(ci.west)+(-4mm,0)$) -- (ci.west);
+  \draw[arr] (b2.east) -- (ci.west);
+  \draw[arr] (bB.east) -| ($(ci.west)+(-4mm,0)$) -- (ci.west);
+\end{tikzpicture}}
+\caption{非参数百分位 Bootstrap 流程：以原始验证集经验分布为代理，并行重采样 $B=5000$ 次，直接读出 $153/180$ 验证准确率的 95\% 置信区间 $[80.00\%, 90.00\%]$。}
+\label{fig:ch5-bootstrap-flow}
+\end{figure}
+
+运行 \texttt{code/vol2\_experiments.py} 中的 \texttt{exp5\_mle\_map\_bootstrap}（$n=180$ 条验证预测，153 对 27 错，$B=5000$，随机种子 \texttt{2026}），实测结果如下：
+\[
+  \widehat{\text{Acc}} = 85.00\%, \qquad
+  \text{Bootstrap 95\% CI} = \mathbf{[80.00\%,\; 90.00\%]}, \qquad
+  \widehat{\mathrm{SE}}_{\text{boot}} = \mathbf{2.63\%}.
+\]
+（作为交叉验证，二项分布理论标准误为 $\sqrt{0.85 \times 0.15 / 180} = 2.66\%$，两者高度吻合！）
+
+\begin{failBox}{科研与工程避坑：CI 重叠莫吹牛，且 Bootstrap 并非万能}
+\begin{enumerate}
+  \item \textbf{别把 1\% 的随机涨落当成 SOTA 突破}：上面的实测告诉我们，在 $n=180$ 的验证集上，准确率的 95\% 置信区间宽达整整 $10$ 个百分点（$\pm 5\%$）！如果模型 A 测出 $85\%$、模型 B 测出 $86\%$，两者的置信区间大面积重叠——\textbf{绝不能直接宣称“模型 B 显著优于模型 A”}！正确做法是增大测试集样本量，或在同一批测试样本上做\textbf{配对 Bootstrap（Paired Bootstrap）}检验准确率差值 $\Delta = \text{Acc}_B - \text{Acc}_A$ 的 95\% CI 是否严格不含 $0$（详见习题 5.8 及第 7 卷实验统计检验专题）。
+  \item \textbf{Bootstrap 的适用边界}：Bootstrap 依赖“经验分布 $\hat{P}_n$ 足以代表总体 $P$”。当样本量极小（如 $n=3$ 连出 3 正面，所有重采样全都是 $\{1,1,1\}$，CI 坍缩成毫无意义的 $[100\%, 100\%]$！）或统计量属于极端边界量（如样本最大值 $\max_i X_i$）以及样本存在强时间序列相关性时，朴素百分位 Bootstrap 会失效。
+\end{enumerate}
+\end{failBox}
+
+\subsection{纯 NumPy 实现：Beta-Bernoulli 更新与向量化 Bootstrap}
+\label{subsec:ch5-code}
+
+代码~\ref{lst:ch5-beta-bootstrap} 给出极简、无依赖且全向量化的 NumPy 实现：既可复现本章的 Beta-Bernoulli 对比与 $153/180$ 准确率 95\% 置信区间，也可无缝替换为任意自定义指标函数（例如第 6 章的 $F_1$ 分数）。
+
+\begin{lstlisting}[caption={纯 NumPy 实现 Beta-Bernoulli 共轭更新与向量化百分位 Bootstrap 置信区间}, label={lst:ch5-beta-bootstrap}]
+import numpy as np
+
+def beta_bernoulli_summary(k: int, n: int, alpha: float = 2.0, beta: float = 2.0):
+    """计算 Bernoulli 观测下的 MLE、Beta 共轭 MAP 与后验均值。"""
+    mle = k / n
+    a_post, b_post = alpha + k, beta + (n - k)
+    post_mean = a_post / (a_post + b_post)
+    map_est = (a_post - 1.0) / (a_post + b_post - 2.0) if (a_post > 1 and b_post > 1) else mle
+    return {"MLE": mle, "MAP": map_est, "PostMean": post_mean, "post_params": (a_post, b_post)}
+
+def bootstrap_ci_accuracy(hits: np.ndarray, B: int = 5000, alpha: float = 0.05, seed: int = 2026):
+    """向量化百分位 Bootstrap：计算二值命中序列 (0/1) 准确率的 (1-alpha) 置信区间。"""
+    rng = np.random.default_rng(seed)
+    n = len(hits)
+    # 一次性抽取 (B, n) 矩阵：比 Python for 循环快约 30 倍
+    boot_samples = rng.choice(hits, size=(B, n), replace=True)
+    boot_accs = boot_samples.mean(axis=1) * 100.0
+    lo, hi = np.percentile(boot_accs, [100.0 * alpha / 2.0, 100.0 * (1.0 - alpha / 2.0)])
+    return float(hits.mean() * 100.0), float(lo), float(hi), float(boot_accs.std())
+
+def bootstrap_ci_general(y_true: np.ndarray, y_pred: np.ndarray, metric_fn, B: int = 2000, seed: int = 2026):
+    """通用指标（如 F1、Precision、Recall）的百分位 Bootstrap 95% 置信区间。"""
+    rng = np.random.default_rng(seed)
+    n = len(y_true)
+    vals = np.empty(B, dtype=np.float64)
+    for b in range(B):
+        idx = rng.integers(0, n, size=n)
+        vals[b] = metric_fn(y_true[idx], y_pred[idx])
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return float(metric_fn(y_true, y_pred)), float(lo), float(hi), float(vals.std())
+
+if __name__ == "__main__":
+    res = beta_bernoulli_summary(k=3, n=3, alpha=2.0, beta=2.0)
+    print(f"3/3 heads: MLE={res['MLE']:.4f}, MAP={res['MAP']:.4f}, PostMean={res['PostMean']:.4f}")
+    # 实测输出: MLE=1.0000, MAP=0.8000, PostMean=0.7143
+
+    hits = np.array([1] * 153 + [0] * 27)
+    acc, lo, hi, se = bootstrap_ci_accuracy(hits, B=5000, seed=2026)
+    print(f"Acc={acc:.2f}%, 95% CI=[{lo:.2f}%, {hi:.2f}%], boot_std={se:.2f}%")
+    # 实测输出: Acc=85.00%, 95% CI=[80.00%, 90.00%], boot_std=2.63%
+\end{lstlisting}
+
+% ====================================================================
+\section{本章习题}
+\label{sec:ch5-exercises}
+
+\exTier{A. 概念辨析与反例查错}{击破统计估计与置信区间中的直觉陷阱}
+\begin{enumerate}[label=\textbf{5.\arabic*}]
+  \item \textbf{判断正误并纠错}：请判断以下三句话的真假，并分别用本章定理或具体反例给出严密理由：
+  (a) “在所有估计量中，无偏估计量在均方误差（MSE）意义下一定优于有偏估计量。”
+  (b) “极大似然估计（MLE）永远是无偏估计量。”
+  (c) “在 $n=180$ 条验证样本上，模型 B 的准确率 $86.0\%$ 高于模型 A 的 $85.0\%$，因此可以断定模型 B 在真实数据分布上显著优于模型 A。”
+
+  \item \textbf{Bootstrap 失效反例诊断}：
+  (a) 在 $n=3$ 次抛硬币全为正面的观测序列 $\{1, 1, 1\}$ 上运行百分位 Bootstrap（$B=5000$），得到的 95\% 置信区间是什么？为什么这与直观常识严重违背？对比 $\mathrm{Beta}(2,2)$ 先验是如何化解该问题的；
+  (b) 若 $X_1, \dots, X_n \stackrel{\text{i.i.d.}}{\sim} \mathrm{Uniform}(0, \theta)$，请定性说明为何用朴素 Bootstrap 估计样本最大值 $T = \max_i X_i$ 的置信区间同样会失效（提示：重采样样本的最大值永远不可能超过原样本最大值，且恰好等于原最大值的概率是多少？）。
+\end{enumerate}
+
+\exTier{B. 具体小例手算}{亲手推演常见分布的 MLE 与共轭顺序更新}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{指数分布与均匀分布的 MLE 手算}：
+  (a) 设 $X_1, \dots, X_n \stackrel{\text{i.i.d.}}{\sim} \mathrm{Exp}(\lambda)$（密度 $p(x; \lambda) = \lambda e^{-\lambda x},\; x \ge 0,\; \lambda > 0$）。写出对数似然并求 $\hat{\lambda}_{\text{MLE}}$；当 $n=4$、观测为 $\{1, 2, 3, 2\}$ 时算出具体值；
+  (b) 设 $X_1, \dots, X_n \stackrel{\text{i.i.d.}}{\sim} \mathrm{Uniform}(0, \theta)$（密度 $p(x;\theta) = \frac{1}{\theta}\mathbf{1}_{[0,\theta]}(x)$）。求 $\hat{\theta}_{\text{MLE}}$，说明为何此处\textbf{不能}简单令 $\ell'(\theta)=0$ 求解；并已知 $M_n = \max_i X_i$ 的密度为 $f_{M_n}(t) = \frac{n t^{n-1}}{\theta^n}$（$0\le t\le\theta$），计算 $n=3$ 时 $\hat{\theta}_{\text{MLE}}$ 的期望与偏差。
+
+  \item \textbf{Beta-Bernoulli 共轭的顺序更新性质}：某新上线推荐位采用先验 $p \sim \mathrm{Beta}(2, 8)$（先验均值 $0.20$）。第一批曝光 $10$ 次获得 $4$ 次点击；第二批继续曝光 $90$ 次获得 $26$ 次点击。
+  (a) 计算第一批数据后的后验分布、MLE、MAP 与全贝叶斯后验均值；
+  (b) 验证“以第一批后验作为新先验再吸收第二批数据”与“直接以原始先验 $\mathrm{Beta}(2,8)$ 一次性吸收全部 $100$ 次曝光（$30$ 次点击）”得到\textbf{完全相同}的后验分布，并对比 $n=10$ 与 $n=100$ 时 MLE 与 MAP 的差距变化。
+\end{enumerate}
+
+\exTier{C. AI 核心推演与实用证明}{夯实收缩估计量与共轭推导功底}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{收缩估计量以微偏换低 MSE（正则化前奏）}：设 $X_1, \dots, X_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \sigma^2)$（$\mu \neq 0$），考虑向零收缩的线性估计量 $\hat{\mu}_\alpha = \alpha \bar{X}$（常数 $\alpha \in (0, 1]$）。
+  (a) 计算 $\Bias(\hat{\mu}_\alpha)$、$\Var(\hat{\mu}_\alpha)$，并用定理~\ref{thm:ch5-mse-decomp} 写出 $\mathrm{MSE}(\hat{\mu}_\alpha)$；
+  (b) 求使 $\mathrm{MSE}(\hat{\mu}_\alpha)$ 最小的最优收缩因子 $\alpha^*$，证明 $\alpha^* < 1$ 且 $\mathrm{MSE}(\hat{\mu}_{\alpha^*}) < \mathrm{MSE}(\bar{X}) = \sigma^2/n$；结合式~\eqref{eq:ch5-gauss-conj} 说明这正是高斯先验 MAP 的收缩机理。
+  \exHint{$\mathrm{MSE}(\hat{\mu}_\alpha) = (\alpha - 1)^2\mu^2 + \alpha^2\frac{\sigma^2}{n}$，这是关于 $\alpha$ 的开口向上二次函数，求导立得 $\alpha^* = \frac{n\mu^2}{n\mu^2 + \sigma^2} < 1$。}
+
+  \item \textbf{泊松-伽马共轭与多元高斯均值 MAP 推导}：
+  (a) 设到达率 $\lambda > 0$ 服从先验 $\mathrm{Gamma}(\alpha, \beta)$（密度 $p(\lambda) \propto \lambda^{\alpha - 1} e^{-\beta\lambda}$），观测到独立泊松计数 $x_1, \dots, x_n \stackrel{\text{i.i.d.}}{\sim} \mathrm{Poisson}(\lambda)$（$p(x;\lambda) = e^{-\lambda}\lambda^x / x!$）。证明后验分布仍为 Gamma 分布并写出其超参数、后验均值与 MAP（$\alpha + \sum x_i > 1$）；
+  (b) 设 $d$ 维向量 $x_1, \dots, x_n \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \sigma^2 I_d)$，均值先验 $\mu \sim \mathcal{N}(0, \tau^2 I_d)$。写出对数后验并对 $\mu$ 求梯度，证明 $\hat{\mu}_{\text{MAP}} = \frac{n}{n + \sigma^2/\tau^2}\bar{x}$。
+  \exHint{(a) 只保留含 $\lambda$ 的因子相乘即可直接辨认 Gamma 核函数；(b) $\ln p(\mu\mid\mathcal{D}) = -\frac{1}{2\sigma^2}\sum_{i=1}^n \norm{x_i-\mu}_2^2 - \frac{1}{2\tau^2}\norm{\mu}_2^2 + \text{const}$。}
+\end{enumerate}
+
+\exTier{D. 可自检编程实验}{动手验证方差估计量 MSE 与配对 Bootstrap 检验}
+\begin{enumerate}[label=\textbf{5.\arabic*}, resume]
+  \item \textbf{蒙特卡洛实测三种方差估计量的偏差与 MSE}：固定随机种子 \texttt{2026}，重复 $M=20000$ 次从 $\mathcal{N}(0, \sigma^2=4.0)$ 中独立抽取 $n=5$ 个样本，每次计算 $\hat{\sigma}_n^2 = \frac{1}{n}\sum (X_i-\bar{X})^2$、无偏 $S^2 = \frac{1}{n-1}\sum (X_i-\bar{X})^2$ 与收缩版 $\tilde{\sigma}^2 = \frac{1}{n+1}\sum (X_i-\bar{X})^2$，统计三者的经验均值、偏差与经验 MSE，并与理论值对比。\\
+  \textbf{自检标准}：断言 $|\text{mean}(S^2) - 4.0| < 0.08$、$|\text{mean}(\hat{\sigma}_n^2) - 3.2| < 0.08$，且经验 MSE 严格满足 $\mathrm{MSE}(\tilde{\sigma}^2) < \mathrm{MSE}(\hat{\sigma}_n^2) < \mathrm{MSE}(S^2)$（精确理论值分别为 $5.333 < 5.760 < 8.000$）。
+  \exHint{利用 NumPy 一次生成形状为 \texttt{(20000, 5)} 的矩阵并沿 \texttt{axis=1} 向量化计算离差平方和，全程不到 0.05 秒。}
+
+\par\pagebreak[4]
+  \item \textbf{实现配对 Bootstrap 比较两个分类器}：在 $n=180$ 条验证样本上比较模型 A 与模型 B，考虑以下两种配对命中情形：
+  \begin{enumerate}[label=(\alph*)]
+    \item \textbf{微弱差异}：151 条同对、2 条仅 A 对、4 条仅 B 对、23 条同错（A 准确率 $85.00\%$，B 准确率 $86.11\%$，差值 $+1.11\%$）；
+    \item \textbf{显著差异}：145 条同对、2 条仅 A 对、14 条仅 B 对、19 条同错（A 准确率 $81.67\%$，B 准确率 $88.33\%$，差值 $+6.67\%$）。
+  \end{enumerate}
+  固定随机种子 \texttt{2026}，对两种情形各运行 $B=10000$ 次\textbf{配对 Bootstrap}（每次抽取同一组长度 $180$ 的有放回索引同时作用于 A 与 B），计算差值 $\Delta = \text{Acc}_B - \text{Acc}_A$ 的 95\% 置信区间及 $\Prob^*(\Delta > 0)$。\\
+  \textbf{自检标准}：情形 (a) 的 95\% CI 必须包含 $0$（约 $[-1.67\%, +3.89\%]$），不能宣称显著胜出；情形 (b) 的 95\% CI 下界严格大于 $0$（约 $[+2.78\%, +11.11\%]$）且 $\Prob^*(\Delta > 0) > 0.99$。
+  \exHint{配对 Bootstrap 的关键是用\textbf{同一份索引矩阵} \texttt{idx = rng.integers(0, n, size=(B, n))} 同时索引 \texttt{hits\_a[idx]} 与 \texttt{hits\_b[idx]}，从而消除样本难易度共变噪声、大幅缩窄差值方差！}
+\end{enumerate}

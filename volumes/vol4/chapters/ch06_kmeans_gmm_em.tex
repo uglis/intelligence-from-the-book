@@ -1,0 +1,593 @@
+\chapter[K-Means、高斯混合与 EM 算法]{K-Means、高斯混合模型与 EM 算法}\label{ch:em}
+\chapEpigraph{真正本质的东西，用眼睛是看不见的。}{Antoine de Saint-Exupéry（圣埃克苏佩里，《小王子》）}
+
+\begin{chapIntro}{本章导读}
+前两章的 SVM 与集成树都在监督信号的指引下工作：每个样本 $x_i$ 背后都贴着标准答案 $y_i$。现在请想象把全部标签一笔抹去——你面前只剩下一团散落的未标注点云 $\{x_1, \dots, x_N\}$，必须仅凭数据自身的结构推断出隐藏在幕后的类别归属（\textbf{隐变量，$z_i$}）。
+
+本章是第 4 卷的收官压轴之章，也是通向第 5 卷现代深度生成模型的直接桥梁。我们将从最朴素的 \textbf{K-Means 交替极小化}出发，亲眼目睹其球形几何先验在倾斜数据上的惨烈崩塌；接着引入\textbf{高斯混合模型（GMM）}，借第 2 卷的 KL 散度与 Jensen 不等式，一气呵成地推导出贯穿整个机器学习与变分推断史的明珠——\textbf{EM 算法的 ELBO 单调上升定理}。当你读完本章末页时，第 5 卷变分自编码器（VAE）的损失函数已经在你掌中成形。
+\end{chapIntro}
+
+% ============================================================
+\section{K-Means 聚类与 Lloyd 交替极小化}\label{sec:em-kmeans}
+% ============================================================
+
+\subsection{无监督聚类的本质：归纳偏置与隐式几何假设}
+
+在监督学习中，好坏有客观标尺（测试误差）；而在没有标签的\textbf{聚类（Clustering）}任务中，并不存在脱离问题背景的“唯一正确划分”——同一堆水果图片，既可以按颜色分为红黄绿，也可以按形状分为圆与长，还可以按产地分类。从数学上讲，\textbf{无监督聚类本质上是一个欠定（Ill-Posed）问题}：任何聚类算法之所以能产出确定结果，都是因为它在目标函数里悄悄写进了一套关于“什么叫一簇”的\textbf{归纳偏置（Inductive Bias）}。看清这一偏置，才能一眼识破每种算法的适用疆界与失效模式。
+
+\subsection{K-Means 目标函数与 Lloyd 算法的有限步单调收敛证明}
+
+最经典的聚类算法 \textbf{K-Means} 将“一簇”定义为紧致围绕某一个中心点（质心）的欧氏球形点团。给定样本集 $\{x_1, \dots, x_N\} \subset \R^D$ 与预设簇数 $K$，引入二值指示变量 $r_{ik} \in \{0, 1\}$（满足 $\sum_{k=1}^K r_{ik} = 1$，当样本 $i$ 归属第 $k$ 簇时 $r_{ik} = 1$）与 $K$ 个质心 $\mu_1, \dots, \mu_K \in \R^D$，定义\textbf{簇内平方和（Within-Cluster Sum of Squares / Distortion）}目标函数：
+\begin{equation}\label{eq:kmeans-obj}
+  J\big(\{r_{ik}\},\, \{\mu_k\}\big) := \sum_{i=1}^{N}\sum_{k=1}^{K} r_{ik}\norm{x_i - \mu_k}_2^2.
+\end{equation}
+由于离散指派 $\{r_{ik}\}$ 与连续质心 $\{\mu_k\}$ 相互耦合，联合最小化式~\eqref{eq:kmeans-obj} 是 NP-难问题。\textbf{Lloyd 算法}（通常直接简称 K-Means 算法）采用极简的\textbf{两步交替坐标极小化}：
+\begin{enumerate}
+  \item \textbf{指派步（Assignment Step）}：固定当前质心 $\{\mu_k\}$，将每个样本 $x_i$ 划归欧氏距离最近的质心：
+  \[
+    r_{ik} = \begin{cases}
+      1, & \text{若 } k = \argmin_{j \in \{1,\dots,K\}} \norm{x_i - \mu_j}_2^2 \text{（平局时按最小下标打破）}, \\
+      0, & \text{否则};
+    \end{cases}
+  \]
+  \item \textbf{更新步（Centroid Update Step）}：固定当前指派 $\{r_{ik}\}$，将每个非空簇的新质心更新为该簇内样本的算术均值：
+  \[
+    \mu_k = \frac{\sum_{i=1}^{N} r_{ik} x_i}{\sum_{i=1}^{N} r_{ik}}, \qquad k = 1, \dots, K.
+  \]
+\end{enumerate}
+
+\begin{thmBox}
+\begin{theorem}[Lloyd 算法的单调下降与有限步终止性]\label{thm:kmeans-conv}
+从任意初始化出发，Lloyd 算法的每一轮指派步与更新步均使目标函数 $J$ 单调不增，且算法必在\textbf{有限步内严格终止}于一个局部驻点。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+\textbf{单调性}：首先固定 $\{\mu_k^{(t)}\}$。由于 $J$ 关于样本下标 $i$ 完全可加，对每个 $i$ 独立挑选使 $\norm{x_i - \mu_k^{(t)}}_2^2$ 最小的唯一 $k$ 置 $r_{ik}^{(t+1)} = 1$，必有
+\[
+  J\big(\{r_{ik}^{(t+1)}\}, \{\mu_k^{(t)}\}\big) \le J\big(\{r_{ik}^{(t)}\}, \{\mu_k^{(t)}\}\big).
+\]
+接着固定 $\{r_{ik}^{(t+1)}\}$。此时 $J$ 关于各质心 $\mu_k$ 是严格凸的二次函数且相互解耦，求梯度置零：
+\[
+  \nabla_{\mu_k} J = -2 \sum_{i=1}^{N} r_{ik}^{(t+1)}(x_i - \mu_k) = 0 \implies \mu_k^{(t+1)} = \frac{\sum_{i=1}^{N} r_{ik}^{(t+1)} x_i}{\sum_{i=1}^{N} r_{ik}^{(t+1)}}.
+\]
+因此更新步同样达到精确全局最小，有 $J(\{r_{ik}^{(t+1)}\}, \{\mu_k^{(t+1)}\}) \le J(\{r_{ik}^{(t+1)}\}, \{\mu_k^{(t)}\})$。两步合起来，$J^{(t+1)} \le J^{(t)}$ 恒成立。
+
+\textbf{有限步终止性}：注意到若某轮指派 $\{r_{ik}^{(t+1)}\}$ 与上一轮完全相同，更新步所得质心不变，算法立刻停止；反之只要指派发生实质改变且采用确定性平局规则，必有至少一个样本切换到了严格更近的质心（或由前一步严格更新所致），从而 $J$ 严格下降。于是任何一种离散划分配置 $\{r_{ik}\}$ \textbf{至多只能被访问一次}。而 $N$ 个样本分入 $K$ 个簇的全部可能划分总数至多为有限数 $K^N$，因此算法绝不会无限循环，必在有限步内终止！
+\end{proof}
+
+\subsection{局部最优陷阱反例与 K-Means++ 初始化}
+
+定理~\ref{thm:kmeans-conv} 只保证收敛到\textbf{局部极小值}，绝不保证全局最优！看一个仅 4 个点的极简反例：
+
+\begin{example}[$3\times 2$ 矩形上的 K-Means 严格次优不动点]\label{ex:kmeans-localmin}
+平面上 4 个点构成宽 3、高 2 的矩形顶点：$x_1=(0,0),\ x_2=(0,2),\ x_3=(3,0),\ x_4=(3,2)$，取 $K = 2$。
+\begin{itemize}
+  \item \textbf{全局最优划分（竖切）}：$\{x_1, x_2\}$ 与 $\{x_3, x_4\}$，质心 $\mu_1=(0,1),\ \mu_2=(3,1)$，每点到自身质心距离平方均为 $1$，总目标 $J^* = 4 \times 1 = \mathbf{4.0}$；
+  \item \textbf{次优不动点（横切）}：若初始质心不幸落在上下两边中点附近，形成划分 $\{x_1, x_3\}$ 与 $\{x_2, x_4\}$，质心为 $\mu_1=(1.5, 0),\ \mu_2=(1.5, 2)$。检验 $x_1=(0,0)$ 到两个质心的距离平方：到 $\mu_1$ 为 $1.5^2 = 2.25$，到 $\mu_2$ 为 $1.5^2 + 2^2 = 6.25 > 2.25$！其余三点同理完全对称——\textbf{每个点都严格更靠近当前质心}，Lloyd 算法立刻死锁在此处，目标值高达 $J_{\mathrm{sub}} = 4 \times 2.25 = \mathbf{9.0} = 2.25\, J^*$！
+\end{itemize}
+\end{example}
+
+为避免把初始质心挤在同一簇或卡死在糟糕的局部极小值，Arthur 与 Vassilvitskii（2007）提出了如今成为全行业标配的 \textbf{K-Means++} 初始化算法：
+\begin{enumerate}
+  \item 从数据集中均匀随机抽取第 1 个质心 $\mu_1$；
+  \item 对每个样本 $x_i$，计算它到\textbf{已选质心集合}的最短欧氏距离 $D(x_i) := \min_{1 \le j \le m} \norm{x_i - \mu_j}_2$；
+  \item 以正比于距离平方的概率 $P(x_i) = \frac{D(x_i)^2}{\sum_{l=1}^N D(x_l)^2}$ 抽取下一个质心 $\mu_{m+1}$（越远离已有质心的区域越容易被选中！）；
+  \item 重复步骤 2--3 直至选满 $K$ 个质心，再运行标准 Lloyd 迭代。
+\end{enumerate}
+令人惊叹的是，仅靠这四行 $D(x)^2$ 加权采样，K-Means++ 就能在理论上保证期望目标值满足 $\E[J] \le 8(\ln K + 2) J^*$——即 $O(\log K)$ 竞争比近似保证，并在实践中大幅加速收敛（工程上再辅以多次重启取最小 $J$）。
+
+\begin{failBox}{K-Means 的致命几何硬伤：各向同性球形 Voronoi 剖分}
+即使拥有神谕帮你找到 K-Means 的\textbf{全局最优解}，它依然会在非球形数据上惨败！原因藏在指派步 $\argmin_k \norm{x_i - \mu_k}_2^2$ 中：任意两个质心之间的决策边界必是其连线的\textbf{垂直平分超平面}（构成 Voronoi 图）。这等价于强行假设所有簇都是\textbf{等半径、各向同性的正圆球}！当真实数据呈细长倾斜椭圆（例如两个平行的斜雪茄形点云）或两簇方差悬殊时，K-Means 的垂直平分线会毫不留情地拦腰斩断两个真实簇，把每根雪茄的左半段拼成一簇、右半段拼成另一簇——第~\ref{sec:em-gmm-derivation} 节的实测将展示它如何把纯度砸到仅有 \textbf{55.00\%}！
+\end{failBox}
+
+% ============================================================
+\section{高斯混合模型（GMM）与直接极大似然的困境}\label{sec:em-gmm}
+% ============================================================
+
+要让聚类算法自动识别椭圆的伸展方向（协方差）、大小比例与软归属概率，我们必须从硬距离几何升级为\textbf{概率生成模型（Generative Model）}——\textbf{高斯混合模型（Gaussian Mixture Model, GMM）}。
+
+\subsection{隐变量生成故事与边际对数似然}
+
+GMM 设想每个观测样本 $x_i \in \R^D$ 都是通过如下两步随机过程生成的：
+\begin{enumerate}
+  \item 先按混合权重 $\pi = (\pi_1, \dots, \pi_K)$（满足 $\pi_k \ge 0,\ \sum_{k=1}^K \pi_k = 1$）掷一枚 $K$ 面有偏骰子，抽出样本所属的\textbf{隐藏簇标签（隐变量）} $z_i \sim \operatorname{Cat}(\pi)$，即 $P(z_i = k) = \pi_k$；
+  \item 给定 $z_i = k$，再从第 $k$ 个多元高斯分布中采样观测向量：
+  \[
+    x_i \mid (z_i = k) \;\sim\; \mathcal{N}(x_i \mid \mu_k, \Sigma_k)
+    := \frac{1}{(2\pi)^{D/2} \abs{\Sigma_k}^{1/2}} \exp\!\left(-\frac{1}{2}(x_i - \mu_k)^\top \Sigma_k^{-1}(x_i - \mu_k)\right).
+  \]
+\end{enumerate}
+记全部未知参数为 $\theta = \{\pi_k, \mu_k, \Sigma_k\}_{k=1}^K$。由于观测阶段看不到隐变量 $z_i$，根据全概率公式对 $z_i$ 求和消元，得到单样本边际密度 $p_\theta(x_i) = \sum_{k=1}^K \pi_k \mathcal{N}(x_i \mid \mu_k, \Sigma_k)$，进而独立同分布数据集 $X = \{x_1, \dots, x_N\}$ 的\textbf{边际对数似然（Marginal Log-Likelihood）}为：
+\begin{equation}\label{eq:gmm-loglik}
+  \ell(\theta) := \ln p_\theta(X) = \sum_{i=1}^{N} \ln\!\left(\sum_{k=1}^{K} \pi_k\,\mathcal{N}(x_i \mid \mu_k, \Sigma_k)\right).
+\end{equation}
+
+\subsection{为什么直接求导失败？“和的对数”与协方差奇异性陷阱}
+
+如果隐变量 $z_i$ 已知（即变成了监督高斯判别分析），完全数据对数似然 $\sum_i \ln(\pi_{z_i} \mathcal{N}(x_i \mid \mu_{z_i}, \Sigma_{z_i}))$ 的对数会直接把乘积拆成加法，所有参数一秒求得闭式样本均值与样本协方差。但在无监督 GMM 式~\eqref{eq:gmm-loglik} 中，\textbf{对数符号外面包着一层求和号（Log of a Sum）}！一旦对 $\mu_k$ 或 $\Sigma_k$ 求偏导，分母里会冒出纠缠了全部 $K$ 组参数的后验分数，令梯度方程组高度非线性且不存在闭式解析解。
+
+\begin{failBox}{GMM 极大似然的奇异性崩溃（Singularity Collapse）与正则修正}
+直接最大化式~\eqref{eq:gmm-loglik} 还暗藏一个极具欺骗性的数学悬崖：假设把第 1 个高斯分量的均值精确对准某一个数据点 $\mu_1 = x_1$，令其协方差矩阵为各向同性收缩阵 $\Sigma_1 = \sigma_1^2 I_D$，其余分量保持固定。则 $x_1$ 对似然的贡献项为
+\[
+  \pi_1 \mathcal{N}(x_1 \mid x_1, \sigma_1^2 I_D) = \frac{\pi_1}{(2\pi)^{D/2} \sigma_1^D} \xrightarrow{\;\sigma_1 \to 0^+\;} +\infty!
+\]
+而其余 $N-1$ 个样本仍由其他分量提供有限正概率密度，于是总对数似然 $\ell(\theta) \to +\infty$！这意味着 GMM 的无约束 MLE 根本没有全局有限极大值——只要某个高斯退化成一根插在单点上的狄拉克“细针”，对数似然就会瞬间爆表！
+
+\textbf{工程必做修复}：在每次更新协方差矩阵 $\Sigma_k$ 时加上微小对角岭正则 $\Sigma_k \leftarrow \Sigma_k + \epsilon I_D$（例如配套代码中采用 $\epsilon = 10^{-6}$），既杜绝了奇异性崩溃，也保证了 $\Sigma_k$ 永远严格正定可逆；在贝叶斯框架下，这等价于为协方差矩阵施加逆 Wishart 先验做 MAP 估计。
+\end{failBox}
+
+% ============================================================
+\section{EM 算法：ELBO 分解与单调上升定理}\label{sec:em-elbo}
+% ============================================================
+
+既然直接最大化“和的对数” $\ln \sum_z p_\theta(x, z)$ 如此棘手，能否在每一步构造一个\textbf{把对数推到求和号里面}的紧致下界，通过交替抬升下界来逼迫真实的边际对数似然步步攀升？这就是 1977 年 Dempster、Laird 与 Rubin 集大成的\textbf{期望最大化算法（Expectation-Maximization, EM）}——其核心恒等式堪称整个统计学与深度学习最美的公式之一！
+
+\begin{recallBox}{KL 散度非负性与 Jensen 不等式（第 2 卷回顾）}
+对任意两个定义在同一离散隐变量空间上的概率分布 $q(z)$ 与 $p(z)$，Kullback--Leibler（KL）散度定义为
+\[
+  \DKL(q \,\|\, p) := \sum_{z} q(z) \ln \frac{q(z)}{p(z)} = \E_{q(z)}\!\left[\ln \frac{q(z)}{p(z)}\right] \ge 0,
+\]
+且等号成立的\textbf{充要条件}是 $q(z) = p(z)$ 处处成立（该结论直接由严格凹函数 $\ln(\cdot)$ 的 Jensen 不等式证得）。
+\end{recallBox}
+
+\subsection{皇冠上的明珠：精确 ELBO--KL 分解恒等式}
+
+考虑任意包含观测变量 $x$ 与隐变量 $z$ 的概率模型 $p_\theta(x, z)$（这里 $x, z$ 既可指单个样本，也可指整个数据集 $X, Z$）。引入任意一个关于隐变量 $z$ 的辅助概率分布 $q(z)$（要求在 $p_\theta(z \mid x) > 0$ 处 $q(z) > 0$）。
+
+\begin{thmBox}
+\begin{theorem}[精确 ELBO--KL 分解恒等式]\label{thm:elbo-decomp}
+对任意参数 $\theta$ 与任意合法变分分布 $q(z)$，观测数据的边际对数似然满足如下精确分解：
+\begin{equation}\label{eq:elbo-identity}
+  \ln p_\theta(x) = \underbrace{\E_{q(z)}\!\left[\ln \frac{p_\theta(x, z)}{q(z)}\right]}_{\mathcal{L}(q, \theta)\text{（证据下界，ELBO）}} + \DKL\!\big(q(z) \,\|\, p_\theta(z \mid x)\big).
+\end{equation}
+由于 $\DKL(q \,\|\, p) \ge 0$，泛函 $\mathcal{L}(q, \theta)$ 恒为边际对数似然（亦称模型证据，Evidence）的下界：$\ln p_\theta(x) \ge \mathcal{L}(q, \theta)$，且等号成立\textbf{当且仅当} $q(z) = p_\theta(z \mid x)$（精确后验分布）。
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+利用条件概率恒等式 $p_\theta(x, z) = p_\theta(x)\, p_\theta(z \mid x)$ 即 $\ln p_\theta(x) = \ln p_\theta(x, z) - \ln p_\theta(z \mid x)$，对两边关于 $q(z)$ 取期望（左边不依赖 $z$，期望即其自身），再在分子分母同时插入 $q(z)$：
+\begin{align*}
+  \ln p_\theta(x)
+  &= \sum_{z} q(z) \ln p_\theta(x)
+   = \sum_{z} q(z) \ln \frac{p_\theta(x, z)}{p_\theta(z \mid x)} \\
+  &= \sum_{z} q(z) \ln \left(\frac{p_\theta(x, z)}{q(z)} \cdot \frac{q(z)}{p_\theta(z \mid x)}\right) \\
+  &= \sum_{z} q(z) \ln \frac{p_\theta(x, z)}{q(z)} + \sum_{z} q(z) \ln \frac{q(z)}{p_\theta(z \mid x)} \\
+  &= \mathcal{L}(q, \theta) + \DKL\!\big(q(z) \,\|\, p_\theta(z \mid x)\big).
+\end{align*}
+最后由 KL 散度非负性立得 $\ln p_\theta(x) \ge \mathcal{L}(q, \theta)$，且取等当且仅当 $\DKL = 0 \iff q(z) = p_\theta(z \mid x)$。
+\end{proof}
+
+请把 ELBO $\mathcal{L}(q, \theta)$ 拆写成两种等价展开形式，它们分别照亮本章的 EM 与第 5 卷的 VAE：
+\begin{align}
+  \mathcal{L}(q, \theta) &= \E_{q(z)}\big[\ln p_\theta(x, z)\big] + H(q), \label{eq:elbo-em-form}\\
+  \mathcal{L}(q, \theta) &= \E_{q(z)}\big[\ln p_\theta(x \mid z)\big] - \DKL\!\big(q(z) \,\|\, p_\theta(z)\big). \label{eq:elbo-vae-form}
+\end{align}
+其中 $H(q) = -\E_q[\ln q(z)]$ 是 $q$ 的熵。注意式~\eqref{eq:elbo-em-form} 中：\textbf{对数符号已经彻底钻进了期望（求和）内部}，只作用于结构极简的完全数据联合分布 $p_\theta(x, z)$！
+
+\subsection{交替坐标上升与单调不降定理}
+
+EM 算法的全部精髓，就是在双变量泛函 $\mathcal{L}(q, \theta)$ 上对 $q$ 和 $\theta$ 轮流做\textbf{精确坐标上升}：
+\begin{itemize}
+  \item \textbf{E-步（Expectation Step）}：固定当前参数 $\theta^{(t)}$，最大化 $\mathcal{L}(q, \theta^{(t)})$ 关于分布 $q$。由恒等式~\eqref{eq:elbo-identity}，左边 $\ln p_{\theta^{(t)}}(X)$ 与 $q$ 无关，因此最大化下界 $\mathcal{L}$ 精确等价于把 KL 间隙压为零！唯一全局最优解就是当前参数下的\textbf{精确后验分布}：
+  \[
+    q^{(t+1)}(Z) := p_{\theta^{(t)}}(Z \mid X), \qquad \text{使得 } \mathcal{L}\big(q^{(t+1)}, \theta^{(t)}\big) = \ln p_{\theta^{(t)}}(X).
+  \]
+  几何上，这一步构造出了一条在 $\theta = \theta^{(t)}$ 处与真实对数似然曲线\textbf{紧密相切}的替代下界曲面！
+  \item \textbf{M-步（Maximization Step）}：固定刚刚算好的 $q^{(t+1)}$，最大化 $\mathcal{L}(q^{(t+1)}, \theta)$ 关于模型参数 $\theta$。由式~\eqref{eq:elbo-em-form}，熵项 $H(q^{(t+1)})$ 与 $\theta$ 无关，故 M-步等价于最大化著名的\textbf{期望完全数据对数似然（$Q$-函数）}：
+  \begin{equation}\label{eq:em-qfunc}
+    \theta^{(t+1)} := \argmax_{\theta}\; Q(\theta \mid \theta^{(t)}), \qquad
+    Q(\theta \mid \theta^{(t)}) := \E_{Z \sim p_{\theta^{(t)}}(Z \mid X)}\big[\ln p_\theta(X, Z)\big].
+  \end{equation}
+\end{itemize}
+
+\begin{thmBox}
+\begin{theorem}[EM 算法的边际对数似然单调上升定理]\label{thm:em-mono}
+EM 算法产生的参数序列 $\{\theta^{(t)}\}_{t \ge 0}$ 恒保证真实观测数据的边际对数似然单调不降：
+\begin{equation}\label{eq:em-mono}
+  \ln p_{\theta^{(t+1)}}(X) \;\ge\; \ln p_{\theta^{(t)}}(X), \qquad \forall\, t \ge 0.
+\end{equation}
+\end{theorem}
+\end{thmBox}
+
+\begin{proof}
+只需短短三步不等链，每一环都无懈可击：
+\begin{align*}
+  \ln p_{\theta^{(t+1)}}(X)
+  &\;\ge\; \mathcal{L}\big(q^{(t+1)}, \theta^{(t+1)}\big) && \text{（定理~\ref{thm:elbo-decomp}：ELBO 恒为下界，差值为非负 KL）} \\
+  &\;\ge\; \mathcal{L}\big(q^{(t+1)}, \theta^{(t)}\big) && \text{（M-步定义：$\theta^{(t+1)}$ 最大化 $\mathcal{L}(q^{(t+1)}, \theta)$）} \\
+  &\;=\; \ln p_{\theta^{(t)}}(X). && \text{（E-步定义：$q^{(t+1)} = p_{\theta^{(t)}}(Z\mid X)$ 使下界紧贴）}
+\end{align*}
+更精细地看，总增益甚至包含两份非负红利：
+\[
+  \ln p_{\theta^{(t+1)}}(X) - \ln p_{\theta^{(t)}}(X)
+  = \underbrace{\Big[\mathcal{L}\big(q^{(t+1)}, \theta^{(t+1)}\big) - \mathcal{L}\big(q^{(t+1)}, \theta^{(t)}\big)\Big]}_{\ge\, 0\text{（M-步抬升下界）}}
+  + \underbrace{\DKL\!\big(p_{\theta^{(t)}}(Z\mid X) \,\|\, p_{\theta^{(t+1)}}(Z\mid X)\big)}_{\ge\, 0\text{（后验漂移带来额外抬升）}}. \qedhere
+\]
+\end{proof}
+
+图~\ref{fig:em-tangency} 生动描绘了这种“构造紧贴下界 $\to$ 爬上下界顶点 $\to$ 重新紧贴”的优雅台阶式攀登几何（也是主化-极小化 MM 算法的典范）。需注意：真实似然函数 $\ln p_\theta(X)$ 通常是非凹的，因此 EM 与 K-Means 一样只保证收敛到局部极值或驻点，实践中仍需配合 K-Means++ 热启动或多次随机初始化。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.02]
+  % Axes
+  \draw[->, >=Stealth, slate, thick] (0.0, 0.0) -- (10.2, 0.0) node[right, font=\footnotesize] {参数 $\theta$};
+  \draw[->, >=Stealth, slate, thick] (0.0, 0.0) -- (0.0, 4.9) node[above, font=\footnotesize] {对数似然 / 下界};
+
+  % True non-concave log-likelihood curve ln p_theta(X): smooth bump peaking around x=7.3
+  % Let's use an explicit smooth formula so tangency points are EXACT!
+  % f(x) = 1.2 + 0.85*(x-0.5) - 0.072*(x-0.5)^2 + 0.45*sin(0.85*(x-0.5))?
+  % Simpler: f(x) = 4.15 - 0.11*(x - 7.0)^2 + 0.32*sin(0.9*(x - 2.0))
+  % Wait: let's define an exact parabola-like concave envelope minus small wave, or exact tangency curves!
+  % Even cleaner: draw f(x) = 4.25 - 0.095*(x - 7.1)^2 - 0.18*cos(1.1*(x - 1.5)) -> exact analytical lower bounds!
+  % Better yet: define f(x) = 4.20 - 0.085*(x - 7.2)^2 (strictly below max 4.20), wait: make it visibly non-concave on left:
+  % Let's pick exact smooth curve:
+  % f(x) = 1.15 + 3.05 / (1 + exp(-0.85*(x - 3.6))) - 0.07*(x - 7.4)^2 * (x > 7.4) ... simpler:
+  % Use exact f(x) = 0.8 + 0.92*x - 0.068*x^2 + 0.35*sin(0.85*x) over [0.6, 9.5]
+  % Let's evaluate tangent parabola g_k(x) = f(x_k) + f'(x_k)*(x - x_k) - c_k*(x - x_k)^2!
+  % At x0 = 1.8:
+  %   f(1.8) = 0.8 + 1.656 - 0.2203 + 0.35*sin(1.53 rad=87.66 deg -> 0.999) = 2.585
+  %   f'(x) = 0.92 - 0.136*x + 0.2975*cos(0.85*x)
+  %   f'(1.8) = 0.92 - 0.2448 + 0.2975*0.041 = 0.687
+  %   Choose c0 = 0.24 -> peak of g0 at x1 = 1.8 + 0.687/(2*0.24) = 3.23!
+  % At x1 = 3.23:
+  %   f(3.23) = 0.8 + 2.9716 - 0.7094 + 0.35*sin(2.745 rad -> 0.386) = 3.197
+  %   g0(3.23) = 2.585 + 0.687*1.43 - 0.24*(1.43)^2 = 3.077 < 3.197 (strictly below!)
+  %   f'(3.23) = 0.92 - 0.4393 + 0.2975*(-0.922) = 0.206 ... wait make slope nicer!
+  % Even cleaner: use f(x) = 4.25 - 0.085*(x - 7.0)^2 on [1.0, 9.6]:
+  % Wait, add small wave only outside? No, a smooth asymmetric arch:
+  % f(x) = 0.65 + 1.08*x - 0.082*x^2 on [0.8, 9.6]:
+  %   peak at x* = 1.08/0.164 = 6.585, f(x*) = 4.206!
+  %   f(1.8) = 0.65 + 1.944 - 0.2657 = 2.328, f'(1.8) = 1.08 - 0.2952 = 0.7848.
+  %   Lower bound 1: g1(x) = f(1.8) + f'(1.8)*(x-1.8) - 0.20*(x-1.8)^2
+  %     Since f'' = -0.164 > -0.40 = g1'', g1(x) <= f(x) EVERYWHERE with exact tangency at x=1.8!
+  %     Peak of g1: x1 = 1.8 + 0.7848/0.40 = 3.762!
+  %     g1(3.762) = 2.328 + 0.7848*1.962 - 0.20*1.962^2 = 3.098;
+  %     f(3.762)  = 0.65 + 4.063 - 1.1605 = 3.552! (Nice visible KL gap = 0.454!)
+  %   f'(3.762) = 1.08 - 0.164*3.762 = 0.4630.
+  %   Lower bound 2: g2(x) = f(3.762) + 0.4630*(x-3.762) - 0.16*(x-3.762)^2
+  %     Since f'' = -0.164 > -0.32 = g2'', g2(x) <= f(x) EVERYWHERE with exact tangency at x=3.762!
+  %     Peak of g2: x2 = 3.762 + 0.4630/0.32 = 5.209!
+  %     g2(5.209) = 3.552 + 0.4630*1.447 - 0.16*1.447^2 = 3.887;
+  %     f(5.209)  = 0.65 + 5.626 - 2.225 = 4.051!
+
+  % Plot true marginal log-likelihood f(x)
+  \draw[tealDark, very thick, domain=0.8:9.6, samples=80]
+    plot (\x, {0.65 + 1.08*\x - 0.082*\x*\x});
+  \node[font=\footnotesize\sffamily\bfseries, text=tealDark, anchor=west] at (7.55, 4.28) {真实边际对数似然 $\ln p_\theta(X)$};
+
+  % Plot ELBO surrogate 1: L(q^(1), theta) tangent at x0 = 1.8
+  \draw[ochre, thick, dashed, domain=0.65:6.45, samples=60]
+    plot (\x, {2.3283 + 0.7848*(\x-1.8) - 0.20*(\x-1.8)*(\x-1.8)});
+  \node[font=\scriptsize, text=ochre, anchor=north east] at (6.05, 1.92) {$\mathcal{L}(q^{(1)}, \theta)$};
+
+  % Plot ELBO surrogate 2: L(q^(2), theta) tangent at x1 = 3.762
+  \draw[navy, thick, dashed, domain=1.75:8.25, samples=60]
+    plot (\x, {3.5525 + 0.4630*(\x-3.762) - 0.16*(\x-3.762)*(\x-3.762)});
+  \node[font=\scriptsize, text=navy, anchor=north west] at (7.95, 2.78) {$\mathcal{L}(q^{(2)}, \theta)$};
+
+  % Vertical guides & parameter ticks
+  \draw[dotted, slate!70] (1.8, 0) -- (1.8, 2.328);
+  \draw[dotted, slate!70] (3.762, 0) -- (3.762, 3.552);
+  \draw[dotted, slate!70] (5.209, 0) -- (5.209, 4.051);
+  \node[font=\scriptsize, below] at (1.8, -0.05) {$\theta^{(0)}$};
+  \node[font=\scriptsize, below] at (3.762, -0.05) {$\theta^{(1)}$};
+  \node[font=\scriptsize, below] at (5.209, -0.05) {$\theta^{(2)}$};
+
+  % Highlight points
+  \fill[ochre] (1.8, 2.328) circle (2.4pt);
+  \fill[ochre] (3.762, 3.098) circle (2.2pt);
+  \fill[navy] (3.762, 3.552) circle (2.4pt);
+  \fill[navy] (5.209, 3.887) circle (2.2pt);
+  \fill[tealDark] (5.209, 4.051) circle (2.4pt);
+
+  % Step arrows showing M-step & E-step KL gap
+  \draw[->, >=Stealth, gold, very thick] (1.8, 0.45) -- (3.72, 0.45)
+    node[midway, above, font=\tiny\sffamily\bfseries, text=ochre] {M-步 1};
+  \draw[->, >=Stealth, gold, very thick] (3.80, 0.45) -- (5.17, 0.45)
+    node[midway, above, font=\tiny\sffamily\bfseries, text=navy] {M-步 2};
+
+  % KL vertical gap brace/arrow at theta^(1)
+  \draw[<->, >=Stealth, plum, thick] (3.88, 3.10) -- (3.88, 3.55);
+  \node[font=\tiny\sffamily, text=plum, anchor=west, align=left] at (3.96, 3.32) {E-步消除 KL 间隙\\令新下界紧贴相切};
+
+  % Callout at tangency theta^(0)
+  \node[font=\tiny\sffamily, text=ochre, align=left] at (0.98, 3.10) {紧贴相切点\\$\DKL = 0$};
+  \draw[->, >=Stealth, ochre, thin] (1.35, 2.86) -- (1.74, 2.40);
+\end{tikzpicture}
+\caption{EM 算法的紧致下界攀升几何。每一轮 E-步在当前点 $\theta^{(t)}$ 构造一条严格位于真实对数似然下方且在 $\theta^{(t)}$ 处紧贴相切的代理曲线 $\mathcal{L}(q^{(t+1)}, \theta)$；M-步直接跳到该易优化下界的顶点 $\theta^{(t+1)}$，由此保证真实似然 $\ln p_\theta(X)$ 稳步单调攀升。}
+\label{fig:em-tangency}
+\end{figure}
+
+% ============================================================
+\section{GMM 的闭式 E-步、M-步推导与倾斜椭圆实测}\label{sec:em-gmm-derivation}
+% ============================================================
+
+现在将通用 EM 框架精准套用到第~\ref{sec:em-gmm} 节的高斯混合模型上，体验每一步都化为闭式解析公式的丝滑快感。
+
+\subsection{GMM 的 E-步（响应度）与 M-步闭式推导}
+
+\paragraph{E-步：计算后验响应度（Responsibilities）}
+给定当前参数 $\theta^{(t)} = \{\pi_k^{(t)}, \mu_k^{(t)}, \Sigma_k^{(t)}\}_{k=1}^K$，各样本条件独立，由贝叶斯定理直接算出样本 $x_i$ 由第 $k$ 个高斯分量生成的后验概率 $\gamma_{ik} := p_{\theta^{(t)}}(z_i = k \mid x_i)$（称为分量 $k$ 对样本 $i$ 的\textbf{响应度}）：
+\begin{equation}\label{eq:gmm-estep}
+  \gamma_{ik} = \frac{\pi_k^{(t)}\,\mathcal{N}\big(x_i \mid \mu_k^{(t)}, \Sigma_k^{(t)}\big)}{\sum_{j=1}^{K} \pi_j^{(t)}\,\mathcal{N}\big(x_i \mid \mu_j^{(t)}, \Sigma_j^{(t)}\big)}, \qquad i=1,\dots,N,\; k=1,\dots,K.
+\end{equation}
+\textbf{数值稳定性提示}：在高维空间，高斯密度值 $\mathcal{N}(x_i \mid \mu_k, \Sigma_k)$ 极易下溢为浮点零 $0.0$ 导致 $0/0 = \texttt{NaN}$！工程实现必须全程在对数域计算 $a_{ik} := \ln \pi_k + \ln \mathcal{N}(x_i \mid \mu_k, \Sigma_k)$，并借 \textbf{Log-Sum-Exp 技巧}（减去每行最大值 $m_i = \max_j a_{ij}$）：
+\[
+  \ln p_\theta(x_i) = m_i + \ln\!\left(\sum_{j=1}^{K} e^{a_{ij} - m_i}\right), \qquad
+  \gamma_{ik} = \exp\!\big(a_{ik} - \ln p_\theta(x_i)\big).
+\]
+
+\paragraph{M-步：最大化 $Q(\theta \mid \theta^{(t)})$ 求闭式参数更新}
+写出 GMM 的期望完全数据对数似然：
+\begin{align}
+  Q(\theta \mid \theta^{(t)})
+  &= \sum_{i=1}^{N}\sum_{k=1}^{K} \gamma_{ik}\ln\!\Big(\pi_k\,\mathcal{N}(x_i \mid \mu_k, \Sigma_k)\Big) \nonumber\\
+  &= \sum_{i=1}^{N}\sum_{k=1}^{K} \gamma_{ik}\!\left[\ln \pi_k - \frac{D}{2}\ln(2\pi) - \frac{1}{2}\ln\abs{\Sigma_k} - \frac{1}{2}(x_i - \mu_k)^\top \Sigma_k^{-1}(x_i - \mu_k)\right]. \label{eq:gmm-qfunc}
+\end{align}
+记第 $k$ 个分量的\textbf{有效样本数（Effective Count）} $N_k := \sum_{i=1}^{N} \gamma_{ik}$（显然 $\sum_{k=1}^K N_k = N$）。下面逐一求出三组参数的闭式最优解：
+
+\begin{enumerate}
+  \item {\rightskip=0pt plus 1em\relax \textbf{更新混合权重 $\pi_k$}（直接动用第 2 章拉格朗日乘子法！）：在等式约束 $\sum_{k=1}^K \pi_k = 1$ 下最大化 $\sum_{k=1}^K N_k \ln \pi_k$，构造拉格朗日函数 $\sum_k N_k \ln \pi_k + \lambda(1 - \sum_k \pi_k)$，求偏导置零得 $\frac{N_k}{\pi_k} - \lambda = 0 \implies \pi_k = N_k / \lambda$。对 $k$ 求和利用 $\sum_k \pi_k = 1$ 得 $\lambda = \sum_k N_k = N$，故\par}
+  \begin{equation}\label{eq:gmm-m-pi}
+    \pi_k^{(t+1)} = \frac{N_k}{N}.
+  \end{equation}
+
+  \item \textbf{更新均值向量 $\mu_k$}：对式~\eqref{eq:gmm-qfunc} 关于 $\mu_k$ 求梯度置零：
+  \[
+    \nabla_{\mu_k} Q = \sum_{i=1}^{N} \gamma_{ik} \Sigma_k^{-1}(x_i - \mu_k) = 0.
+  \]
+  左乘非奇异矩阵 $\Sigma_k$，立得加权样本均值：
+  \begin{equation}\label{eq:gmm-m-mu}
+    \mu_k^{(t+1)} = \frac{1}{N_k} \sum_{i=1}^{N} \gamma_{ik} x_i.
+  \end{equation}
+
+  \item \textbf{更新协方差矩阵 $\Sigma_k$}：为简化矩阵求导，令精度矩阵 $\Lambda_k := \Sigma_k^{-1} \succ 0$，利用 $\ln\abs{\Sigma_k} = -\ln\abs{\Lambda_k}$ 与矩阵微积分恒等式（第 1 卷回顾）$\nabla_{\Lambda} \ln\abs{\Lambda} = \Lambda^{-1}$、$\nabla_{\Lambda}(v^\top \Lambda v) = v v^\top$，将式~\eqref{eq:gmm-qfunc} 关于 $\Lambda_k$ 求梯度置零：
+  \[
+    \nabla_{\Lambda_k} Q = \frac{1}{2} N_k \Lambda_k^{-1} - \frac{1}{2}\sum_{i=1}^{N} \gamma_{ik}(x_i - \mu_k)(x_i - \mu_k)^\top = 0.
+  \]
+  将 $\Lambda_k^{-1} = \Sigma_k$ 代回并整理，立得加权样本协方差矩阵（工程中附加 $\epsilon I_D$ 防奇异）：
+  \begin{equation}\label{eq:gmm-m-sigma}
+    \Sigma_k^{(t+1)} = \frac{1}{N_k}\sum_{i=1}^{N} \gamma_{ik}\big(x_i - \mu_k^{(t+1)}\big)\big(x_i - \mu_k^{(t+1)}\big)^\top.
+  \end{equation}
+\end{enumerate}
+
+\subsection{大统一桥梁：硬 K-Means 正是 GMM-EM 的零方差极限！}
+
+\begin{thmBox}
+\begin{proposition}[K-Means 作为 GMM-EM 的各向同性退化极限]\label{prop:kmeans-gmm-limit}
+在 GMM 中固定等混合权重 $\pi_k \equiv 1/K$，并强制所有分量的协方差矩阵共享同一各向同性标量方差 $\Sigma_k \equiv \sigma^2 I_D$（不更新 $\pi_k, \Sigma_k$）。当 $\sigma^2 \to 0^+$ 时，GMM-EM 的 E-步与 M-步逐行精确退化为 K-Means（Lloyd 算法）的硬指派步与质心均值更新步！
+\end{proposition}
+\end{thmBox}
+
+\begin{proof}
+将 $\pi_k = 1/K$ 与 $\Sigma_k = \sigma^2 I_D$ 代入 E-步响应度公式~\eqref{eq:gmm-estep}，归一化常数 $(2\pi\sigma^2)^{-D/2} / K$ 上下约去：
+\[
+  \gamma_{ik} = \frac{\exp\!\left(-\dfrac{\norm{x_i - \mu_k}_2^2}{2\sigma^2}\right)}{\sum_{j=1}^{K} \exp\!\left(-\dfrac{\norm{x_i - \mu_j}_2^2}{2\sigma^2}\right)}.
+\]
+记 $k^*(i) := \argmin_j \norm{x_i - \mu_j}_2^2$（假设最近质心唯一），分子分母同乘 $\exp(\norm{x_i - \mu_{k^*(i)}}_2^2 / (2\sigma^2))$。对所有 $j \neq k^*(i)$，指数上出现严格负差值 $-(\norm{x_i - \mu_j}_2^2 - \norm{x_i - \mu_{k^*(i)}}_2^2)/(2\sigma^2) \to -\infty$（当 $\sigma^2 \to 0^+$），故对应指数项趋于 $0$！于是
+\[
+  \lim_{\sigma^2 \to 0^+} \gamma_{ik} = \begin{cases} 1, & k = k^*(i), \\ 0, & k \neq k^*(i), \end{cases}
+\]
+软响应度 $\gamma_{ik}$ 精确坍缩为 K-Means 的 $0/1$ 硬指派 $r_{ik}$！再代入 M-步均值公式~\eqref{eq:gmm-m-mu}，立刻化为 $\mu_k = \frac{\sum_i r_{ik} x_i}{\sum_i r_{ik}}$——这正是 Lloyd 算法的质心更新公式！
+\end{proof}
+
+这一命题彻底揭示了 K-Means 与 GMM 的血缘关系：K-Means 绝不是与概率模型无关的孤立启发式，它只是把 GMM 的全部自由度阉割为“等权重 + 等方差球面 + 零温度硬指派”后的极简特例！
+
+\subsection{手工完整推演：一维 4 点二分量 GMM 的一轮 EM 迭代}
+
+\begin{example}[手算 1D GMM 一轮完整 EM 与似然上升验证]\label{ex:gmm-hand}
+一维轴上有 4 个观测点：$x = (-2,\, -1,\, 2,\, 3)$，拟合 $K = 2$ 分量一维 GMM。设初始参数为 $\pi^{(0)} = (0.5,\, 0.5)$，$\mu^{(0)} = (-1,\, 1)$，$(\sigma^2)^{(0)} = (1,\, 1)$。请手工完成第 1 轮 E-步与 M-步，并验算边际对数似然严格上升。
+\end{example}
+
+\paragraph{第 1 步：初始对数似然与 E-步响应度}
+由于 $\pi_1^{(0)} = \pi_2^{(0)} = 0.5$ 且 $(\sigma_1^2)^{(0)} = (\sigma_2^2)^{(0)} = 1$，对数后验几率之比戏剧性地化简为线性函数：
+\[
+  \ln\frac{\pi_1^{(0)}\mathcal{N}(x_i\mid -1, 1)}{\pi_2^{(0)}\mathcal{N}(x_i\mid 1, 1)}
+  = -\frac{1}{2}\big[(x_i + 1)^2 - (x_i - 1)^2\big] = -2 x_i \implies \gamma_{i1} = \frac{1}{1 + e^{2x_i}} = \sigma(-2 x_i)!
+\]
+逐点代入 $x = (-2, -1, 2, 3)$（同时记 $\gamma_{i2} = 1 - \gamma_{i1}$）：
+\begin{align*}
+  \gamma_{11} &= \sigma(4) = 0.9820, & \gamma_{21} &= \sigma(2) = 0.8808, & \gamma_{31} &= \sigma(-4) = 0.0180, & \gamma_{41} &= \sigma(-6) = 0.0025; \\
+  \gamma_{12} &= 0.0180, & \gamma_{22} &= 0.1192, & \gamma_{32} &= 0.9820, & \gamma_{42} &= 0.9975.
+\end{align*}
+初始边际对数似然直接求和得 $\ell(\theta^{(0)}) = \mathbf{-9.2826}$。
+
+\paragraph{第 2 步：M-步闭式更新}
+先算有效样本数：$N_1 = 0.9820 + 0.8808 + 0.0180 + 0.0025 = 1.8833$，$N_2 = 4 - N_1 = 2.1167$。代入式~\eqref{eq:gmm-m-pi}--\eqref{eq:gmm-m-sigma}：
+\begin{align*}
+  \pi_1^{(1)} &= \frac{1.8833}{4} = 0.4708, \qquad \pi_2^{(1)} = \frac{2.1167}{4} = 0.5292; \\
+  \mu_1^{(1)} &= \frac{0.9820(-2) + 0.8808(-1) + 0.0180(2) + 0.0025(3)}{1.8833} = \mathbf{-1.4875}, \\
+  \mu_2^{(1)} &= \frac{0.0180(-2) + 0.1192(-1) + 0.9820(2) + 0.9975(3)}{2.1167} = \mathbf{2.2683}; \\
+  (\sigma_1^2)^{(1)} &= \frac{1}{N_1}\sum_{i=1}^4 \gamma_{i1}(x_i + 1.4875)^2 = \mathbf{0.3907}, \\
+  (\sigma_2^2)^{(1)} &= \frac{1}{N_2}\sum_{i=1}^4 \gamma_{i2}(x_i - 2.2683)^2 = \mathbf{1.0420}.
+\end{align*}
+仅经过\textbf{一轮}迭代，两个均值已从 $(-1, 1)$ 迅猛逼近真实簇中心 $(-1.5, 2.5)$，且新边际对数似然暴涨至 $\ell(\theta^{(1)}) = \mathbf{-6.4826}$（单步净增 $+2.8000$ 奈特！），完美兑现定理~\ref{thm:em-mono}。
+
+\subsection{倾斜椭圆双簇实测：K-Means 的崩塌与 GMM-EM 的全胜}
+
+现在检阅配套脚本 \texttt{code/\allowbreak vol4\_experiments.py} 中 \texttt{exp6\_kmeans\_vs\_gmm\_em} 的实测数据（日志存于 \texttt{data/\allowbreak gmm\_em.csv}）。
+
+\paragraph{实验设置}
+在二维平面上生成两个平行倾斜的细长高斯点团（每簇 $180$ 点，共 $N = 360$ 点），真实均值分别为 $\mu_0 = (-1.0, 1.2)^\top$ 与 $\mu_1 = (1.2, -1.0)^\top$，共享强正相关倾斜协方差矩阵
+\[
+  \Sigma_{\mathrm{tilt}} = \begin{bmatrix} 4.0 & 2.8 \\ 2.8 & 2.2 \end{bmatrix}
+  \qquad (\text{相关系数 } \rho \approx 0.944\text{，呈细长 } 45^\circ \text{ 斜椭圆！}).
+\]
+对比 5 次随机重启取最优惯量的 K-Means 与带 $\epsilon = 10^{-6}$ 协方差正则的 GMM-EM：
+\begin{itemize}
+  \item \textbf{K-Means（5 次重启最佳）}：聚类纯度仅 \textbf{55.00\%}（接近随机乱分！因为两个细长雪茄沿主轴长度远超它们之间的垂直间距，K-Means 毫不客气地用一条垂直于主轴的平分线把两根雪茄同时拦腰腰斩）；
+  \item \textbf{GMM-EM（30 轮迭代）}：聚类纯度高达 \textbf{100.00\%}（全部 360 个点无一错分！）。表~\ref{tab:gmm-em-iters} 与图~\ref{fig:gmm-em-curve}（直接读自 \texttt{data/\allowbreak gmm\_em.csv}）展示了边际对数似然的严格单调攀升轨迹：从第 1 轮的 $-1578.57$ 起步，在第 5--7 轮发生戏剧性“相变”（两个高斯椭圆成功旋转对齐到倾斜主轴！），对数似然飙升逾 $158$ 奈特，在第 8 轮精准收敛至 \textbf{-1286.45} 并纹丝不动。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.84\linewidth,
+  height=5.9cm,
+  xlabel={EM 迭代轮数 $t$},
+  ylabel={边际对数似然 $\ln p_{\theta^{(t)}}(X)$},
+  xmin=0, xmax=31,
+  ymin=-1610, ymax=-1245,
+  xtick={1,5,10,15,20,25,30},
+  tick label style={font=\scriptsize},
+  label style={font=\footnotesize},
+  grid=both,
+  grid style={line width=0.25pt, draw=slate!18},
+  legend pos=south east,
+  legend style={font=\scriptsize, fill=white, fill opacity=0.92, draw=tealLine, rounded corners=1.5pt}
+]
+  \addplot[tealDark, very thick, mark=*, mark size=1.6pt, mark repeat=1]
+    table[x=iter, y=loglik, col sep=comma] {data/gmm_em.csv};
+  \addlegendentry{GMM-EM 边际对数似然（严格单调不降）}
+
+  % Converged plateau line
+  \addplot[gold, thick, dashed, domain=1:30, samples=2] {-1286.4522};
+  \addlegendentry{收敛极大值 $-1286.45$（聚类纯度 $100.00\%$）}
+
+  % Callout for phase transition (iters 5->7)
+  \draw[->, >=Stealth, ochre, thick] (axis cs:10.5, -1415) -- (axis cs:6.3, -1350);
+  \node[font=\scriptsize, text=ochre, align=left, fill=white, inner sep=1.5pt]
+    at (axis cs:15.8, -1432) {第 5--7 轮椭圆协方差旋转对齐\\似然跃升逾 $158$ 奈特！};
+\end{axis}
+\end{tikzpicture}
+\caption{双倾斜椭圆簇（$N=360$）上 GMM-EM 的边际对数似然实测收敛曲线（直接读自 \texttt{data/\allowbreak gmm\_em.csv}）。整条轨迹严格满足 $\ln p_{\theta^{(t+1)}}(X) \ge \ln p_{\theta^{(t)}}(X)$（单步零回退），仅 8 轮即彻底对齐倾斜协方差并实现 100.00\% 聚类纯度，而 K-Means 纯度仅 55.00\%。}
+\label{fig:gmm-em-curve}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{双倾斜椭圆簇（$N=360$）实测对比与 GMM-EM 关键轮次对数似然快照}
+\label{tab:gmm-em-iters}
+\small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\textbf{GMM-EM 迭代轮次} & $t=1$ & $t=2$ & $t=5$ & $t=6$ & $t=7$ & $t=8\text{--}30$ \\
+\midrule
+边际对数似然 $\ell(\theta^{(t)})$ & $-1578.57$ & $-1514.27$ & $-1445.31$ & $-1322.18$ & $-1286.50$ & $\mathbf{-1286.45}$ \\
+\midrule
+\multicolumn{7}{@{}l@{}}{\footnotesize 最终聚类纯度对比：\quad K-Means（5 次重启最佳）$=\mathbf{55.00\%}$ \quad vs \quad GMM-EM $=\mathbf{100.00\%}$。} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{可运行的数值稳定纯 NumPy GMM-EM 引擎}
+
+下面的代码片段展示了采用 Log-Sum-Exp 技巧、\texttt{slogdet} 稳定对数行列式与 $\epsilon I$ 协方差正则的完整 GMM-EM 核心循环，并内置单调上升断言自动排错。
+
+\begin{lstlisting}[caption={数值稳定的纯 NumPy GMM-EM 实现（含 Log-Sum-Exp 与单调性断言）},label={lst:gmm-em}]
+import numpy as np
+
+def log_gaussian_pdf(X, mu, Sigma):
+    D = X.shape[1]
+    diff = X - mu
+    _, logdet = np.linalg.slogdet(Sigma)
+    invS = np.linalg.inv(Sigma)
+    quad = np.sum((diff @ invS) * diff, axis=1)
+    return -0.5 * (D * np.log(2.0 * np.pi) + logdet + quad)
+
+def fit_gmm_em(X, K=2, n_iters=30, reg=1e-6, seed=2026):
+    rng = np.random.default_rng(seed)
+    N, D = X.shape
+    pis = np.full(K, 1.0 / K)
+    mus = X[rng.choice(N, size=K, replace=False)].copy()
+    Sigmas = np.array([np.cov(X, rowvar=False) + reg * np.eye(D) for _ in range(K)])
+    history, prev_ll = [], -float("inf")
+
+    for _ in range(n_iters):
+        # E-step in log-space via Log-Sum-Exp
+        log_prob = np.column_stack(
+            [np.log(pis[k] + 1e-12) + log_gaussian_pdf(X, mus[k], Sigmas[k]) for k in range(K)]
+        )
+        m = np.max(log_prob, axis=1, keepdims=True)
+        log_norm = m + np.log(np.sum(np.exp(log_prob - m), axis=1, keepdims=True))
+        ll = float(np.sum(log_norm))
+        assert ll >= prev_ll - 1e-7, f"ELBO theorem violated: {prev_ll} -> {ll}"
+        prev_ll = ll; history.append(ll)
+        gamma = np.exp(log_prob - log_norm)
+
+        # M-step closed-form updates + diagonal ridge regularization
+        Nk = gamma.sum(axis=0)
+        pis = Nk / N
+        for k in range(K):
+            mus[k] = (gamma[:, k] @ X) / Nk[k]
+            diff = X - mus[k]
+            Sigmas[k] = (diff.T * gamma[:, k]) @ diff / Nk[k] + reg * np.eye(D)
+    return pis, mus, Sigmas, gamma, history
+\end{lstlisting}
+
+\begin{insightBox}{直通第 5 卷：从本章 EM 的 ELBO 一步跨入变分自编码器（VAE）}
+请把式~\eqref{eq:elbo-vae-form} 再读一遍：
+\[
+  \ln p_\theta(x) \;\ge\; \mathcal{L}(q, \theta) = \E_{q(z)}\big[\ln p_\theta(x \mid z)\big] - \DKL\!\big(q(z) \,\|\, p_\theta(z)\big).
+\]
+在 GMM 中，隐变量 $z \in \{1,\dots,K\}$ 只是离散有限集合，因此 E-步可以直接用贝叶斯公式算出\textbf{精确后验} $q(z) = p_\theta(z \mid x)$。但进入第 5 卷的深度生成模型后，隐变量变成了高维连续语义向量 $z \in \R^d$（例如描述一张人脸的姿态、光照与表情），解码器 $p_\theta(x \mid z)$ 是一个多层深度神经网络——此时分母积分 $p_\theta(x) = \int p_\theta(x \mid z) p(z)\,\mathrm{d}z$ 完全不可积，精确后验 $p_\theta(z \mid x)$ 根本算不出来！
+
+\textbf{变分自编码器（Variational Autoencoder, VAE）}（Kingma \& Welling, 2013）的破局之道极其干脆：既然算不出精确后验，就训练另一个神经网络\textbf{编码器} $q_\phi(z \mid x) = \mathcal{N}(\mu_\phi(x), \diag(\sigma_\phi^2(x)))$（称为\textbf{摊销变分推断，Amortized Variational Inference}）来近似它，然后用随机梯度上升（配重参数化技巧）对编码器参数 $\phi$ 和解码器参数 $\theta$ \textbf{联合最大化同一个 ELBO 目标}：
+\[
+  \max_{\theta,\, \phi}\; \underbrace{\E_{z \sim q_\phi(z \mid x)}\big[\ln p_\theta(x \mid z)\big]}_{\text{图像/信号重建项}} - \underbrace{\DKL\!\big(q_\phi(z \mid x) \,\|\, \mathcal{N}(0, I)\big)}_{\text{潜空间正则对齐项}}.
+\]
+你看，跨越三十六年的经典 EM 算法与现代深度生成模型 VAE，骨子里跳动的竟是\textbf{同一颗 ELBO 心脏}！
+\end{insightBox}
+
+\begin{extBox}{广义 EM（GEM）、变分推断与如何用 BIC 选择簇数 $K$}
+\begin{enumerate}
+  \item \textbf{广义 EM（Generalized EM, GEM）}：回头检视定理~\ref{thm:em-mono} 的三行证明——你其实并不要求 M-步必须找到 $Q(\theta \mid \theta^{(t)})$ 的全局极大值！只要找到一个使 $Q(\theta^{(t+1)} \mid \theta^{(t)}) \ge Q(\theta^{(t)} \mid \theta^{(t)})$ 的新参数（例如对非闭式 $Q$ 只走几步梯度上升），边际对数似然单调上升定理\textbf{照样严格成立}！
+  \item \textbf{如何为 GMM 自动选择分量个数 $K$？}不能直接挑边际对数似然 $\ell(\hat{\theta}_K)$ 最大的 $K$——因为多加一个高斯分量只会把似然越撑越高（直至每个点自成一簇过拟合）。实践中通常采用带模型参数个数 $p_K$ 惩罚的\textbf{贝叶斯信息准则（BIC）}或\textbf{赤池信息准则（AIC）}：
+  \[
+    \operatorname{BIC}(K) = -2\ell(\hat{\theta}_K) + p_K \ln N, \qquad
+    \operatorname{AIC}(K) = -2\ell(\hat{\theta}_K) + 2 p_K,
+  \]
+  其中 $D$ 维满协方差 $K$ 分量 GMM 的独立参数个数为 $p_K = (K - 1) + K D + K \frac{D(D+1)}{2}$，挑选使 $\operatorname{BIC}(K)$ 最小的 $K$ 即可在拟合优度与模型复杂度之间取得优雅平衡。
+\end{enumerate}
+\end{extBox}
+
+% ============================================================
+\section{本章习题}\label{sec:ch6-ex}
+% ============================================================
+
+\exTier{A 层：基础巩固}{掌握 K-Means/GMM 参数计数、初始化与奇异性诊断}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}]
+  \item \textbf{GMM 独立参数量计数与自由度对比}：在特征维度 $D = 10$、簇数 $K = 4$ 的数据上，分别计算以下三种聚类/混合模型所需的独立连续参数总数：（1）K-Means；（2）对角协方差 GMM（每个 $\Sigma_k = \diag(\sigma_{k1}^2, \dots, \sigma_{kD}^2)$）；（3）满协方差 GMM（每个 $\Sigma_k$ 为任意对称正定阵）。由此解释为何在高维小样本（$N$ 较小、$D$ 较大）场景下常优先选用对角协方差或球形协方差 GMM。
+  \exHint{别忘了混合权重 $\pi_1, \dots, \pi_K$ 受 $\sum_k \pi_k = 1$ 约束只有 $K-1$ 个自由度，对称 $D\times D$ 矩阵有 $D(D+1)/2$ 个独立元素。}
+
+  \item \textbf{K-Means++ 抽样概率手算}：一维轴上有 4 个样本点 $x = (0,\, 1,\, 4,\, 6)$。假设 K-Means++ 的第一步随机抽中了 $x_1 = 0$ 作为第一个质心 $\mu_1$。（1）计算其余三个样本被选为第二个质心 $\mu_2$ 的精确概率；（2）若第二步恰好抽中 $x_4 = 6$，继续计算剩余两个点被选为第三个质心 $\mu_3$ 的精确概率。
+  \exHint{第二步计算到已有集合 $\{0, 6\}$ 的\textbf{最短距离} $D(x_i) = \min(|x_i - 0|, |x_i - 6|)$，再按 $D(x_i)^2$ 归一化。}
+\end{enumerate}
+
+\exTier{B 层：方法与推导}{熟练手算 K-Means 迭代、伯努利混合 EM 与 ELBO 拆分}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{硬币投掷（伯努利混合）模型的 EM 推导}：设有两枚质地不均的硬币 $A$ 与 $B$，正面朝上概率分别为 $\theta_A, \theta_B$，每次实验等概率选一枚硬币（$\pi_A = \pi_B = 0.5$ 已知）连续抛掷 $L$ 次，但观测者只记录到第 $i$ 轮出现的正面次数 $h_i$（$i = 1, \dots, N$），不知道选的是哪枚硬币（隐变量 $z_i \in \{A, B\}$）。请完整推导该模型的：（1）E-步后验响应度 $\gamma_{iA} = P(z_i = A \mid h_i; \theta_A^{(t)}, \theta_B^{(t)})$；（2）M-步闭式更新公式 $\theta_A^{(t+1)}, \theta_B^{(t+1)}$。
+  \exHint{给定硬币 $k$，$P(h_i \mid z_i = k) = \binom{L}{h_i}\theta_k^{h_i}(1-\theta_k)^{L-h_i}$；在 E-步分子分母中组合数 $\binom{L}{h_i}$ 会直接约去。}
+
+  \item \textbf{例~\ref{ex:gmm-hand} 的对称检验与硬 K-Means 对比}：在例~\ref{ex:gmm-hand} 的一维数据 $x = (-2, -1, 2, 3)$ 上，以相同初始中心 $\mu^{(0)} = (-1, 1)$ 运行标准 K-Means（Lloyd 算法）。（1）写出全部迭代轮次的指派结果、质心变化与最终目标值 $J$；（2）解释为何在此例中 K-Means 1 轮即收敛到最终簇中心 $(-1.5, 2.5)$，而 GMM-EM 第 1 轮给出的是 $(-1.4875, 2.2683)$——两者差异的来源是什么？
+  \exHint{注意样本 $-1$ 在软响应度下仍有 $11.92\%$ 概率归属右簇，从而把右簇均值略微向左拉了一点。}
+\end{enumerate}
+
+\exTier{C 层：理论证明与反例构造}{深化 ELBO 变分性质、EM 驻点与非球形 K-Means 边界}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{ELBO 在切点处的一阶梯度一致性}：设对数似然 $\ell(\theta) = \ln p_\theta(x)$ 与下界 $g(\theta) := \mathcal{L}(q^{(t+1)}, \theta)$（其中 $q^{(t+1)}(z) = p_{\theta^{(t)}}(z \mid x)$）均在 $\theta^{(t)}$ 处可微。证明在切点 $\theta = \theta^{(t)}$ 处，两者不仅函数值相等，而且\textbf{一阶梯度也完全相等}：
+  \[
+    \nabla_\theta \mathcal{L}\big(q^{(t+1)}, \theta\big)\Big|_{\theta = \theta^{(t)}} = \nabla_\theta \ln p_\theta(x)\Big|_{\theta = \theta^{(t)}}.
+  \]
+  由此推论：若 $\theta^*$ 是 EM 算法的不动点（在无约束内部达到 M-步极值），则 $\theta^*$ 必为真实对数似然的驻点 $\nabla_\theta \ell(\theta^*) = 0$。
+  \exHint{定义差值函数 $d(\theta) := \ln p_\theta(x) - \mathcal{L}(q^{(t+1)}, \theta) = \DKL(q^{(t+1)} \,\|\, p_\theta(z\mid x))$。由于 $d(\theta) \ge 0$ 恒成立且 $d(\theta^{(t)}) = 0$，故 $\theta^{(t)}$ 是可微非负函数 $d(\theta)$ 的无约束全局极小值点，必有 $\nabla_\theta d(\theta^{(t)}) = 0$！}
+
+  \item \textbf{高斯混合马氏距离决策边界}：对于 $K = 2$ 个等权重（$\pi_1 = \pi_2 = 0.5$）二维高斯分量 $\mathcal{N}(\mu_1, \Sigma_1)$ 与 $\mathcal{N}(\mu_2, \Sigma_2)$，推导后验边界 $\gamma_{i1} = \gamma_{i2} = 0.5$ 的方程。证明：（1）当两簇共享同一非球形协方差阵 $\Sigma_1 = \Sigma_2 = \Sigma$ 时，决策边界仍是\textbf{直线}（仿射超平面），但法向量变为 $\Sigma^{-1}(\mu_1 - \mu_2)$（不再垂直于质心连线 $\mu_1 - \mu_2$！）；（2）当 $\Sigma_1 \neq \Sigma_2$ 时，决策边界一般为二次曲线（椭圆、抛物线或双曲线）。
+  \exHint{化简对数似然比 $\ln \mathcal{N}(x\mid \mu_1, \Sigma_1) = \ln \mathcal{N}(x\mid \mu_2, \Sigma_2)$，观察二次项 $x^\top(\Sigma_2^{-1} - \Sigma_1^{-1})x$ 何时相消。}
+\end{enumerate}
+
+\exTier{D 层：编程实现与实验验证}{亲手实现 K-Means++、BIC 选簇与协方差奇异复现}
+
+\begin{enumerate}[label=\textbf{6.\arabic*}, resume]
+  \item \textbf{K-Means++ 实现与多重启稳定性对比}：用纯 NumPy 实现 K-Means++ 初始化函数与 Lloyd 算法。构造 5 个分离的二维高斯团簇（每簇 60 点，$N = 300, K = 5$），分别运行 50 次“完全随机均匀初始化 K-Means”与 50 次“K-Means++ 初始化”，统计并比较两者的：（1）最终惯量 $J$ 的均值、中位数与最差值；（2）收敛所需平均迭代轮数。验证 K-Means++ 显著减少落入劣质局部极小值的频率。
+  \exHint{注意 K-Means++ 抽样概率 $p = D^2 / \sum D^2$ 可直接传入 \texttt{rng.choice(N, p=p)}，已选点距离为 $0$ 故绝不会被重复抽中。}
+
+  \item \textbf{GMM-EM 协方差类型对比与 BIC 自动选 $K$ 实验}：基于代码~\ref{lst:gmm-em} 与 \texttt{code/\allowbreak vol4\_experiments.py} 中的倾斜双椭圆数据（$N = 360$）：（1）将代码~\ref{lst:gmm-em} 修改为对角协方差版（只保留 $\Sigma_k$ 对角线），观察聚类纯度相比满协方差版的 $100.00\%$ 下降了多少，并从几何上解释原因；（2）在满协方差 GMM 上遍历 $K \in \{1, 2, 3, 4, 5\}$，计算每组的最终对数似然与 $\operatorname{BIC}(K)$，验证虽然 $\ell(\hat{\theta}_K)$ 随 $K$ 增大持续上升，但 $\operatorname{BIC}(K)$ 精准在真实簇数 $K = 2$ 处取得全局最小值！
+  \exHint{二维满协方差 GMM 独立参数个数为 $p_K = (K-1) + 2K + 3K = 6K - 1$；每个 $K$ 建议跑 3 次随机种子取最大似然以避免偶然局部极值。}
+\end{enumerate}
