@@ -275,6 +275,16 @@ def exp4_mini_gpt_reverse():
     opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-2)
     X_val, Y_val = make_batch(256)
 
+    @torch.no_grad()
+    def eval_autoregressive(m, src_with_sep, tgt):
+        """True autoregressive greedy decoding: feed ONLY [src, sep] and generate token by token."""
+        cur = src_with_sep.clone()
+        for _ in range(tgt.shape[1]):
+            next_tok = m(cur)[:, -1, :].argmax(dim=-1, keepdim=True)
+            cur = torch.cat([cur, next_tok], dim=1)
+        gen = cur[:, -tgt.shape[1]:]
+        return float((gen == tgt).all(dim=-1).float().mean().item() * 100.0)
+
     with open(os.path.join(OUT_DIR, "transformer_train.csv"), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["step", "loss", "val_tok_acc", "val_seq_acc"])
@@ -289,10 +299,11 @@ def exp4_mini_gpt_reverse():
                     v_pred = v_logits.argmax(dim=-1)
                     v_tgt = Y_val[:, seq_half:]
                     tok_acc = float((v_pred == v_tgt).float().mean().item() * 100.0)
-                    seq_acc = float((v_pred == v_tgt).all(dim=-1).float().mean().item() * 100.0)
+                    # True autoregressive greedy decoding exact-match sequence accuracy!
+                    seq_acc = eval_autoregressive(model, X_val[:, :seq_half + 1], v_tgt)
                 wr.writerow([step, f"{loss.item():.5f}", f"{tok_acc:.2f}", f"{seq_acc:.2f}"])
-                if step in (0, 80, 160, 240, 320):
-                    print(f"[Ch4] Mini-GPT step={step:3d}: loss={loss.item():.4f}, val_tok_acc={tok_acc:.2f}%, val_seq_acc={seq_acc:.2f}%")
+                if step in (0, 20, 40, 60, 80, 160, 240, 320):
+                    print(f"[Ch4] Mini-GPT step={step:3d}: loss={loss.item():.4f}, tf_tok_acc={tok_acc:.2f}%, ar_seq_acc={seq_acc:.2f}%")
             opt.zero_grad()
             loss.backward()
             opt.step()

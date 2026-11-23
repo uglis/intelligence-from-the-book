@@ -178,6 +178,30 @@ def exp6_leakage_and_logreg():
         if lam in (0.0, 0.10):
             saved[lam] = (th, vh)
 
+    # Part 3: Independent held-out test set (N=180) evaluated ONCE on validation-selected lam=0.10
+    n_te_per = 90
+    X0_te = rng.multivariate_normal([-1.0, -0.8], [[1.3, 0.5], [0.5, 1.2]], size=n_te_per)
+    X1_te = rng.multivariate_normal([1.0, 0.8], [[1.2, -0.4], [-0.4, 1.3]], size=n_te_per)
+    X_te_noise = rng.normal(0, 1, size=(2 * n_te_per, 28)) * scales
+    X_te_raw = np.hstack([np.vstack([X0_te, X1_te]), X_te_noise])
+    y_te = np.concatenate([np.zeros(n_te_per), np.ones(n_te_per)])
+    X_te = (X_te_raw - mu) / sd  # strictly reuse training scaler!
+    w_best, b_best, _, _ = fit(X_tr, y_tr, X_va, y_va, lr=0.25, lam=0.10, epochs=800)
+    probs_te = sigmoid(X_te @ w_best + b_best)
+    p_te = (probs_te >= 0.5).astype(float)
+    acc_te = float(np.mean(p_te == y_te) * 100.0)
+    te_bce = bce(X_te, y_te, w_best, b_best, 0.0)
+    tp_te = int(np.sum((p_te == 1) & (y_te == 1)))
+    fp_te = int(np.sum((p_te == 1) & (y_te == 0)))
+    fn_te = int(np.sum((p_te == 0) & (y_te == 1)))
+    tn_te = int(np.sum((p_te == 0) & (y_te == 0)))
+    f1_te = 2 * tp_te / max(2 * tp_te + fp_te + fn_te, 1)
+    hits_te = (p_te == y_te).astype(float)
+    rng_b = np.random.default_rng(2026)
+    boot_te = rng_b.choice(hits_te, size=(5000, len(hits_te)), replace=True).mean(axis=1) * 100.0
+    ci_lo, ci_hi = np.percentile(boot_te, [2.5, 97.5])
+    print(f"[Ch6] Held-out Test (N=180, lam=0.10): acc={acc_te:.2f}% ({tp_te+tn_te}/180), 95% Boot CI=[{ci_lo:.2f}%, {ci_hi:.2f}%], bce={te_bce:.4f}, TP={tp_te},FP={fp_te},FN={fn_te},TN={tn_te}, F1={f1_te:.4f}")
+
     with open(os.path.join(OUT_DIR, "logreg_curve.csv"), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["epoch", "tr0", "va0", "tr01", "va01"])

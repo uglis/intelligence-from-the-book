@@ -48,9 +48,9 @@ def exp1_seed_cherrypick_and_mcnemar():
 
 
 def exp2_calibration_and_conformal():
-    """Ch 2: Overconfident logits -> Temperature Scaling ECE drop + Split Conformal Prediction coverage."""
+    """Ch 2: Overconfident logits -> Temperature Scaling (on Z_val) + strictly independent Split Conformal (on Z_cal)."""
     rng = np.random.default_rng(2026)
-    N_cal, N_te, K = 500, 1000, 4
+    N_val, N_cal, N_te, K = 500, 500, 1000, 4
     # Generate true class probabilities and overconfident logits (scaled by 3.2x!)
     def make_split(n):
         z_true = rng.normal(0, 1.3, size=(n, K))
@@ -63,8 +63,10 @@ def exp2_calibration_and_conformal():
         logits = 3.2 * z_true
         return logits, y
 
-    Z_cal, y_cal = make_split(N_cal)
+    # Strictly separate splits: Z_val for temperature fitting, Z_cal for conformal quantile, Z_te for test!
+    Z_val, y_val = make_split(N_val)
     Z_te, y_te = make_split(N_te)
+    Z_cal, y_cal = make_split(N_cal)
 
     def softmax_np(Z):
         Zs = Z - Z.max(axis=1, keepdims=True)
@@ -88,11 +90,11 @@ def exp2_calibration_and_conformal():
                 rows.append((0.5 * (bins[b] + bins[b + 1]), avg_c, avg_a, cnt))
         return float(ece), rows
 
-    # Fit optimal temperature T* on Z_cal minimizing NLL
+    # Fit optimal temperature T* strictly on Z_val minimizing NLL
     best_T, best_nll = 1.0, float("inf")
     for T in np.linspace(0.5, 5.0, 451):
-        P = softmax_np(Z_cal / T)
-        nll = float(-np.mean(np.log(P[np.arange(N_cal), y_cal] + 1e-12)))
+        P = softmax_np(Z_val / T)
+        nll = float(-np.mean(np.log(P[np.arange(N_val), y_val] + 1e-12)))
         if nll < best_nll:
             best_nll, best_T = nll, float(T)
 
@@ -115,17 +117,17 @@ def exp2_calibration_and_conformal():
             if mid in raw_map and mid in cal_map:
                 wr.writerow([f"{mid:.2f}", f"{raw_map[mid]:.4f}", f"{cal_map[mid]:.4f}"])
 
-    # Split Conformal Prediction (alpha=0.10 -> guaranteed >= 90% coverage!)
+    # Split Conformal Prediction on independent Z_cal (alpha=0.10 -> exact k = ceil((n+1)(1-alpha)) = 451st order stat!)
     alpha = 0.10
     P_cal_split = softmax_np(Z_cal / best_T)
     scores_cal = 1.0 - P_cal_split[np.arange(N_cal), y_cal]
-    q_level = math.ceil((N_cal + 1) * (1.0 - alpha)) / N_cal
-    q_hat = float(np.quantile(scores_cal, q_level, method="higher"))
+    k_rank = math.ceil((N_cal + 1) * (1.0 - alpha))
+    q_hat = float(np.sort(scores_cal)[k_rank - 1])
     sets_te = (1.0 - P_cal) <= q_hat
     cov = float(np.mean(sets_te[np.arange(N_te), y_te]) * 100.0)
     avg_size = float(sets_te.sum(axis=1).mean())
     print(f"[Ch2] Temp Scaling T*={best_T:.2f}: Acc {acc_raw:.2f}%=={acc_cal:.2f}%, ECE {ece_raw:.4f}->{ece_cal:.4f}, NLL {nll_raw:.4f}->{nll_cal:.4f}")
-    print(f"[Ch2] Split Conformal (alpha=0.10): q_hat={q_hat:.4f}, empirical coverage={cov:.2f}% (>=90%), avg_set_size={avg_size:.2f}")
+    print(f"[Ch2] Split Conformal (independent N_cal={N_cal}, alpha=0.10, exact k={k_rank}): q_hat={q_hat:.4f}, empirical coverage={cov:.2f}% (>=90%), avg_set_size={avg_size:.2f}")
 
 
 def exp3_adversarial_fgsm_pgd():

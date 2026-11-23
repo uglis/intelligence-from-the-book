@@ -458,15 +458,15 @@ Guo 等人（ICML 2017）在一项里程碑式的实证研究中发现了一个�
 
 \subsection{实测验证与完整实现代码}
 
-回到 \texttt{exp2\_calibration\_and\_conformal} 的四分类实验：我们取校准集规模 $n = N_{\text{cal}} = 500$、目标误覆盖率 $\alpha = 0.10$（要求覆盖率 $\ge 90\%$）。
+回到 \texttt{exp2\_calibration\_and\_conformal} 的四分类实验：为严格满足定理 \ref{thm:conformal-coverage} 中“打分函数必须独立于共形校准集”的前提，我们在脚本中划出三份\textbf{两两完全独立}的数据集——验证集 $Z_{\text{val}}$（$500$ 条，专用于拟合温度 $T^* = 3.35$）、共形校准集 $Z_{\text{cal}}$（$n = N_{\text{cal}} = 500$ 条，全程不参与温度拟合，专用于求共形阈值 $\hat{q}$）以及只读测试集 $Z_{\text{te}}$（$N_{\text{te}} = 1000$ 条）。取目标误覆盖率 $\alpha = 0.10$（要求覆盖率 $\ge 90\%$）：
 \begin{enumerate}
-  \item \textbf{理论计算}：$k = \lceil (500 + 1)(1 - 0.10) \rceil = \lceil 450.9 \rceil = 451$，即取校准集非共形分数的 $451 / 500 = 0.902$ 分位数。定理 \ref{thm:conformal-coverage} 保证真实边缘覆盖率严格落在 $[90.00\%,\, 90.20\%]$ 之间。
-  \item \textbf{实测结果}（$N_{\text{te}} = 1000$）：温度校准后的模型在校准集上求得阈值 \textbf{$\hat{q} = 0.8692$}（等价于：对每条新测试样本，凡是校准后预测概率 $\hat{p}_y(x) \ge 1 - 0.8692 = 0.1308$ 的类别全部收入预测集合 $\mathcal{C}(x)$）。在 $1000$ 条独立测试样本上，预测集的经验覆盖率达到 \textbf{$90.60\%$（$\ge 90\%$）}，平均预测集大小为 \textbf{$2.40$ 个类别}（在四分类单点 Top-1 准确率仅 $56.50\%$ 的高噪声问题上，仅靠多给 $1.4$ 个备选标签就将命中保障从 $56.5\%$ 拉升至 $90\%$ 以上！）。
+  \item \textbf{理论计算与精确次序统计量}：$k = \lceil (500 + 1)(1 - 0.10) \rceil = \lceil 450.9 \rceil = 451$，故阈值 $\hat{q}$ 严格等于将 $500$ 个校准分数升序排列后的\textbf{第 $451$ 小值}（Python 零基索引 \texttt{np.sort(scores\_cal)[k - 1]}，即索引 \texttt{450}）。定理 \ref{thm:conformal-coverage} 保证真实边缘覆盖率严格落在 $[90.00\%,\, 90.20\%)$ 之间。
+  \item \textbf{实测结果}（$N_{\text{te}} = 1000$）：利用已在独立 $Z_{\text{val}}$ 上固定好的温度 $T^* = 3.35$，我们在全新的 $500$ 条独立校准集 $Z_{\text{cal}}$ 上求得精确第 $451$ 小阈值 \textbf{$\hat{q} = 0.8774$}（等价于：对每条新测试样本，凡是校准后预测概率 $\hat{p}_y(x) \ge 1 - 0.8774 = 0.1226$ 的类别全部收入预测集合 $\mathcal{C}(x)$）。在 $1000$ 条独立测试样本上，预测集的经验覆盖率达到 \textbf{$91.40\%$（$\ge 90\%$）}，平均预测集大小为 \textbf{$2.47$ 个类别}（在四分类单点 Top-1 准确率仅 $56.50\%$ 的高噪声问题上，仅靠多给约 $1.5$ 个备选标签就将命中保障从 $56.5\%$ 稳稳拉升至 $90\%$ 以上！）。
 \end{enumerate}
 
-下面给出一段自包含、可直接运行的 Python/NumPy 核心实现，串联 ECE 计算、温度缩放拟合与分裂共形预测：
+下面给出一段自包含、可直接运行的 Python/NumPy 核心实现，串联 ECE 计算、独立验证集温度缩放与精确次序统计量分裂共形预测：
 
-\begin{lstlisting}[caption={ECE、温度缩放与分裂共形预测的完整 NumPy 实现}]
+\begin{lstlisting}[caption={ECE、独立温度缩放与精确分裂共形预测的完整 NumPy 实现}]
 import math
 import numpy as np
 
@@ -487,28 +487,30 @@ def compute_ece(probs: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
             ece += mask.mean() * abs(acc[mask].mean() - conf[mask].mean())
     return float(ece)
 
-def fit_temperature(z_cal: np.ndarray, y_cal: np.ndarray) -> float:
+def fit_temperature(z_val: np.ndarray, y_val: np.ndarray) -> float:
     best_t, best_nll = 1.0, float("inf")
-    idx = np.arange(len(y_cal))
+    idx = np.arange(len(y_val))
     for t in np.linspace(0.5, 5.0, 451):
-        p = softmax(z_cal / t)
-        nll = float(-np.mean(np.log(p[idx, y_cal] + 1e-12)))
+        p = softmax(z_val / t)
+        nll = float(-np.mean(np.log(p[idx, y_val] + 1e-12)))
         if nll < best_nll:
             best_nll, best_t = nll, float(t)
     return best_t
 
 def split_conformal_predict(p_cal: np.ndarray, y_cal: np.ndarray, p_test: np.ndarray, alpha: float = 0.10):
+    """p_cal MUST come from a model/temperature fitted independently of (p_cal, y_cal)."""
     n = len(y_cal)
     scores_cal = 1.0 - p_cal[np.arange(n), y_cal]
-    q_level = math.ceil((n + 1) * (1.0 - alpha)) / n
-    q_hat = float(np.quantile(scores_cal, min(1.0, q_level), method="higher"))
+    k = math.ceil((n + 1) * (1.0 - alpha))  # 1-indexed order statistic
+    q_hat = float(np.sort(scores_cal)[k - 1]) if k <= n else float("inf")
     pred_sets = (1.0 - p_test) <= q_hat  # boolean mask of shape (N_test, K)
     return q_hat, pred_sets
 \end{lstlisting}
 
-\begin{failBox}{模型校准与共形预测的三大致命误用}
+\begin{failBox}{模型校准与共形预测的四大隐蔽误用（含一个极常见的 NumPy 坑！）}
 \begin{enumerate}
-  \item \textbf{在测试集上拟合温度 $T^*$ 或共形阈值 $\hat{q}$（直接数据泄漏）}：若把测试集当校准集用，不仅 $\ECE$ 会被乐观低估，共形预测的可交换性也会被彻底破坏（因为测试点参与了阈值 $\hat{q}$ 的选择）。规范做法是把原始验证集一分为二：一份用于超参选择，另一份专供校准与共形分位数估计，测试集始终只读。
+  \item \textbf{复用了同一份数据既调温度 $T^*$ 又算共形阈值 $\hat{q}$（或在测试集上校准）}：不仅测试集绝不可参与校准，连“先在 $Z_{\text{cal}}$ 上拟合温度 $T^*$、再用同一批 $Z_{\text{cal}}$ 算共形分位数”也会破坏打分函数与校准集的独立性！规范做法必须划分独立的三份留出集：验证集调超参/温度 $T^*$、独立校准集算 $\hat{q}$、只读测试集做终检。
+  \item \textbf{\texttt{np.quantile(..., method="higher")} 差一（Off-by-One）陷阱}：许多工程代码顺手写 \texttt{q\_level = ceil((n+1)*(1-alpha)) / n} 再调用 \texttt{np.quantile(scores, q\_level, method="higher")}。但 NumPy 内部计算下标为 $\lceil (n-1)\cdot q_{\text{level}} \rceil$！当 $n=500,\alpha=0.10$ 时，$q_{\text{level}}=0.902$，$\lceil 499 \times 0.902 \rceil = 451$（0-indexed），实际取到了\textbf{第 $452$ 小}而非第 $451$ 小！最稳妥零误差的做法是直接排序取精确次序统计量：\texttt{np.sort(scores)[k - 1]}。
   \item \textbf{在协变量偏移（Covariate Shift）或非平稳时间序列上硬套共形预测}：定理 \ref{thm:conformal-coverage} 唯一但绝对不可逾越的前提是\textbf{可交换性}。当线上部署面临分布漂移（例如白天训练、雨夜测试，或金融行情体制切换）时，标准分裂共形预测的覆盖率会显著跌破 $1-\alpha$！此时必须升级为加权共形预测（Weighted Conformal Prediction，利用密度比 $w(x) = p_{\text{test}}(x)/p_{\text{cal}}(x)$ 重加权）或在线自适应共形推理（Adaptive Conformal Inference, ACI）。
   \item \textbf{把校准后的 Softmax 置信度误当成认知不确定性}：温度缩放只在\textbf{分布内}压缩了过度自信；对分布外（OOD）样本，ReLU 线性区域在远离训练流形处仍可能输出极高逻辑值（Hein et al., CVPR 2019）。生产系统中应当将“能量分数 OOD 拒答”与“温度缩放 + 共形预测集”级联使用，而不能只看校准后的最大概率。
 \end{enumerate}

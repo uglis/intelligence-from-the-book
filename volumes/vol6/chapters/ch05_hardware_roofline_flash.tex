@@ -11,7 +11,7 @@
 本章将把计算机组成原理、操作系统存储层次与现代 GPU 微架构无缝贯通，为读者建立四块坚实的 AI 系统基石：
 \begin{enumerate}
   \item \textbf{现代 GPU 硬件与内存墙}：从 CPU 的低延迟设计切入 GPU 的高吞吐 SIMT 架构，定量对比片上 SRAM（$\sim 20\,\mathrm{MB}$、$\sim 19\,\mathrm{TB/s}$）与片外 HBM（$\sim 80\,\mathrm{GB}$、$\sim 3.35\,\mathrm{TB/s}$）之间的数量级鸿沟。
-  \item \textbf{Roofline 性能模型与 Prefill/Decode 分化定理}：以算术强度 $\mathrm{AI} = \mathrm{FLOPs}/\mathrm{Bytes}$ 与拐点 $I^* = P_{\mathrm{peak}}/B_{\mathrm{HBM}}$ 为尺，严格证明为何 Prefill 处于计算受限区而单词元 Decode 深陷访存受限区，并基于 \texttt{data/roofline.csv} 完整复现实测曲线。
+  \item \textbf{Roofline 性能模型与 Prefill/Decode 分化定理}：以算术强度 $\mathrm{AI} = \mathrm{FLOPs}/\mathrm{Bytes}$ 与拐点 $I^* = P_{\mathrm{peak}}/B_{\mathrm{HBM}}$ 为尺，严格证明为何 Prefill 处于计算受限区而单词元 Decode 深陷访存受限区，并基于 \texttt{data/roofline.csv} 绘制 H100 规格下的解析 Roofline 曲线。
   \item \textbf{大模型训练显存账本（$16\Phi$ 法则与 $\sqrt{L}$ 检查点定理）}：逐字节核算混合精度 AdamW 训练的静态显存与动态激活显存，并利用均值不等式证明最优 $\sqrt{L}$ 激活重计算如何以约 $33\%$ 的额外算力换取从 $O(L)$ 到 $O(\sqrt{L})$ 的显存骤降。
   \item \textbf{FlashAttention 数学核心与在线 Softmax 分块证明}：用数学归纳法严格证明分块在线 Softmax 递推与全局标准注意力逐元素恒等，且仅需 $O(B_r B_c)$ 片上 SRAM 瓦片；最后用纯 NumPy 实验验证误差低至 $3.89\times 10^{-16}$ 的双精度机器零。
 \end{enumerate}
@@ -235,13 +235,13 @@
 \end{itemize}
 \end{insightBox}
 
-\subsection{实测验证：H100 级 BF16 线性层的 Roofline 曲线与利用率攀升}
+\subsection{解析模型画像：H100 级 BF16 线性层的 Roofline 曲线与利用率攀升}
 
-配套脚本 \texttt{code/vol6\_experiments.py} 中的实验 5（\texttt{exp5\_flash\_online}）精确扫描了 $T \in \{1, 2, 4, \dots, 1024\}$ 下 $4096 \times 4096$ BF16 线性层在 H100 规格上的算术强度、可达算力与利用率，结果保存在 \texttt{data/roofline.csv} 中。表~\ref{tab:roofline-data} 与图~\ref{fig:roofline-exp} 直接展示了这一从 $0.34\%$ 到 $100\%$ 的悬殊跨越。
+配套脚本 \texttt{code/vol6\_experiments.py} 中的实验 5（\texttt{exp5\_flash\_online}）依据 Roofline 理论公式扫描了 $T \in \{1, 2, 4, \dots, 1024\}$ 下 $4096 \times 4096$ BF16 线性层在 H100 标称规格上的算术强度、理论可达算力上限与利用率，结果保存在 \texttt{data/roofline.csv} 中（注意区分三类不同证据：本节表~\ref{tab:roofline-data} 与图~\ref{fig:roofline-exp} 属于\textbf{理论 Roofline 上界估算}，第 5.4 节的分块代码属于\textbf{数值等价性验证}，而真实 GPU 硬件测量还需借助 \texttt{torch.profiler} 或 NVIDIA Nsight Compute 记录实际核函数耗时与 HBM 读写字节）。
 
 \begin{table}[htbp]
 \centering
-\caption{H100 规格下 $4096 \times 4096$ BF16 线性层的 Roofline 实测数据节选（来源：\texttt{data/roofline.csv}）。}
+\caption{H100 标称规格下 $4096 \times 4096$ BF16 线性层的 Roofline 理论估算表节选（来源：\texttt{data/roofline.csv}）。}
 \label{tab:roofline-data}
 \footnotesize
 \setlength{\tabcolsep}{4.2pt}
@@ -293,7 +293,7 @@ $1024$ & $682.67$ & $989.00$ & $100.00\%$ & 计算受限 & 长提示 Prefill / �
     % Real CSV points
     \addplot[teal, only marks, mark=*, mark size=2.1pt, mark options={fill=tealLight, draw=tealDark, thick}]
       table[col sep=comma, x=ai, y=achieved_tflops] {data/roofline.csv};
-    \addlegendentry{实测点 (\texttt{roofline.csv})}
+    \addlegendentry{理论估算点 (\texttt{roofline.csv})}
     % Annotations
     \node[font=\tiny\sffamily, color=ochre, anchor=west] at (axis cs:1.35, 3.4) {$T=1$ ($0.34\%$)};
     \node[font=\tiny\sffamily, color=tealDark, anchor=south] at (axis cs:520, 1250) {$T=512$ ($100\%$)};
@@ -328,7 +328,7 @@ $1024$ & $682.67$ & $989.00$ & $100.00\%$ & 计算受限 & 长提示 Prefill / �
     \node[font=\tiny\sffamily, color=tealDark, anchor=north east] at (axis cs:1250, 94) {饱和区};
   \end{axis}
 \end{tikzpicture}
-\caption{基于 \texttt{data/roofline.csv} 实测数据绘制的 $4096\times 4096$ BF16 线性层性能画像。(a) 对数 Roofline 图清楚区分了斜率为 1 的 HBM 带宽斜坡与水平算力屋顶；(b) GPU 利用率在 $T \le 32$ 时长期徘徊在 $10\%$ 以下，直至 $T^* \approx 345$ 后方才真正触顶。}
+\caption{基于 \texttt{data/roofline.csv} 理论估算数据绘制的 $4096\times 4096$ BF16 线性层性能上界画像。(a) 对数 Roofline 图清楚区分了斜率为 1 的 HBM 带宽斜坡与水平算力屋顶；(b) 理论 GPU 利用率在 $T \le 32$ 时长期徘徊在 $10\%$ 以下，直至 $T^* \approx 345$ 后方才真正触顶。}
 \label{fig:roofline-exp}
 \end{figure}
 

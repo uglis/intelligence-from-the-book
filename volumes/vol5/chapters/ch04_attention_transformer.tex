@@ -535,13 +535,13 @@ class MiniGPT(nn.Module):
         return self.head(self.ln_f(x))
 \end{lstlisting}
 
-我们配置 $d_{\text{model}} = 48,\; H = 4$（单头维度 $d_h = 12$）、$L = 2$ 层，采用 AdamW（$\eta = 2\times 10^{-3},\; \lambda = 10^{-2}$）、批大小 $64$ 在线采样训练 $320$ 步，并在 $256$ 条独立验证序列上追踪两项指标：逐词准确率（\texttt{val\_tok\_acc}）与\textbf{整条 6 词答案全部答对的精确匹配率}（\texttt{val\_seq\_acc}）。实测数据 \texttt{data/transformer\_train.csv} 记录了极具戏剧性的“顿悟式”收敛（见图~\ref{fig:minigpt-train}）：
+我们配置 $d_{\text{model}} = 48,\; H = 4$（单头维度 $d_h = 12$）、$L = 2$ 层，采用 AdamW（$\eta = 2\times 10^{-3},\; \lambda = 10^{-2}$）、批大小 $64$ 在线采样训练 $320$ 步，并在 $256$ 条独立验证序列上追踪两项严格区分的指标：\textbf{教师强制（teacher-forcing）逐词准确率}（\texttt{val\_tok\_acc}）与\textbf{真实自回归贪心生成的整句精确匹配率}（\texttt{val\_seq\_acc}——仅向模型喂入原序列与分隔符 \texttt{[src, sep]}，由模型自己逐词自回归解码 6 步，全程绝不泄露任何真实答案前缀！）。实测数据 \texttt{data/transformer\_train.csv} 记录了极具戏剧性的“顿悟式”收敛（见图~\ref{fig:minigpt-train}）：
 \begin{itemize}
-  \item \textbf{第 0 步（随机初始化）}：交叉熵损失 \texttt{2.6166}（接近 $\ln 12 \approx 2.485$ 的盲猜基线），逐词准确率仅 \texttt{8.33\%}，整句精确率 \texttt{0.00\%}；
-  \item \textbf{第 20 步}：损失降至 \texttt{2.0962}，逐词准确率升至 \texttt{34.38\%}，但 6 词全对率仍为 \texttt{0.00\%}（模型还在摸索镜像位置索引）；
-  \item \textbf{第 40 步（相变跃迁！）}：一旦注意力头锁定了“位置 $6+k$ 对齐位置 $5-k$”的复制电路，损失瞬间暴跌至 \texttt{0.2933}，逐词准确率飙升至 \texttt{99.87\%}，整句精确率一举跃上 \texttt{99.22\%}；
-  \item \textbf{第 60--80 步}：损失进一步跌破 \texttt{0.0321} 与 \texttt{0.0149}，验证集逐词与整句精确率双双锁死在 \textbf{\texttt{100.00\%}}；
-  \item \textbf{第 320 步}：交叉熵损失收敛至 \texttt{0.0018}，整句准确率稳稳保持 \textbf{\texttt{100.00\%}}——一个参数量不足 6 万的纯手写迷你 GPT，彻底掌握了任意未见 6 位数序列的精确倒序复制！
+  \item \textbf{第 0 步（随机初始化）}：交叉熵损失 \texttt{2.6166}（接近 $\ln 12 \approx 2.485$ 的盲猜基线），逐词准确率仅 \texttt{8.33\%}，自回归整句精确率 \texttt{0.00\%}；
+  \item \textbf{第 20 步}：损失降至 \texttt{2.0962}，逐词准确率升至 \texttt{34.38\%}，但自回归 6 词全对率仍为 \texttt{0.00\%}（模型还在摸索镜像位置索引）；
+  \item \textbf{第 40 步（相变跃迁！）}：一旦注意力头锁定了“位置 $6+k$ 对齐位置 $5-k$”的复制电路，损失瞬间暴跌至 \texttt{0.2933}，逐词准确率飙升至 \texttt{99.87\%}，真实自回归整句精确率一举跃上 \texttt{99.22\%}；
+  \item \textbf{第 60--80 步}：损失进一步跌破 \texttt{0.0321} 与 \texttt{0.0149}，教师强制逐词准确率与真实自回归整句精确率双双锁死在 \textbf{\texttt{100.00\%}}；
+  \item \textbf{第 320 步}：交叉熵损失收敛至 \texttt{0.0018}，自回归整句准确率稳稳保持 \textbf{\texttt{100.00\%}}——一个参数量不足 6 万的纯手写迷你 GPT，彻底掌握了任意未见 6 位数序列的独立逐词倒序生成！
 \end{itemize}
 
 \begin{figure}[htbp]

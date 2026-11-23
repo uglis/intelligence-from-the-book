@@ -381,7 +381,7 @@ $64$（全微调） & $4096$ & $100.00\%$ & $0.00000$ & 完整拟合全部 4096 
     \node[font=\tiny\sffamily, color=tealDark, anchor=south east] at (axis cs:62, 0.25) {$0.000$};
   \end{axis}
 \end{tikzpicture}
-\caption{基于 \texttt{data/lora\_rank.csv} 绘制的 LoRA 秩扫描测试误差曲线。横轴括号内标出了各秩对应的可训练参数占比；一旦适配器秩触及任务偏移的内在秩 $r = 4$，泛化误差立刻坠落两个数量级。}
+\caption{基于 \texttt{data/lora\_rank.csv} 绘制的 LoRA 秩扫描测试误差曲线（受控合成设定：预先构造了主秩为 $4$ 的低秩任务偏移 $U_t V_t$ 叠加微弱全秩扰动，旨在直观展示当任务偏移近似低秩时 LoRA 为何奏效；真实大模型下游任务的内在有效秩则需视具体领域而定）。横轴括号内标出了各秩对应的可训练参数占比；一旦适配器秩触及内在秩 $r = 4$，泛化误差立刻坠落两个数量级。}
 \label{fig:lora-rank-exp}
 \end{figure}
 
